@@ -2,3 +2,6 @@
 pixi.lock
 .pixi/*
 !.pixi/config.toml
+data/
+__pycache__/
+plots/
