@@ -29,13 +29,10 @@ def main(testing):
     # Stats from training only
     stats = pmssm.compute_stats(X, Y, idx_train)
 
-    # Datasets - testimg
+    # Datasets
     n_samples = 30 if testing else None
     train_dataset = pmssm.PMSSMDataset(X, Y, idx_train, stats, n_samples=n_samples)
     val_dataset   = pmssm.PMSSMDataset(X, Y, idx_val, stats, n_samples=n_samples)
-    # datasets - full
-    # train_dataset = pmssm.PMSSMDataset(X, Y, idx_train, stats)
-    # val_dataset   = pmssm.PMSSMDataset(X, Y, idx_val, stats)
 
     train_loader = DataLoader(
         train_dataset, batch_size=256, shuffle=True
@@ -61,47 +58,22 @@ def main(testing):
         optimizer,
         criterion,
         device=device,
-        epochs=5_000,
+        epochs=2_000,
         early_stopping=False
     )
 
     pmssm.plot_losses(train_losses, val_losses, model)
 
     # compare training points
-    pmssm.compare_random_predictions(
-        model,
-        stats=stats,
-        subset=train_dataset,
-        mode='train',
-        device=device,
-        n_points=10,
-    )
-
+    pmssm.compare_random_predictions(model, stats=stats, subset=train_dataset, mode='train', device=device, n_points=10)
     # compare validation points:
-    pmssm.compare_random_predictions(
-        model,
-        stats=stats,
-        subset=val_dataset,
-        mode='validation',
-        device=device,
-        n_points=3,
-    )
+    pmssm.compare_random_predictions(model, stats=stats, subset=val_dataset, mode='validation', device=device, n_points=3)
 
-    pmssm.scatter_true_vs_pred(
-        model,
-        stats=stats,
-        subset=train_dataset,
-        mode='train',
-        device=device
-    )
-
-    pmssm.scatter_true_vs_pred(
-        model,
-        stats=stats,
-        subset=val_dataset,
-        mode='validation',
-        device=device
-    )
+    pmssm.scatter_true_vs_pred(model, stats=stats, subset=train_dataset, mode='train', device=device)
+    pmssm.scatter_true_vs_pred(model, stats=stats, subset=val_dataset, mode='validation', device=device)
+    
+    pmssm.hist_true_vs_pred(model, stats=stats, subset=train_dataset, mode='train', device=device)
+    pmssm.hist_true_vs_pred(model, stats=stats, subset=val_dataset, mode='validation', device=device)
 
     # train MLP
     model = pmssm.PMSSMFeedForward(
@@ -126,41 +98,17 @@ def main(testing):
 
     pmssm.plot_losses(train_losses, val_losses, model)
 
-    # compare training points
-    pmssm.compare_random_predictions(
-        model,
-        stats=stats,
-        subset=train_dataset,
-        mode='train',
-        device=device,
-        n_points=10,
-    )
-
-    # compare validation points:
-    pmssm.compare_random_predictions(
-        model,
-        stats=stats,
-        subset=val_dataset,
-        mode='validation',
-        device=device,
-        n_points=3,
-    )
-
-    pmssm.scatter_true_vs_pred(
-        model,
-        stats=stats,
-        subset=train_dataset,
-        mode='train',
-        device=device
-    )
-
-    pmssm.scatter_true_vs_pred(
-        model,
-        stats=stats,
-        subset=val_dataset,
-        mode='validation',
-        device=device
-    )
+    # compare random training & validation points points
+    pmssm.compare_random_predictions(model, stats=stats, subset=train_dataset, mode='train', device=device, n_points=10)
+    pmssm.compare_random_predictions(model, stats=stats, subset=val_dataset, mode='validation', device=device, n_points=3)
+    
+    # scatterplot for training & validation sample
+    pmssm.scatter_true_vs_pred(model, stats=stats, subset=train_dataset, mode='train', device=device)
+    pmssm.scatter_true_vs_pred(model, stats=stats, subset=val_dataset, mode='validation', device=device)
+    
+    # 2D hists for training & validation samples
+    pmssm.hist_true_vs_pred(model, stats=stats, subset=train_dataset, mode='train', device=device)
+    pmssm.hist_true_vs_pred(model, stats=stats, subset=val_dataset, mode='validation', device=device)
     
 if __name__ == "__main__":
     main()

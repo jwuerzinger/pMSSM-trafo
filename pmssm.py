@@ -360,7 +360,7 @@ def compare_random_predictions(model, stats, subset, mode='validation', device="
     indices = random.sample(range(len(subset)), n_points)
 
     print("-" * 90)
-    print(f"{'Index':>6} | {'True Ωh (norm.)²':>20} | {'Predicted Ωh (norm.)²':>23} | {'True Ωh²':>12} | {'Predicted Ωh²':>15}")
+    print(f"{'Index':>6} | {'True Ωh² (norm.)':>20} | {'Predicted Ωh² (norm.)':>23} | {'True Ωh²':>12} | {'Predicted Ωh²':>15}")
     print("-" * 90)
 
     with torch.no_grad():
@@ -430,7 +430,7 @@ def scatter_true_vs_pred(
 
     # --- plot ---
     plt.figure()
-    plt.scatter(y_true_all, y_pred_all, alpha=0.5, color = 'orange' if mode == 'validation' else None)
+    plt.scatter(y_true_all[:10_000], y_pred_all[:10_000], alpha=0.5, color = 'orange' if mode == 'validation' else None)
     plt.plot(
         [min(y_true_all), max(y_true_all)],
         [min(y_true_all), max(y_true_all)],
@@ -445,6 +445,76 @@ def scatter_true_vs_pred(
     modelname = "transformer" if is_transformer(model) else "MLP"
     if not running_in_notebook(): plt.savefig(f"plots/{modelname}_true_vs_pred_{mode}.png")
     else: plt.show()
+
+def hist_true_vs_pred(
+    model,
+    stats,
+    subset,
+    mode="validation",
+    device="cpu",
+    denormalize=True,
+):
+    model.eval()
+    model.to(device)
+
+    if mode == "validation":
+        title = "Validation set"
+    elif mode == "train":
+        title = "Training set"
+    else:
+        raise ValueError("Unsupported mode! Should be validation or train.")
+
+    y_true_all = []
+    y_pred_all = []
+
+    with torch.no_grad():
+        for x, y_true in subset:
+            x = x.unsqueeze(0).to(device)
+            y_pred = model(x).cpu().item()
+
+            if denormalize:
+                mean_X, std_X, mean_Y, std_Y = stats
+                y_true_val = (y_true * std_Y + mean_Y).item()
+                y_pred_val = y_pred * std_Y + mean_Y
+            else:
+                y_true_val = y_true.item()
+                y_pred_val = y_pred
+
+            y_true_all.append(y_true_val)
+            y_pred_all.append(y_pred_val)
+
+    # --------------------------------------------------
+    # 2D histogram
+    # --------------------------------------------------
+
+    y_true_arr = np.asarray(y_true_all, dtype=np.float64).reshape(-1)
+    y_pred_arr = np.asarray(y_pred_all, dtype=np.float64).reshape(-1)
+
+    plt.figure()
+    plt.hist2d(
+        y_true_arr,
+        y_pred_arr,
+        bins=30,
+        cmap="inferno",
+    )
+    plt.colorbar(label="Counts")
+
+    # y = x reference line
+    vmin = min(y_true_arr.min(), y_pred_arr.min())
+    vmax = max(y_true_arr.max(), y_pred_arr.max())
+    plt.plot([vmin, vmax], [vmin, vmax], linestyle="--", color="white")
+
+    plt.xlabel("True Ωh²")
+    plt.ylabel("Predicted Ωh²")
+    modelname = "transformer" if is_transformer(model) else "MLP"
+    plt.title(f"True vs Predicted Ωh² ({modelname} {title})")
+    plt.tight_layout()
+
+    if not running_in_notebook():
+        plt.savefig(f"plots/{modelname}_hist_true_vs_pred_{mode}.png")
+    else:
+        plt.show()
+
 
 def plot_losses(train_losses, val_losses, model):
     def rolling_average(x, window=30):
