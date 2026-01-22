@@ -16,11 +16,6 @@ def running_in_notebook():
     except Exception:
         return False
 
-if running_in_notebook():
-    print("Running in Jupyter")
-else:
-    print("Running as a script")
-
 # Dummy dataset creator:
 class Dummy_PMSSMDataset(Dataset):
     def __init__(self, n_samples=10_000):
@@ -42,16 +37,16 @@ class Dummy_PMSSMDataset(Dataset):
     def __getitem__(self, idx):
         return self.x[idx], self.y[idx]
 
-def load_pmssm_data(n_datasets=-1):
+def load_pmssm_data(n_datasets=-1, logger=None):
     import uproot, glob, numpy as np, torch
 
     # Collect all ROOT files in the directory
     files = glob.glob("data/18387358/*.root")
-    print(f"Found {len(files)} ROOT files")
+    logger.info(f"Found {len(files)} ROOT files")
 
     # Open all files
     if n_datasets != -1: 
-        print(f"Only using {n_datasets} out of the {len(files)} datasets!!")
+        logger.info(f"Only using {n_datasets} out of the {len(files)} datasets!!")
         files = files[:n_datasets] # For testing only!
     trees = [uproot.open(f)["susy"] for f in files]
 
@@ -81,7 +76,7 @@ def load_pmssm_data(n_datasets=-1):
 
     return X, Y
 
-def make_split(X, train_split=0.9, seed=42):
+def make_split(X, train_split=0.9, seed=42, logger=None):
     N = len(X)
     g = torch.Generator().manual_seed(seed)
     perm = torch.randperm(N, generator=g)
@@ -90,7 +85,7 @@ def make_split(X, train_split=0.9, seed=42):
     idx_train = perm[:n_train]
     idx_val   = perm[n_train:]
 
-    print(f"Have n_train={len(idx_train)}, n_val={len(idx_val)}")
+    logger.info(f"Have n_train={len(idx_train)}, n_val={len(idx_val)}")
     return idx_train, idx_val
 
 def compute_stats(X, Y, idx_train):
@@ -334,6 +329,7 @@ def train_with_validation(
     patience=500,        # early stopping patience
     scheduler=None,      # optional learning rate scheduler
     grad_clip=None,      # optional gradient clipping max norm
+    logger=None,         # optional logger for output
 ):
     model.to(device)
 
@@ -389,14 +385,18 @@ def train_with_validation(
             scheduler.step()
 
         # Print progress (every 100 epochs or last epoch)
-        if epoch % 10 == 0 or epoch == epochs - 1:
+        if epoch % 100 == 0 or epoch == epochs - 1:
             lr = optimizer.param_groups[0]['lr']
-            print(
+            msg = (
                 f"Epoch {epoch:03d} | "
                 f"Train MSE = {train_loss:.6f} | "
                 f"Val MSE = {val_loss:.6f} | "
                 f"LR = {lr:.6e}"
             )
+            if logger:
+                logger.info(msg)
+            else:
+                print(msg)
 
         if early_stopping:
             # ---- Early Stopping Check ----
@@ -407,7 +407,11 @@ def train_with_validation(
             else:
                 counter += 1
                 if counter >= patience:
-                    print(f"Early stopping triggered at epoch {epoch}")
+                    msg = f"Early stopping triggered at epoch {epoch}"
+                    if logger:
+                        logger.info(msg)
+                    else:
+                        print(msg)
                     break
 
     # ---- Load best weights before returning ----
@@ -416,22 +420,24 @@ def train_with_validation(
 
     return train_losses, val_losses
 
-def compare_random_predictions(model, stats, subset, mode='validation', device="cpu", n_points=3):
+def compare_random_predictions(model, stats, subset, mode='validation', device="cpu", n_points=3, logger=None):
     model.eval()
     model.to(device)
 
     if mode == 'validation':
-        print("\nComparison on random validation points:")
+        logger.info("")
+        logger.info("Comparison on random validation points:")
     elif mode == 'train':
-        print("\nComparison on random training points:")
+        logger.info("")
+        logger.info("Comparison on random training points:")
     else: raise ValueError("Unsupported mode! Should be validation, train.")
         
     # print(len(dataset), n_points)
     indices = random.sample(range(len(subset)), n_points)
 
-    print("-" * 90)
-    print(f"{'Index':>6} | {'True Ωh² (norm.)':>20} | {'Predicted Ωh² (norm.)':>23} | {'True Ωh²':>12} | {'Predicted Ωh²':>15}")
-    print("-" * 90)
+    logger.info("-" * 90)
+    logger.info(f"{'Index':>6} | {'True Ωh² (norm.)':>20} | {'Predicted Ωh² (norm.)':>23} | {'True Ωh²':>12} | {'Predicted Ωh²':>15}")
+    logger.info("-" * 90)
 
     with torch.no_grad():
         for idx in indices:
@@ -445,7 +451,7 @@ def compare_random_predictions(model, stats, subset, mode='validation', device="
             y_true_nonorm = y_true * std_Y + mean_Y
             y_pred_nonorm = y_pred * std_Y + mean_Y
 
-            print(
+            logger.info(
                 f"{idx:6d} | "
                 f"{y_true.item():20.6f} | "
                 f"{y_pred:23.6f} | "
@@ -453,7 +459,7 @@ def compare_random_predictions(model, stats, subset, mode='validation', device="
                 f"{y_pred_nonorm.item():15.6f}"
             )
 
-    print("-" * 90)
+    logger.info("-" * 90)
 
 def is_transformer(model: nn.Module) -> bool:
     return any(

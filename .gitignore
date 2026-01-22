@@ -5,3 +5,4 @@ pixi.lock
 data/
 __pycache__/
 plots/
+logs/
