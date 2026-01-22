@@ -123,50 +123,6 @@ class PMSSMDataset(Dataset):
     def __getitem__(self, idx):
         return self.x[idx], self.y[idx]
 
-# class PMSSMTransformer(nn.Module):
-#     def __init__(
-#         self,
-#         n_params=19,
-#         d_model=64,
-#         nhead=8,
-#         num_layers=4,
-#         dim_feedforward=256,
-#         # dropout=0.1,
-#         dropout = 0.0,
-#     ):
-#         super().__init__()
-
-#         # Embed each scalar parameter
-#         self.input_embed = nn.Linear(1, d_model)
-
-#         encoder_layer = nn.TransformerEncoderLayer(
-#             d_model=d_model,
-#             nhead=nhead,
-#             dim_feedforward=dim_feedforward,
-#             dropout=dropout,
-#             batch_first=True,
-#         )
-#         self.encoder = nn.TransformerEncoder(
-#             encoder_layer, num_layers=num_layers
-#         )
-
-#         self.regressor = nn.Sequential(
-#             nn.LayerNorm(d_model),
-#             nn.Linear(d_model, 1),
-#         )
-
-#     def forward(self, x):
-#         # x: (batch, 19)
-#         x = x.unsqueeze(-1)               # (batch, 19, 1)
-#         x = self.input_embed(x)           # (batch, 19, d_model)
-
-#         x = self.encoder(x)               # (batch, 19, d_model)
-
-#         x = x.mean(dim=1)                 # pool over parameters
-#         y = self.regressor(x)             # (batch, 1)
-
-#         return y
-
 class PMSSMTransformer(nn.Module):
     """
     Improved transformer with positional encoding to preserve feature order.
@@ -181,33 +137,54 @@ class PMSSMTransformer(nn.Module):
         nhead=8,
         num_layers=4,
         dim_feedforward=256,
-        dropout=0.1,
+        dropout=0.0,  # Changed default to 0.0 for small datasets
+        use_prenorm=True,  # Pre-normalization for better gradient flow
     ):
         super().__init__()
 
-        # Embed each scalar parameter
-        self.input_embed = nn.Linear(1, d_model)
+        # Embed each scalar parameter with larger capacity
+        self.input_embed = nn.Sequential(
+            nn.Linear(1, d_model),
+            nn.LayerNorm(d_model),
+            nn.ReLU(),
+        )
 
         # Learnable positional encoding for each feature
-        self.pos_encoding = nn.Parameter(torch.randn(1, n_params, d_model))
+        self.pos_encoding = nn.Parameter(torch.randn(1, n_params, d_model) * 0.02)
 
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=d_model,
-            nhead=nhead,
-            dim_feedforward=dim_feedforward,
-            dropout=dropout,
-            batch_first=True,
-        )
+        # Use Pre-LN transformer for better gradient flow
+        if use_prenorm:
+            encoder_layer = nn.TransformerEncoderLayer(
+                d_model=d_model,
+                nhead=nhead,
+                dim_feedforward=dim_feedforward,
+                dropout=dropout,
+                batch_first=True,
+                norm_first=True,  # Pre-normalization
+            )
+        else:
+            encoder_layer = nn.TransformerEncoderLayer(
+                d_model=d_model,
+                nhead=nhead,
+                dim_feedforward=dim_feedforward,
+                dropout=dropout,
+                batch_first=True,
+            )
         self.encoder = nn.TransformerEncoder(
             encoder_layer, num_layers=num_layers
         )
 
         # Use CLS token instead of mean pooling
-        self.cls_token = nn.Parameter(torch.randn(1, 1, d_model))
+        self.cls_token = nn.Parameter(torch.randn(1, 1, d_model) * 0.02)
 
+        # Deeper regression head with skip connection
         self.regressor = nn.Sequential(
             nn.LayerNorm(d_model),
-            nn.Linear(d_model, 1),
+            nn.Linear(d_model, dim_feedforward),
+            nn.ReLU(),
+            nn.Linear(dim_feedforward, dim_feedforward // 2),
+            nn.ReLU(),
+            nn.Linear(dim_feedforward // 2, 1),
         )
 
     def forward(self, x):
@@ -230,6 +207,84 @@ class PMSSMTransformer(nn.Module):
         x = x[:, 0]                       # (batch, d_model)
         y = self.regressor(x)             # (batch, 1)
         return y
+
+class PMSSMTransformerTabular(nn.Module):
+    """
+    Transformer designed specifically for tabular data.
+    Instead of treating features as sequence tokens, this uses
+    multi-head attention to learn feature interactions directly.
+    """
+    def __init__(
+        self,
+        n_params=19,
+        d_model=128,
+        nhead=4,
+        num_layers=3,
+        dim_feedforward=512,
+        dropout=0.0,
+    ):
+        super().__init__()
+
+        # Individual feature embeddings (each feature gets its own embedding)
+        self.feature_embeddings = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(1, d_model),
+                nn.LayerNorm(d_model),
+            ) for _ in range(n_params)
+        ])
+
+        # Transformer blocks
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=nhead,
+            dim_feedforward=dim_feedforward,
+            dropout=dropout,
+            batch_first=True,
+            norm_first=True,
+        )
+        self.encoder = nn.TransformerEncoder(
+            encoder_layer, num_layers=num_layers
+        )
+
+        # Attention pooling instead of CLS token
+        self.attention_pool = nn.Sequential(
+            nn.Linear(d_model, 1),
+            nn.Softmax(dim=1),
+        )
+
+        # Regression head
+        self.regressor = nn.Sequential(
+            nn.Linear(d_model, dim_feedforward),
+            nn.LayerNorm(dim_feedforward),
+            nn.ReLU(),
+            nn.Linear(dim_feedforward, dim_feedforward // 2),
+            nn.ReLU(),
+            nn.Linear(dim_feedforward // 2, 1),
+        )
+
+    def forward(self, x):
+        # x: (batch, 19)
+        batch_size = x.shape[0]
+
+        # Embed each feature separately
+        embedded = []
+        for i, emb in enumerate(self.feature_embeddings):
+            feat = x[:, i:i+1].unsqueeze(-1)  # (batch, 1, 1)
+            embedded.append(emb(feat))  # (batch, 1, d_model)
+
+        x = torch.cat(embedded, dim=1)  # (batch, 19, d_model)
+
+        # Apply transformer
+        x = self.encoder(x)  # (batch, 19, d_model)
+
+        # Attention pooling
+        attn_weights = self.attention_pool(x)  # (batch, 19, 1)
+        x = (x * attn_weights).sum(dim=1)  # (batch, d_model)
+
+        # Regress
+        y = self.regressor(x)  # (batch, 1)
+        return y
+
 
 class PMSSMFeedForward(nn.Module):
     def __init__(
@@ -277,6 +332,8 @@ def train_with_validation(
     epochs=30,
     early_stopping=True,
     patience=500,        # early stopping patience
+    scheduler=None,      # optional learning rate scheduler
+    grad_clip=None,      # optional gradient clipping max norm
 ):
     model.to(device)
 
@@ -300,6 +357,11 @@ def train_with_validation(
             y_pred = model(x)
             loss = criterion(y_pred, y)
             loss.backward()
+
+            # Gradient clipping if specified
+            if grad_clip is not None:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
+
             optimizer.step()
 
             train_loss += loss.item() * x.size(0)
@@ -322,11 +384,19 @@ def train_with_validation(
         val_loss /= len(val_loader.dataset)
         val_losses.append(val_loss)
 
-        print(
-            f"Epoch {epoch:03d} | "
-            f"Train MSE = {train_loss:.6f} | "
-            f"Val MSE = {val_loss:.6f}"
-        )
+        # Step the scheduler if provided
+        if scheduler is not None:
+            scheduler.step()
+
+        # Print progress (every 100 epochs or last epoch)
+        if epoch % 10 == 0 or epoch == epochs - 1:
+            lr = optimizer.param_groups[0]['lr']
+            print(
+                f"Epoch {epoch:03d} | "
+                f"Train MSE = {train_loss:.6f} | "
+                f"Val MSE = {val_loss:.6f} | "
+                f"LR = {lr:.6e}"
+            )
 
         if early_stopping:
             # ---- Early Stopping Check ----
@@ -391,6 +461,19 @@ def is_transformer(model: nn.Module) -> bool:
         for m in model.modules()
     )
 
+def get_model_name(model: nn.Module) -> str:
+    """Get a clean name for the model for use in plot filenames."""
+    class_name = model.__class__.__name__
+    if class_name == "PMSSMTransformer":
+        return "transformer"
+    elif class_name == "PMSSMTransformerTabular":
+        return "transformer_tabular"
+    elif class_name == "PMSSMFeedForward":
+        return "MLP"
+    else:
+        # Fallback for unknown models
+        return "transformer" if is_transformer(model) else "MLP"
+
 def scatter_true_vs_pred(
     model,
     stats,
@@ -442,7 +525,7 @@ def scatter_true_vs_pred(
     plt.title(f"True vs Predicted Ωh² ({title})")
     plt.tight_layout()
     # plt.show()
-    modelname = "transformer" if is_transformer(model) else "MLP"
+    modelname = get_model_name(model)
     if not running_in_notebook(): plt.savefig(f"plots/{modelname}_true_vs_pred_{mode}.png")
     else: plt.show()
 
@@ -506,7 +589,7 @@ def hist_true_vs_pred(
 
     plt.xlabel("True Ωh²")
     plt.ylabel("Predicted Ωh²")
-    modelname = "transformer" if is_transformer(model) else "MLP"
+    modelname = get_model_name(model)
     plt.title(f"True vs Predicted Ωh² ({modelname} {title})")
     plt.tight_layout()
 
@@ -527,7 +610,7 @@ def plot_losses(train_losses, val_losses, model):
     plt.xlabel("Epoch")
     plt.ylabel("Mean Squared Error")
     plt.legend()
-    modelname = "transformer" if is_transformer(model) else "MLP"
+    modelname = get_model_name(model)
     plt.title(f"{modelname} Training for pMSSM Relic Density")
     plt.yscale('log')
 
