@@ -5,6 +5,7 @@ import torch.nn as nn
 from torch.utils.data import Dataset
 
 import matplotlib.pyplot as plt
+from matplotlib.colors import LogNorm
 
 def running_in_notebook():
     try:
@@ -37,7 +38,7 @@ class Dummy_PMSSMDataset(Dataset):
     def __getitem__(self, idx):
         return self.x[idx], self.y[idx]
 
-def load_pmssm_data(n_datasets=-1, logger=None):
+def load_pmssm_data(n_datasets=-1, logger=None, plot_dir="plots"):
     import uproot, glob, numpy as np, torch
 
     # Collect all ROOT files in the directory
@@ -66,7 +67,7 @@ def load_pmssm_data(n_datasets=-1, logger=None):
 
     Y = np.concatenate([t["MO_Omega"].array(library="np") for t in trees])
     plt.hist(Y, bins=20, range=[0.0, 1.0])
-    if not running_in_notebook(): plt.savefig('plots/hist_dataset.png')
+    if not running_in_notebook(): plt.savefig(f"{plot_dir}/hist_dataset.png")
     else: plt.show()
 
     # pruning
@@ -385,7 +386,8 @@ def train_with_validation(
             scheduler.step()
 
         # Print progress (every 100 epochs or last epoch)
-        if epoch % 100 == 0 or epoch == epochs - 1:
+        # if epoch % 100 == 0 or epoch == epochs - 1:
+        if True:
             lr = optimizer.param_groups[0]['lr']
             msg = (
                 f"Epoch {epoch:03d} | "
@@ -487,6 +489,7 @@ def scatter_true_vs_pred(
     mode="validation",
     device="cpu",
     denormalize=True,
+    plot_dir="plots",
 ):
     model.eval()
     model.to(device)
@@ -532,7 +535,7 @@ def scatter_true_vs_pred(
     plt.tight_layout()
     # plt.show()
     modelname = get_model_name(model)
-    if not running_in_notebook(): plt.savefig(f"plots/{modelname}_true_vs_pred_{mode}.png")
+    if not running_in_notebook(): plt.savefig(f"{plot_dir}/{modelname}_true_vs_pred_{mode}.png")
     else: plt.show()
 
 def hist_true_vs_pred(
@@ -542,6 +545,7 @@ def hist_true_vs_pred(
     mode="validation",
     device="cpu",
     denormalize=True,
+    plot_dir="plots",
 ):
     model.eval()
     model.to(device)
@@ -585,8 +589,9 @@ def hist_true_vs_pred(
         y_pred_arr,
         bins=30,
         cmap="inferno",
+        norm=LogNorm(),
     )
-    plt.colorbar(label="Counts")
+    plt.colorbar(label="Counts (log scale)")
 
     # y = x reference line
     vmin = min(y_true_arr.min(), y_pred_arr.min())
@@ -600,16 +605,16 @@ def hist_true_vs_pred(
     plt.tight_layout()
 
     if not running_in_notebook():
-        plt.savefig(f"plots/{modelname}_hist_true_vs_pred_{mode}.png")
+        plt.savefig(f"{plot_dir}/{modelname}_hist_true_vs_pred_{mode}.png")
     else:
         plt.show()
 
 
-def plot_losses(train_losses, val_losses, model):
+def plot_losses(train_losses, val_losses, model, plot_dir="plots"):
     def rolling_average(x, window=30):
         x = np.asarray(x)
         return np.convolve(x, np.ones(window) / window, mode="valid")
-    
+
     plt.figure()
     plt.plot(rolling_average(train_losses), label="Train MSE")
     plt.plot(rolling_average(val_losses), label="Validation MSE")
@@ -620,5 +625,5 @@ def plot_losses(train_losses, val_losses, model):
     plt.title(f"{modelname} Training for pMSSM Relic Density")
     plt.yscale('log')
 
-    if not running_in_notebook(): plt.savefig(f"plots/losses_{modelname}.png")
+    if not running_in_notebook(): plt.savefig(f"{plot_dir}/losses_{modelname}.png")
     else: plt.show()

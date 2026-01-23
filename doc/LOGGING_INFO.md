@@ -36,24 +36,24 @@ pip install structlog
 The output is now in clean, human-readable format:
 
 ```
-2026-01-22T15:30:00.123456Z [info     ] ============================================================
-2026-01-22T15:30:00.123500Z [info     ] Training started at 2026-01-22 15:30:00
-2026-01-22T15:30:00.123550Z [info     ] Log file: logs/training_20260122_153000.log
-2026-01-22T15:30:00.123600Z [info     ] ============================================================
-2026-01-22T15:30:01.234567Z [info     ] Set device to: cuda
-2026-01-22T15:30:01.234600Z [info     ] Using GPU: NVIDIA H100
-2026-01-22T15:30:02.345678Z [info     ] Loading data: n_datasets=-1, n_samples=all
-2026-01-22T15:30:10.456789Z [info     ]
+2026-01-22 15:30:00 [info     ] ============================================================
+2026-01-22 15:30:00 [info     ] Training started at 2026-01-22 15:30:00
+2026-01-22 15:30:00 [info     ] Log file: logs/training_20260122_153000.log
+2026-01-22 15:30:00 [info     ] ============================================================
+2026-01-22 15:30:01 [info     ] Set device to: cuda
+2026-01-22 15:30:01 [info     ] Using GPU: NVIDIA H100
+2026-01-22 15:30:02 [info     ] Loading data: n_datasets=-1, n_samples=all
+2026-01-22 15:30:10 [info     ]
 ============================================================
-2026-01-22T15:30:10.456800Z [info     ] Training Improved PMSSMTransformer
-2026-01-22T15:30:10.456850Z [info     ] ============================================================
-2026-01-22T15:31:00.567890Z [info     ] Epoch 000 | Train MSE = 0.245123 | Val MSE = 0.251234 | LR = 3.000000e-04
-2026-01-22T15:35:00.678901Z [info     ] Epoch 100 | Train MSE = 0.123456 | Val MSE = 0.129876 | LR = 2.987654e-04
+2026-01-22 15:30:10 [info     ] Training Improved PMSSMTransformer
+2026-01-22 15:30:10 [info     ] ============================================================
+2026-01-22 15:31:00 [info     ] Epoch 000 | Train MSE = 0.245123 | Val MSE = 0.251234 | LR = 3.000000e-04
+2026-01-22 15:35:00 [info     ] Epoch 100 | Train MSE = 0.123456 | Val MSE = 0.129876 | LR = 2.987654e-04
 ...
 ```
 
 Each log entry includes:
-- **Timestamp** (ISO format)
+- **Timestamp** (YYYY-MM-DD HH:MM:SS format)
 - **Log level** (`[info]`, `[error]`, etc.)
 - **Message content**
 

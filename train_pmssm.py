@@ -21,10 +21,9 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 
 
-def setup_logging():
+def setup_logging(timestamp):
     """Set up structlog to write to both file and console."""
     Path("logs/").mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_file = f"logs/training_{timestamp}.log"
 
     # Configure standard library logging to write to file and console
@@ -41,7 +40,7 @@ def setup_logging():
     structlog.configure(
         processors=[
             structlog.stdlib.add_log_level,
-            structlog.processors.TimeStamper(fmt="iso"),
+            structlog.processors.TimeStamper(fmt="%Y-%m-%d %H:%M:%S"),
             structlog.processors.StackInfoRenderer(),
             structlog.processors.format_exc_info,
             structlog.processors.UnicodeDecoder(),
@@ -69,9 +68,13 @@ def setup_logging():
 @click.option('--n-datasets', default=None, type=int, help="Number of datasets to load (-1 for all, overrides --testing).")
 @click.option('--n-samples', default=None, type=int, help="Number of samples per dataset (None for all, overrides --testing).")
 def main(testing, epochs, n_datasets, n_samples):
-    # Create directories and set up logging
-    Path("plots/").mkdir(parents=True, exist_ok=True)
-    log_file, logger = setup_logging()
+    # Create timestamped directories for logs and plots
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file, logger = setup_logging(timestamp)
+
+    # Create plot directory with same timestamp as log file
+    plots_dir = Path(f"plots/run_{timestamp}")
+    plots_dir.mkdir(parents=True, exist_ok=True)
 
     if pmssm.running_in_notebook():
         logger.info("Running in Jupyter")
@@ -81,6 +84,7 @@ def main(testing, epochs, n_datasets, n_samples):
     logger.info("="*60)
     logger.info(f"Training started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     logger.info(f"Log file: {log_file}")
+    logger.info(f"Plots directory: {plots_dir}")
     logger.info("="*60)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -98,7 +102,7 @@ def main(testing, epochs, n_datasets, n_samples):
     logger.info(f"Loading data: n_datasets={n_datasets}, n_samples={n_samples if n_samples else 'all'}")
 
     # Load once
-    X, Y = pmssm.load_pmssm_data(n_datasets=n_datasets, logger=logger)
+    X, Y = pmssm.load_pmssm_data(n_datasets=n_datasets, logger=logger, plot_dir=plots_dir)
 
     # Split once
     idx_train, idx_val = pmssm.make_split(X, logger=logger)
@@ -152,18 +156,18 @@ def main(testing, epochs, n_datasets, n_samples):
         logger=logger,
     )
 
-    pmssm.plot_losses(train_losses, val_losses, model)
+    pmssm.plot_losses(train_losses, val_losses, model, plot_dir=plots_dir)
 
     # compare training points
     pmssm.compare_random_predictions(model, stats=stats, subset=train_dataset, mode='train', device=device, n_points=10, logger=logger)
     # compare validation points:
     pmssm.compare_random_predictions(model, stats=stats, subset=val_dataset, mode='validation', device=device, n_points=3, logger=logger)
 
-    pmssm.scatter_true_vs_pred(model, stats=stats, subset=train_dataset, mode='train', device=device)
-    pmssm.scatter_true_vs_pred(model, stats=stats, subset=val_dataset, mode='validation', device=device)
+    pmssm.scatter_true_vs_pred(model, stats=stats, subset=train_dataset, mode='train', device=device, plot_dir=plots_dir)
+    pmssm.scatter_true_vs_pred(model, stats=stats, subset=val_dataset, mode='validation', device=device, plot_dir=plots_dir)
 
-    pmssm.hist_true_vs_pred(model, stats=stats, subset=train_dataset, mode='train', device=device)
-    pmssm.hist_true_vs_pred(model, stats=stats, subset=val_dataset, mode='validation', device=device)
+    pmssm.hist_true_vs_pred(model, stats=stats, subset=train_dataset, mode='train', device=device, plot_dir=plots_dir)
+    pmssm.hist_true_vs_pred(model, stats=stats, subset=val_dataset, mode='validation', device=device, plot_dir=plots_dir)
 
     # ========================================
     # Test 2: PMSSMTransformerTabular
@@ -199,18 +203,18 @@ def main(testing, epochs, n_datasets, n_samples):
         logger=logger,
     )
 
-    pmssm.plot_losses(train_losses, val_losses, model)
+    pmssm.plot_losses(train_losses, val_losses, model, plot_dir=plots_dir)
 
     # compare training points
     pmssm.compare_random_predictions(model, stats=stats, subset=train_dataset, mode='train', device=device, n_points=10, logger=logger)
     # compare validation points:
     pmssm.compare_random_predictions(model, stats=stats, subset=val_dataset, mode='validation', device=device, n_points=3, logger=logger)
 
-    pmssm.scatter_true_vs_pred(model, stats=stats, subset=train_dataset, mode='train', device=device)
-    pmssm.scatter_true_vs_pred(model, stats=stats, subset=val_dataset, mode='validation', device=device)
+    pmssm.scatter_true_vs_pred(model, stats=stats, subset=train_dataset, mode='train', device=device, plot_dir=plots_dir)
+    pmssm.scatter_true_vs_pred(model, stats=stats, subset=val_dataset, mode='validation', device=device, plot_dir=plots_dir)
 
-    pmssm.hist_true_vs_pred(model, stats=stats, subset=train_dataset, mode='train', device=device)
-    pmssm.hist_true_vs_pred(model, stats=stats, subset=val_dataset, mode='validation', device=device)
+    pmssm.hist_true_vs_pred(model, stats=stats, subset=train_dataset, mode='train', device=device, plot_dir=plots_dir)
+    pmssm.hist_true_vs_pred(model, stats=stats, subset=val_dataset, mode='validation', device=device, plot_dir=plots_dir)
 
     # ========================================
     # Test 3: MLP Baseline
@@ -242,26 +246,26 @@ def main(testing, epochs, n_datasets, n_samples):
         logger=logger,
     )
 
-    pmssm.plot_losses(train_losses, val_losses, model)
+    pmssm.plot_losses(train_losses, val_losses, model, plot_dir=plots_dir)
 
     # compare random training & validation points points
     pmssm.compare_random_predictions(model, stats=stats, subset=train_dataset, mode='train', device=device, n_points=10, logger=logger)
     pmssm.compare_random_predictions(model, stats=stats, subset=val_dataset, mode='validation', device=device, n_points=3, logger=logger)
     
     # scatterplot for training & validation sample
-    pmssm.scatter_true_vs_pred(model, stats=stats, subset=train_dataset, mode='train', device=device)
-    pmssm.scatter_true_vs_pred(model, stats=stats, subset=val_dataset, mode='validation', device=device)
+    pmssm.scatter_true_vs_pred(model, stats=stats, subset=train_dataset, mode='train', device=device, plot_dir=plots_dir)
+    pmssm.scatter_true_vs_pred(model, stats=stats, subset=val_dataset, mode='validation', device=device, plot_dir=plots_dir)
     
     # 2D hists for training & validation samples
-    pmssm.hist_true_vs_pred(model, stats=stats, subset=train_dataset, mode='train', device=device)
-    pmssm.hist_true_vs_pred(model, stats=stats, subset=val_dataset, mode='validation', device=device)
+    pmssm.hist_true_vs_pred(model, stats=stats, subset=train_dataset, mode='train', device=device, plot_dir=plots_dir)
+    pmssm.hist_true_vs_pred(model, stats=stats, subset=val_dataset, mode='validation', device=device, plot_dir=plots_dir)
 
     # ========================================
     # Summary
     # ========================================
     logger.info("")
     logger.info("="*60)
-    logger.info("Training Complete - Check plots/ directory for results")
+    logger.info(f"Training Complete - Check {plots_dir} for results")
     logger.info("="*60)
     logger.info("")
     logger.info("Compare the validation loss curves to see which model")
