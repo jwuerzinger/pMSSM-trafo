@@ -390,7 +390,8 @@ def train_with_validation(
         if True:
             lr = optimizer.param_groups[0]['lr']
             msg = (
-                f"Epoch {epoch:03d} | "
+                f"{get_model_name(model):<20} | "
+                f"Epoch {epoch:04d} | "
                 f"Train MSE = {train_loss:.6f} | "
                 f"Val MSE = {val_loss:.6f} | "
                 f"LR = {lr:.6e}"
@@ -428,10 +429,10 @@ def compare_random_predictions(model, stats, subset, mode='validation', device="
 
     if mode == 'validation':
         logger.info("")
-        logger.info("Comparison on random validation points:")
+        logger.info(f"{get_model_name(model)}: Comparison on random validation points:")
     elif mode == 'train':
         logger.info("")
-        logger.info("Comparison on random training points:")
+        logger.info(f"{get_model_name(model)}: Comparison on random training points:")
     else: raise ValueError("Unsupported mode! Should be validation, train.")
         
     # print(len(dataset), n_points)

@@ -1,6 +1,6 @@
 import os
 # Set GPU before importing torch
-os.environ['CUDA_VISIBLE_DEVICES'] = '1'
+os.environ['CUDA_VISIBLE_DEVICES'] = '0,1,2,3'
 
 import warnings
 # Suppress nested tensor warning (expected with norm_first=True)
@@ -19,6 +19,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
+import multiprocessing as mp
 
 
 def setup_logging(timestamp):
@@ -62,12 +63,186 @@ def setup_logging(timestamp):
 
     return log_file, structlog.get_logger()
 
+
+def train_transformer(gpu_id, train_dataset, val_dataset, stats, epochs, plots_dir, log_file, early_stopping=False, patience=500):
+    """Train PMSSMTransformer on specified GPU."""
+    # Set up device
+    device = f"cuda:{gpu_id}"
+    torch.cuda.set_device(device)
+
+    # Set up logging for this process
+    _, logger = setup_logging(Path(log_file).stem.replace("training_", "transformer_"))
+
+    logger.info("="*60)
+    logger.info(f"Training PMSSMTransformer on {device}")
+    logger.info("="*60)
+
+    # Create data loaders
+    train_loader = DataLoader(train_dataset, batch_size=256, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=256, shuffle=False)
+
+    # Create model
+    model = pmssm.PMSSMTransformer(
+        d_model=128,
+        nhead=4,
+        num_layers=3,
+        dim_feedforward=512,
+        dropout=0.0,
+        use_prenorm=True,
+    )
+
+    optimizer = optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-4)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-6)
+    criterion = nn.MSELoss()
+
+    # Train
+    train_losses, val_losses = pmssm.train_with_validation(
+        model,
+        train_loader,
+        val_loader,
+        optimizer,
+        criterion,
+        device=device,
+        epochs=epochs,
+        early_stopping=early_stopping,
+        patience=patience,
+        scheduler=scheduler,
+        grad_clip=1.0,
+        logger=logger,
+    )
+
+    # Plot results
+    pmssm.plot_losses(train_losses, val_losses, model, plot_dir=plots_dir)
+    pmssm.compare_random_predictions(model, stats=stats, subset=train_dataset, mode='train', device=device, n_points=10, logger=logger)
+    pmssm.compare_random_predictions(model, stats=stats, subset=val_dataset, mode='validation', device=device, n_points=3, logger=logger)
+    pmssm.scatter_true_vs_pred(model, stats=stats, subset=train_dataset, mode='train', device=device, plot_dir=plots_dir)
+    pmssm.scatter_true_vs_pred(model, stats=stats, subset=val_dataset, mode='validation', device=device, plot_dir=plots_dir)
+    pmssm.hist_true_vs_pred(model, stats=stats, subset=train_dataset, mode='train', device=device, plot_dir=plots_dir)
+    pmssm.hist_true_vs_pred(model, stats=stats, subset=val_dataset, mode='validation', device=device, plot_dir=plots_dir)
+
+    logger.info("PMSSMTransformer training complete")
+
+
+def train_transformer_tabular(gpu_id, train_dataset, val_dataset, stats, epochs, plots_dir, log_file, early_stopping=False, patience=500):
+    """Train PMSSMTransformerTabular on specified GPU."""
+    # Set up device
+    device = f"cuda:{gpu_id}"
+    torch.cuda.set_device(device)
+
+    # Set up logging for this process
+    _, logger = setup_logging(Path(log_file).stem.replace("training_", "transformer_tabular_"))
+
+    logger.info("="*60)
+    logger.info(f"Training PMSSMTransformerTabular on {device}")
+    logger.info("="*60)
+
+    # Create data loaders
+    train_loader = DataLoader(train_dataset, batch_size=256, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=256, shuffle=False)
+
+    # Create model
+    model = pmssm.PMSSMTransformerTabular(
+        d_model=128,
+        nhead=4,
+        num_layers=3,
+        dim_feedforward=512,
+        dropout=0.0,
+    )
+
+    optimizer = optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-4)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-6)
+    criterion = nn.MSELoss()
+
+    # Train
+    train_losses, val_losses = pmssm.train_with_validation(
+        model,
+        train_loader,
+        val_loader,
+        optimizer,
+        criterion,
+        device=device,
+        epochs=epochs,
+        early_stopping=early_stopping,
+        patience=patience,
+        scheduler=scheduler,
+        grad_clip=1.0,
+        logger=logger,
+    )
+
+    # Plot results
+    pmssm.plot_losses(train_losses, val_losses, model, plot_dir=plots_dir)
+    pmssm.compare_random_predictions(model, stats=stats, subset=train_dataset, mode='train', device=device, n_points=10, logger=logger)
+    pmssm.compare_random_predictions(model, stats=stats, subset=val_dataset, mode='validation', device=device, n_points=3, logger=logger)
+    pmssm.scatter_true_vs_pred(model, stats=stats, subset=train_dataset, mode='train', device=device, plot_dir=plots_dir)
+    pmssm.scatter_true_vs_pred(model, stats=stats, subset=val_dataset, mode='validation', device=device, plot_dir=plots_dir)
+    pmssm.hist_true_vs_pred(model, stats=stats, subset=train_dataset, mode='train', device=device, plot_dir=plots_dir)
+    pmssm.hist_true_vs_pred(model, stats=stats, subset=val_dataset, mode='validation', device=device, plot_dir=plots_dir)
+
+    logger.info("PMSSMTransformerTabular training complete")
+
+
+def train_mlp(gpu_id, train_dataset, val_dataset, stats, epochs, plots_dir, log_file, early_stopping=False, patience=500):
+    """Train MLP Baseline on specified GPU."""
+    # Set up device
+    device = f"cuda:{gpu_id}"
+    torch.cuda.set_device(device)
+
+    # Set up logging for this process
+    _, logger = setup_logging(Path(log_file).stem.replace("training_", "mlp_"))
+
+    logger.info("="*60)
+    logger.info(f"Training MLP Baseline on {device}")
+    logger.info("="*60)
+
+    # Create data loaders
+    train_loader = DataLoader(train_dataset, batch_size=256, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=256, shuffle=False)
+
+    # Create model
+    model = pmssm.PMSSMFeedForward(
+        d_model=64,
+        num_layers=4,
+        dim_feedforward=256*2,
+    )
+
+    optimizer = optim.AdamW(model.parameters(), lr=1e-4, weight_decay=1e-3)
+    criterion = nn.MSELoss()
+
+    # Train
+    train_losses, val_losses = pmssm.train_with_validation(
+        model,
+        train_loader,
+        val_loader,
+        optimizer,
+        criterion,
+        device=device,
+        epochs=epochs,
+        early_stopping=early_stopping,
+        patience=patience,
+        logger=logger,
+    )
+
+    # Plot results
+    pmssm.plot_losses(train_losses, val_losses, model, plot_dir=plots_dir)
+    pmssm.compare_random_predictions(model, stats=stats, subset=train_dataset, mode='train', device=device, n_points=10, logger=logger)
+    pmssm.compare_random_predictions(model, stats=stats, subset=val_dataset, mode='validation', device=device, n_points=3, logger=logger)
+    pmssm.scatter_true_vs_pred(model, stats=stats, subset=train_dataset, mode='train', device=device, plot_dir=plots_dir)
+    pmssm.scatter_true_vs_pred(model, stats=stats, subset=val_dataset, mode='validation', device=device, plot_dir=plots_dir)
+    pmssm.hist_true_vs_pred(model, stats=stats, subset=train_dataset, mode='train', device=device, plot_dir=plots_dir)
+    pmssm.hist_true_vs_pred(model, stats=stats, subset=val_dataset, mode='validation', device=device, plot_dir=plots_dir)
+
+    logger.info("MLP Baseline training complete")
+
+
 @click.command()
 @click.option('--testing', is_flag=True, help="Run in testing mode (uses n_datasets=3, n_samples=30).")
 @click.option('--epochs', default=2_000, type=int, help="Number of training epochs (default: 2000).")
 @click.option('--n-datasets', default=None, type=int, help="Number of datasets to load (-1 for all, overrides --testing).")
 @click.option('--n-samples', default=None, type=int, help="Number of samples per dataset (None for all, overrides --testing).")
-def main(testing, epochs, n_datasets, n_samples):
+@click.option('--no-parallel', is_flag=True, help="Disable parallel training (train models sequentially even if multiple GPUs available).")
+@click.option('--early-stopping', is_flag=True, help="Enable early stopping based on validation loss.")
+@click.option('--patience', default=500, type=int, help="Early stopping patience (epochs without improvement before stopping, default: 500).")
+def main(testing, epochs, n_datasets, n_samples, no_parallel, early_stopping, patience):
     # Create timestamped directories for logs and plots
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_file, logger = setup_logging(timestamp)
@@ -88,8 +263,14 @@ def main(testing, epochs, n_datasets, n_samples):
     logger.info("="*60)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    logger.info(f"Set device to: {device}")
-    logger.info(f"Using GPU: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'N/A'}")
+    # Check GPU availability
+    if torch.cuda.is_available():
+        num_gpus = torch.cuda.device_count()
+        logger.info(f"CUDA available: {num_gpus} GPUs visible")
+        for i in range(num_gpus):
+            logger.info(f"GPU {i}: {torch.cuda.get_device_name(i)}")
+    else:
+        logger.info("CUDA not available - using CPU")
 
     # Determine n_datasets: explicit option > testing mode > full data
     if n_datasets is None:
@@ -114,151 +295,84 @@ def main(testing, epochs, n_datasets, n_samples):
     train_dataset = pmssm.PMSSMDataset(X, Y, idx_train, stats, n_samples=n_samples)
     val_dataset   = pmssm.PMSSMDataset(X, Y, idx_val, stats, n_samples=n_samples)
 
-    train_loader = DataLoader(
-        train_dataset, batch_size=256, shuffle=True
-    )
-    val_loader = DataLoader(
-        val_dataset, batch_size=256, shuffle=False
-    )
-
     # ========================================
-    # Test 1: Improved PMSSMTransformer
+    # Parallel Training of All Models
     # ========================================
     logger.info("")
     logger.info("="*60)
-    logger.info("Training Improved PMSSMTransformer")
-    logger.info("="*60)
 
-    model = pmssm.PMSSMTransformer(
-        d_model=128,
-        nhead=4,
-        num_layers=3,
-        dim_feedforward=512,
-        dropout=0.0,
-        use_prenorm=True,
-    )
+    # Determine if we can and should use parallel training
+    use_parallel = (not no_parallel and
+                    torch.cuda.is_available() and
+                    torch.cuda.device_count() >= 3)
 
-    optimizer = optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-4)
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-6)
-    criterion = nn.MSELoss()
+    if use_parallel:
+        logger.info("Starting PARALLEL training on 3 GPUs")
+        logger.info("  - PMSSMTransformer on cuda:0")
+        logger.info("  - PMSSMTransformerTabular on cuda:1")
+        logger.info("  - MLP Baseline on cuda:2")
+        logger.info("="*60)
 
-    train_losses, val_losses = pmssm.train_with_validation(
-        model,
-        train_loader,
-        val_loader,
-        optimizer,
-        criterion,
-        device=device,
-        epochs=epochs,
-        early_stopping=False,
-        scheduler=scheduler,
-        grad_clip=1.0,
-        logger=logger,
-    )
+        # Start all three training processes in parallel
+        mp.set_start_method('spawn', force=True)
 
-    pmssm.plot_losses(train_losses, val_losses, model, plot_dir=plots_dir)
+        process1 = mp.Process(
+            target=train_transformer,
+            args=(0, train_dataset, val_dataset, stats, epochs, plots_dir, log_file, early_stopping, patience)
+        )
+        process2 = mp.Process(
+            target=train_transformer_tabular,
+            args=(1, train_dataset, val_dataset, stats, epochs, plots_dir, log_file, early_stopping, patience)
+        )
+        process3 = mp.Process(
+            target=train_mlp,
+            args=(2, train_dataset, val_dataset, stats, epochs, plots_dir, log_file, early_stopping, patience)
+        )
 
-    # compare training points
-    pmssm.compare_random_predictions(model, stats=stats, subset=train_dataset, mode='train', device=device, n_points=10, logger=logger)
-    # compare validation points:
-    pmssm.compare_random_predictions(model, stats=stats, subset=val_dataset, mode='validation', device=device, n_points=3, logger=logger)
+        process1.start()
+        process2.start()
+        process3.start()
 
-    pmssm.scatter_true_vs_pred(model, stats=stats, subset=train_dataset, mode='train', device=device, plot_dir=plots_dir)
-    pmssm.scatter_true_vs_pred(model, stats=stats, subset=val_dataset, mode='validation', device=device, plot_dir=plots_dir)
+        # Wait for all three to complete
+        process1.join()
+        process2.join()
+        process3.join()
 
-    pmssm.hist_true_vs_pred(model, stats=stats, subset=train_dataset, mode='train', device=device, plot_dir=plots_dir)
-    pmssm.hist_true_vs_pred(model, stats=stats, subset=val_dataset, mode='validation', device=device, plot_dir=plots_dir)
+        logger.info("="*60)
+        logger.info("Parallel training complete!")
+        logger.info("="*60)
+    else:
+        # Sequential training
+        if no_parallel:
+            logger.info("Sequential training (--no-parallel flag set)")
+        elif not torch.cuda.is_available():
+            logger.info("Sequential training (CUDA not available)")
+        else:
+            logger.info(f"Sequential training (only {torch.cuda.device_count()} GPU(s) available, need 3 for parallel)")
+        logger.info("="*60)
 
-    # ========================================
-    # Test 2: PMSSMTransformerTabular
-    # ========================================
-    logger.info("")
-    logger.info("="*60)
-    logger.info("Training PMSSMTransformerTabular (Tabular-Specific)")
-    logger.info("="*60)
+        # Determine device for sequential training
+        if torch.cuda.is_available():
+            device_seq = "cuda:0"
+            logger.info(f"Using {device_seq} for sequential training")
+        else:
+            device_seq = "cpu"
+            logger.info("Using CPU for sequential training")
 
-    model = pmssm.PMSSMTransformerTabular(
-        d_model=128,
-        nhead=4,
-        num_layers=3,
-        dim_feedforward=512,
-        dropout=0.0,
-    )
+        # Train PMSSMTransformer
+        logger.info("")
+        logger.info("Training PMSSMTransformer...")
+        train_transformer(0 if torch.cuda.is_available() else "cpu", train_dataset, val_dataset, stats, epochs, plots_dir, log_file, early_stopping, patience)
 
-    optimizer = optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-4)
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-6)
-    criterion = nn.MSELoss()
+        # Train PMSSMTransformerTabular
+        logger.info("")
+        logger.info("Training PMSSMTransformerTabular...")
+        train_transformer_tabular(0 if torch.cuda.is_available() else "cpu", train_dataset, val_dataset, stats, epochs, plots_dir, log_file, early_stopping, patience)
 
-    train_losses, val_losses = pmssm.train_with_validation(
-        model,
-        train_loader,
-        val_loader,
-        optimizer,
-        criterion,
-        device=device,
-        epochs=epochs,
-        early_stopping=False,
-        scheduler=scheduler,
-        grad_clip=1.0,
-        logger=logger,
-    )
-
-    pmssm.plot_losses(train_losses, val_losses, model, plot_dir=plots_dir)
-
-    # compare training points
-    pmssm.compare_random_predictions(model, stats=stats, subset=train_dataset, mode='train', device=device, n_points=10, logger=logger)
-    # compare validation points:
-    pmssm.compare_random_predictions(model, stats=stats, subset=val_dataset, mode='validation', device=device, n_points=3, logger=logger)
-
-    pmssm.scatter_true_vs_pred(model, stats=stats, subset=train_dataset, mode='train', device=device, plot_dir=plots_dir)
-    pmssm.scatter_true_vs_pred(model, stats=stats, subset=val_dataset, mode='validation', device=device, plot_dir=plots_dir)
-
-    pmssm.hist_true_vs_pred(model, stats=stats, subset=train_dataset, mode='train', device=device, plot_dir=plots_dir)
-    pmssm.hist_true_vs_pred(model, stats=stats, subset=val_dataset, mode='validation', device=device, plot_dir=plots_dir)
-
-    # ========================================
-    # Test 3: MLP Baseline
-    # ========================================
-    logger.info("")
-    logger.info("="*60)
-    logger.info("Training MLP Baseline")
-    logger.info("="*60)
-
-    # train MLP
-    model = pmssm.PMSSMFeedForward(
-        d_model = 64,
-        num_layers = 4,
-        dim_feedforward = 256*2,
-    )
-
-    optimizer = optim.AdamW(model.parameters(), lr=1e-4, weight_decay=1e-3)
-    criterion = nn.MSELoss()
-
-    train_losses, val_losses = pmssm.train_with_validation(
-        model,
-        train_loader,
-        val_loader,
-        optimizer,
-        criterion,
-        device=device,
-        epochs=epochs,
-        early_stopping=False,
-        logger=logger,
-    )
-
-    pmssm.plot_losses(train_losses, val_losses, model, plot_dir=plots_dir)
-
-    # compare random training & validation points points
-    pmssm.compare_random_predictions(model, stats=stats, subset=train_dataset, mode='train', device=device, n_points=10, logger=logger)
-    pmssm.compare_random_predictions(model, stats=stats, subset=val_dataset, mode='validation', device=device, n_points=3, logger=logger)
-    
-    # scatterplot for training & validation sample
-    pmssm.scatter_true_vs_pred(model, stats=stats, subset=train_dataset, mode='train', device=device, plot_dir=plots_dir)
-    pmssm.scatter_true_vs_pred(model, stats=stats, subset=val_dataset, mode='validation', device=device, plot_dir=plots_dir)
-    
-    # 2D hists for training & validation samples
-    pmssm.hist_true_vs_pred(model, stats=stats, subset=train_dataset, mode='train', device=device, plot_dir=plots_dir)
-    pmssm.hist_true_vs_pred(model, stats=stats, subset=val_dataset, mode='validation', device=device, plot_dir=plots_dir)
+        # Train MLP Baseline
+        logger.info("")
+        logger.info("Training MLP Baseline...")
+        train_mlp(0 if torch.cuda.is_available() else "cpu", train_dataset, val_dataset, stats, epochs, plots_dir, log_file, early_stopping, patience)
 
     # ========================================
     # Summary

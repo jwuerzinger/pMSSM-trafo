@@ -76,8 +76,9 @@ python train_pmssm.py --testing --epochs 100
 - `--epochs N`: Set number of training epochs (default: 2000)
 - `--n-datasets N`: Number of datasets to load (-1 for all, overrides --testing)
 - `--n-samples N`: Number of samples per dataset (None for all, overrides --testing)
+- `--no-parallel`: Disable parallel training (train models sequentially even with multiple GPUs)
 
-The script now trains **3 models sequentially**:
+The script now trains **3 models** (in parallel when possible):
 
 1. **Improved PMSSMTransformer**
    - d_model=128, nhead=4, num_layers=3
