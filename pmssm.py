@@ -67,7 +67,9 @@ def load_pmssm_data(n_datasets=-1, logger=None, plot_dir="plots"):
 
     Y = np.concatenate([t["MO_Omega"].array(library="np") for t in trees])
     plt.hist(Y, bins=20, range=[0.0, 1.0])
-    if not running_in_notebook(): plt.savefig(f"{plot_dir}/hist_dataset.png")
+    if not running_in_notebook():
+        plt.savefig(f"{plot_dir}/hist_dataset.png")
+        plt.close()
     else: plt.show()
 
     # pruning
@@ -536,7 +538,9 @@ def scatter_true_vs_pred(
     plt.tight_layout()
     # plt.show()
     modelname = get_model_name(model)
-    if not running_in_notebook(): plt.savefig(f"{plot_dir}/{modelname}_true_vs_pred_{mode}.png")
+    if not running_in_notebook():
+        plt.savefig(f"{plot_dir}/{modelname}_true_vs_pred_{mode}.png")
+        plt.close()
     else: plt.show()
 
 def hist_true_vs_pred(
@@ -607,6 +611,7 @@ def hist_true_vs_pred(
 
     if not running_in_notebook():
         plt.savefig(f"{plot_dir}/{modelname}_hist_true_vs_pred_{mode}.png")
+        plt.close()
     else:
         plt.show()
 
@@ -626,5 +631,7 @@ def plot_losses(train_losses, val_losses, model, plot_dir="plots"):
     plt.title(f"{modelname} Training for pMSSM Relic Density")
     plt.yscale('log')
 
-    if not running_in_notebook(): plt.savefig(f"{plot_dir}/losses_{modelname}.png")
+    if not running_in_notebook():
+        plt.savefig(f"{plot_dir}/losses_{modelname}.png")
+        plt.close()
     else: plt.show()
