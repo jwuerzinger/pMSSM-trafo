@@ -177,7 +177,7 @@ active_learning_output/
 │   └── ...
 ├── plots/
 │   ├── hist_dataset.png         # Initial dataset distribution
-│   └── al_vs_baseline_metrics.png  # Comparison plot (AL vs Baseline)
+│   └── iteration_metrics.png    # Comparison plot (Loss, R², Dataset Size)
 └── summary.json                 # Configuration and all results
 ```
 
@@ -290,9 +290,14 @@ This ensures:
 The pipeline tracks and compares:
 - **Train/Validation Loss**: Best MSE loss achieved
 - **R² Score**: Coefficient of determination on validation set
-- **Dataset Size**: Number of training samples per iteration
+- **Dataset Size**: Number of training and validation samples per iteration
 
-Final comparison plot shows AL vs Baseline performance across all iterations.
+Final comparison plot (`iteration_metrics.png`) shows:
+1. **Train/Validation Loss**: MSE loss curves for both AL and baseline models
+2. **R² Score**: Model performance across iterations
+3. **Dataset Size**: Growth of training and validation sets for both models
+
+This allows visual comparison of how active learning improves model performance compared to random sampling as the dataset grows.
 
 ## Recent Improvements
 
@@ -313,6 +318,7 @@ Final comparison plot shows AL vs Baseline performance across all iterations.
    - Clear contamination-free sampling messages
 5. **Automatic Validation**: Auto-adjusts `n_candidates` if `n_select > n_candidates`
 6. **Per-Model Diagnostics**: Separate diagnostic plots for AL and baseline models
+7. **Dataset Size Tracking**: New plot showing the growth of training and validation sets across iterations for both AL and baseline models
 
 ## Troubleshooting
 

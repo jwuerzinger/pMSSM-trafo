@@ -593,25 +593,25 @@ def compute_r2_score(model, dataset, stats, device):
 
 def plot_iteration_metrics(iterations, al_metrics, baseline_metrics, output_dir, logger):
     """
-    Plot validation loss and R² score across active learning iterations.
+    Plot validation loss, R² score, and dataset sizes across active learning iterations.
 
     Args:
         iterations: List of iteration numbers
-        al_metrics: Dict with 'train_losses', 'val_losses', 'r2_scores' for active learning
-        baseline_metrics: Dict with 'train_losses', 'val_losses', 'r2_scores' for baseline
+        al_metrics: Dict with 'train_losses', 'val_losses', 'r2_scores', 'n_train', 'n_val' for active learning
+        baseline_metrics: Dict with 'train_losses', 'val_losses', 'r2_scores', 'n_train', 'n_val' for baseline
         output_dir: Output directory for plots
         logger: Logger instance
     """
     import matplotlib.pyplot as plt
 
-    _, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+    _, axes = plt.subplots(1, 3, figsize=(18, 5))
+    ax1, ax2, ax3 = axes
 
-    # Plot validation loss - Active Learning
-    ax1.plot(iterations, al_metrics['train_losses'], 'b-', linewidth=2, markersize=6, label='AL Train')
-    ax1.plot(iterations, al_metrics['val_losses'], 'b--', linewidth=2, markersize=6, label='AL Validation')
-    # Plot validation loss - Baseline
-    ax1.plot(iterations, baseline_metrics['train_losses'], 'r-', linewidth=2, markersize=6, label='Baseline Train')
-    ax1.plot(iterations, baseline_metrics['val_losses'], 'r--', linewidth=2, markersize=6, label='Baseline Validation')
+    # Plot 1: Train/Validation Loss
+    ax1.plot(iterations, al_metrics['train_losses'], 'b-', linewidth=2, marker='o', markersize=6, label='AL Train')
+    ax1.plot(iterations, al_metrics['val_losses'], 'b--', linewidth=2, marker='s', markersize=6, label='AL Validation')
+    ax1.plot(iterations, baseline_metrics['train_losses'], 'r-', linewidth=2, marker='o', markersize=6, label='Baseline Train')
+    ax1.plot(iterations, baseline_metrics['val_losses'], 'r--', linewidth=2, marker='s', markersize=6, label='Baseline Validation')
     ax1.set_xlabel('Iteration', fontsize=12)
     ax1.set_ylabel('Best Loss (MSE)', fontsize=12)
     ax1.set_title('Train/Validation Loss vs Iteration', fontsize=14)
@@ -620,9 +620,9 @@ def plot_iteration_metrics(iterations, al_metrics, baseline_metrics, output_dir,
     ax1.set_yscale('log')
     ax1.legend(fontsize=9)
 
-    # Plot R² score
-    ax2.plot(iterations, al_metrics['r2_scores'], 'b-', linewidth=2, markersize=6, label='Active Learning')
-    ax2.plot(iterations, baseline_metrics['r2_scores'], 'r-', linewidth=2, markersize=6, label='Baseline (Random)')
+    # Plot 2: R² Score
+    ax2.plot(iterations, al_metrics['r2_scores'], 'b-', linewidth=2, marker='o', markersize=6, label='Active Learning')
+    ax2.plot(iterations, baseline_metrics['r2_scores'], 'r-', linewidth=2, marker='o', markersize=6, label='Baseline (Random)')
     ax2.set_xlabel('Iteration', fontsize=12)
     ax2.set_ylabel('R² Score', fontsize=12)
     ax2.set_title('R² Score vs Iteration', fontsize=14)
@@ -631,6 +631,18 @@ def plot_iteration_metrics(iterations, al_metrics, baseline_metrics, output_dir,
     all_r2 = al_metrics['r2_scores'] + baseline_metrics['r2_scores']
     ax2.set_ylim(min(0, min(all_r2) - 0.1), 1.05)
     ax2.legend(fontsize=10)
+
+    # Plot 3: Dataset Sizes
+    ax3.plot(iterations, al_metrics['n_train'], 'b-', linewidth=2, marker='o', markersize=6, label='AL Train')
+    ax3.plot(iterations, al_metrics['n_val'], 'b--', linewidth=2, marker='s', markersize=6, label='AL Val')
+    ax3.plot(iterations, baseline_metrics['n_train'], 'r-', linewidth=2, marker='o', markersize=6, label='Baseline Train')
+    ax3.plot(iterations, baseline_metrics['n_val'], 'r--', linewidth=2, marker='s', markersize=6, label='Baseline Val')
+    ax3.set_xlabel('Iteration', fontsize=12)
+    ax3.set_ylabel('Number of Samples', fontsize=12)
+    ax3.set_title('Dataset Size vs Iteration', fontsize=14)
+    ax3.grid(True, alpha=0.3)
+    ax3.set_xticks(iterations)
+    ax3.legend(fontsize=9)
 
     plt.tight_layout()
 
@@ -942,11 +954,15 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
     al_train_losses = []
     al_val_losses = []
     al_r2_scores = []
+    al_n_train = []
+    al_n_val = []
 
     # Baseline metrics
     baseline_train_losses = []
     baseline_val_losses = []
     baseline_r2_scores = []
+    baseline_n_train = []
+    baseline_n_val = []
 
     for iteration in range(1, n_iterations + 1):
         logger.info(f"=== Global Iteration {iteration} ===")
@@ -1046,9 +1062,13 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
         al_train_losses.append(al_results['best_train_loss'])
         al_val_losses.append(al_results['best_val_loss'])
         al_r2_scores.append(al_results['r2_score'])
+        al_n_train.append(len(idx_train_al))
+        al_n_val.append(len(idx_val_al))
         baseline_train_losses.append(baseline_results['best_train_loss'])
         baseline_val_losses.append(baseline_results['best_val_loss'])
         baseline_r2_scores.append(baseline_results['r2_score'])
+        baseline_n_train.append(len(idx_train_base))
+        baseline_n_val.append(len(idx_val_base))
 
         # Now run the AL-specific parts (uncertainty estimation, point selection, etc.)
         # Re-train the AL model (or load from checkpoint) for MC dropout
@@ -1113,11 +1133,15 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
         'train_losses': al_train_losses,
         'val_losses': al_val_losses,
         'r2_scores': al_r2_scores,
+        'n_train': al_n_train,
+        'n_val': al_n_val,
     }
     baseline_metrics = {
         'train_losses': baseline_train_losses,
         'val_losses': baseline_val_losses,
         'r2_scores': baseline_r2_scores,
+        'n_train': baseline_n_train,
+        'n_val': baseline_n_val,
     }
 
     if n_iterations > 1:
