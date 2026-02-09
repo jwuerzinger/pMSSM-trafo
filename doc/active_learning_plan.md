@@ -14,16 +14,35 @@ Active learning is a machine learning paradigm where the model actively selects 
 
 ## Algorithm
 
+### Active Learning Loop
+
 ```
 for iteration in 1..N:
-    1. Train PMSSMTransformerTabular on current training data
-    2. Generate pool of candidate points in parameter space
+    1. Train both AL and Baseline models in parallel
+       - AL: Trains on current dataset (grows via active learning)
+       - Baseline: Trains on random samples from input dataset
+    2. For AL model: Generate pool of candidate points in parameter space
     3. Compute predictive uncertainty via MC Dropout
     4. Select top-K points with highest uncertainty
     5. Output points for generation (CSV format)
     6. [If --generate-data] Generate new models via Run3ModelGen
-    7. [If --generate-data] Add new data to training set for next iteration
+    7. [If --generate-data] Add new data to AL training set for next iteration
+    8. Baseline grows by random sampling from input dataset (excluding initial AL samples)
 ```
+
+### Baseline Comparison
+
+The pipeline trains two models in parallel for fair comparison:
+
+- **Active Learning (AL)**: Intelligently selects uncertain points via MC Dropout
+- **Baseline (Random)**: Randomly samples new points from the input dataset
+
+**Key properties**:
+- Both models start with identical initial data
+- Both models have identical train/val split sizes at each iteration
+- AL grows by adding generated points based on uncertainty
+- Baseline grows by randomly sampling from the original input dataset (excluding initial AL samples)
+- **No data contamination**: Baseline never samples from AL's pool or generated data
 
 ## Uncertainty Estimation: MC Dropout
 
@@ -43,6 +62,25 @@ This approach:
 - Requires only a single model (no ensemble)
 - Approximates Bayesian uncertainty
 - Simple to implement with existing architecture
+
+## Data Quality and Validation
+
+### Automatic Data Quality Checks
+
+The pipeline automatically checks for data integrity issues at training time:
+
+1. **Duplicate Detection**: Checks for duplicate entries within training and validation sets
+2. **Index Overlap**: Verifies no indices appear in both train and val sets
+3. **Data Leakage**: Detects identical samples appearing in both train and val sets with different indices
+4. **Contamination Prevention**: Ensures baseline model never samples from AL's growing dataset
+
+All checks are logged as warnings if issues are detected.
+
+### Automatic Parameter Validation
+
+- **Candidate Pool Size**: If `n_select > n_candidates`, automatically increases `n_candidates = n_select`
+- **Selection Logging**: Reports actual number of points selected vs requested
+  - Example: `Selected 1000 most uncertain points (requested: 10000, available: 1000)`
 
 ## Usage
 
@@ -110,15 +148,25 @@ This will:
 
 ```
 active_learning_output/
+├── active_learning.log          # Main pipeline log
 ├── iteration_001/
-│   ├── selected_points.csv      # 10 points with all parameters
-│   ├── model_checkpoint.pt      # Trained model weights
-│   ├── plots/                   # Diagnostic plots for this iteration
-│   │   ├── losses_transformer_tabular.png
-│   │   ├── transformer_tabular_true_vs_pred_train.png
-│   │   ├── transformer_tabular_true_vs_pred_validation.png
-│   │   ├── transformer_tabular_hist_true_vs_pred_train.png
-│   │   └── transformer_tabular_hist_true_vs_pred_validation.png
+│   ├── selected_points.csv      # Selected points with uncertainty scores
+│   ├── model_checkpoint.pt      # AL model checkpoint
+│   ├── al_training.log          # AL model training log
+│   ├── baseline_training.log    # Baseline model training log
+│   ├── plots/
+│   │   ├── al/                  # Active Learning model diagnostics
+│   │   │   ├── losses_transformer_tabular.png
+│   │   │   ├── transformer_tabular_true_vs_pred_train.png
+│   │   │   ├── transformer_tabular_true_vs_pred_validation.png
+│   │   │   ├── transformer_tabular_hist_true_vs_pred_train.png
+│   │   │   └── transformer_tabular_hist_true_vs_pred_validation.png
+│   │   └── baseline/            # Baseline model diagnostics
+│   │       ├── losses_transformer_tabular.png
+│   │       ├── transformer_tabular_true_vs_pred_train.png
+│   │       ├── transformer_tabular_true_vs_pred_validation.png
+│   │       ├── transformer_tabular_hist_true_vs_pred_train.png
+│   │       └── transformer_tabular_hist_true_vs_pred_validation.png
 │   ├── modelgen_config.yaml     # [If --generate-data] Config for Run3ModelGen
 │   └── scan/                    # [If --generate-data] Generated model outputs
 │       ├── input/               # SLHA input files
@@ -128,7 +176,8 @@ active_learning_output/
 ├── iteration_002/
 │   └── ...
 ├── plots/
-│   └── hist_dataset.png
+│   ├── hist_dataset.png         # Initial dataset distribution
+│   └── al_vs_baseline_metrics.png  # Comparison plot (AL vs Baseline)
 └── summary.json                 # Configuration and all results
 ```
 
@@ -197,6 +246,116 @@ cd active_learning_output/iteration_001
 # Copy and modify modelgen_config.yaml if needed
 ```
 
+## Implementation Details
+
+### Parallel Training
+
+Both AL and Baseline models train in parallel on separate GPUs (if available):
+- **GPU 0**: Active Learning model
+- **GPU 2**: Baseline model
+
+Sequential training is automatically used if fewer than 2 GPUs are available.
+
+### Data Contamination Prevention
+
+The baseline model is carefully designed to avoid data contamination:
+
+**Iteration 1**: Both models start with the same initial samples (e.g., first 1000 from input dataset)
+
+**Iteration 2+**:
+- AL dataset grows with generated data: `X_AL = [initial_samples, generated_samples]`
+- Baseline samples from input excluding initial AL samples: `X_Baseline = [initial_samples, random_from_input[1000:]]`
+
+This ensures:
+- Fair comparison (both start with same data)
+- No contamination (baseline never sees AL's generated data)
+- Independent growth patterns (AL via uncertainty, baseline via random)
+
+### Logging Structure
+
+**Main Log** (`active_learning.log`):
+- Pipeline configuration
+- Iteration progress
+- Point selection details
+- Model generation status
+
+**Per-Model Logs** (`al_training.log`, `baseline_training.log`):
+- Training progress (epoch-by-epoch)
+- Data quality checks (duplicates, leakage)
+- Final metrics (loss, R² score)
+- Diagnostic plot generation
+
+### Metrics Tracking
+
+The pipeline tracks and compares:
+- **Train/Validation Loss**: Best MSE loss achieved
+- **R² Score**: Coefficient of determination on validation set
+- **Dataset Size**: Number of training samples per iteration
+
+Final comparison plot shows AL vs Baseline performance across all iterations.
+
+## Recent Improvements
+
+### February 2026 Updates
+
+1. **Baseline Comparison**: Added parallel training of random baseline model for fair comparison with active learning
+2. **Data Contamination Prevention**: Implemented strict separation between AL and baseline datasets
+   - Both models start with identical initial data
+   - Baseline samples from input dataset (excluding initial AL samples)
+   - AL grows via generated data based on uncertainty
+3. **Data Quality Checks**: Automatic detection of:
+   - Duplicate entries in train/val sets
+   - Index overlaps between train/val
+   - Data leakage (identical samples in train and val)
+4. **Improved Logging**:
+   - Separate logs per model per iteration
+   - Accurate reporting of selected vs available points
+   - Clear contamination-free sampling messages
+5. **Automatic Validation**: Auto-adjusts `n_candidates` if `n_select > n_candidates`
+6. **Per-Model Diagnostics**: Separate diagnostic plots for AL and baseline models
+
+## Troubleshooting
+
+### Issue: "Selected N points but expected M"
+
+**Symptom**: Log shows different number of selected points than requested
+```
+Selected 1000 most uncertain points (requested: 10000, available: 1000)
+```
+
+**Cause**: `n_select > n_candidates` - trying to select more points than available in candidate pool
+
+**Solution**: The pipeline now automatically handles this by:
+1. Auto-adjusting `n_candidates = n_select` if `n_select > n_candidates`
+2. Logging the actual vs requested number of points
+
+**Manual fix**: Increase `--n-candidates` to be at least equal to `--n-select`:
+```bash
+python active_learning.py --n-candidates 10000 --n-select 10000
+```
+
+### Issue: Data contamination warnings
+
+**Symptom**: Warnings about duplicate entries or data leakage
+```
+Found 5 duplicate entries in training set!
+Found 2 identical data samples appearing in both train and val sets!
+```
+
+**Cause**: Duplicate points in input dataset or incorrect sampling
+
+**Impact**: May affect model performance and uncertainty estimates
+
+**Action**: Review the input dataset for duplicates and verify the data loading pipeline
+
+### Issue: Different train/val sizes between AL and Baseline
+
+**Symptom**: AL and Baseline have different dataset sizes
+
+**Cause**: Bug in split generation (fixed in recent updates)
+
+**Solution**: Both models now use identical train/val splits for fair comparison
+
 ## Future Extensions
 
 1. **Alternative Acquisition Functions**: Expected Improvement, entropy-based selection
@@ -204,3 +363,4 @@ cd active_learning_output/iteration_001
 3. **Region-Based Selection**: Focus on specific Omega_h^2 ranges of interest
 4. **Parallel Model Generation**: Use Condor for distributed generation
 5. **Adaptive Sampling**: Adjust candidate pool based on previous iterations
+6. **Cross-validation**: K-fold validation for more robust uncertainty estimates
