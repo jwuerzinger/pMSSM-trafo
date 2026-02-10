@@ -729,11 +729,8 @@ def compute_uncertainty_mc_dropout(model, X_candidates, stats, n_samples, device
 def select_top_uncertain(X_candidates, uncertainties, n_select):
     """Select indices of points with highest uncertainty."""
     uncertainties_flat = uncertainties.squeeze().numpy()
-    # Get top indices sorted by uncertainty (highest first)
-    sorted_indices = np.argsort(uncertainties_flat)[-n_select:]
-    # Reverse to get highest first, and make a copy to avoid negative strides
-    top_indices = sorted_indices[::-1].copy()
-    return top_indices
+    all_sorted = np.argsort(uncertainties_flat)[::-1].copy()
+    return all_sorted[:n_select].copy()
 
 
 def save_selected_points(X_candidates, uncertainties, indices, output_dir, iteration):
@@ -871,7 +868,9 @@ def run_active_learning_iteration(
 @click.option('--n-samples', default=None, type=int, help="Number of samples to use from data.")
 @click.option('--output-dir', default='active_learning_output', type=str, help="Output directory.")
 @click.option('--generate-data', is_flag=True, help="Generate new models using Run3ModelGen.")
-def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, dropout, n_datasets, n_samples, output_dir, generate_data):
+@click.option('--min-gen-fraction', default=0.6, type=float, help="Minimum fraction of n-select that must be generated successfully before stopping retries (default: 0.6).")
+@click.option('--max-gen-attempts', default=10, type=int, help="Maximum number of generation attempts per iteration (default: 10).")
+def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, dropout, n_datasets, n_samples, output_dir, generate_data, min_gen_fraction, max_gen_attempts):
     """
     Active learning pipeline for pMSSM relic density prediction.
 
@@ -917,6 +916,9 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
     logger.info(f"  n_datasets: {n_datasets}")
     logger.info(f"  n_samples: {n_samples if n_samples else 'all'}")
     logger.info(f"  generate_data: {generate_data}")
+    if generate_data:
+        logger.info(f"  min_gen_fraction: {min_gen_fraction} (target: {int(n_select * min_gen_fraction)} valid models per iteration)")
+        logger.info(f"  max_gen_attempts: {max_gen_attempts}")
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     logger.info(f"Device: {device}")
@@ -1110,16 +1112,65 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
             "baseline_r2_score": baseline_results['r2_score'],
         })
 
-        # Generate new models if requested
+        # Generate new models if requested, with retry logic
         new_X, new_Y = None, None
         if generate_data:
-            logger.info("Generating new models using Run3ModelGen...")
-            ntuple_path = generate_models_from_csv(csv_path, iter_dir, logger)
-            if ntuple_path:
-                new_X, new_Y = load_generated_data(ntuple_path, logger)
-                if new_X is not None:
-                    logger.info(f"Generated {len(new_X)} new valid training points")
-                    all_selected_points[-1]["n_generated"] = len(new_X)
+            n_target = max(1, int(n_select * min_gen_fraction))
+            logger.info(f"Generation target: {n_target} valid models ({min_gen_fraction*100:.0f}% of {n_select} selected, max {max_gen_attempts} attempts)")
+
+            collected_X, collected_Y = [], []
+
+            for attempt in range(max_gen_attempts):
+                if attempt == 0:
+                    # First attempt: use the already-generated candidates and saved CSV
+                    attempt_candidates = candidates
+                    attempt_pred_var = pred_var
+                    attempt_indices = top_indices
+                    attempt_csv = csv_path
+                    attempt_dir = iter_dir
+                else:
+                    # Retry: draw a fresh random candidate pool and recompute uncertainty
+                    attempt_dir = iter_dir / f"retry_{attempt:03d}"
+                    attempt_dir.mkdir(parents=True, exist_ok=True)
+
+                    attempt_seed = iteration * 1000 + attempt
+                    attempt_candidates = generate_candidate_pool(n_candidates, seed=attempt_seed)
+                    _, attempt_pred_var = compute_uncertainty_mc_dropout(
+                        model, attempt_candidates, stats, mc_samples, device, logger
+                    )
+                    attempt_indices = select_top_uncertain(attempt_candidates, attempt_pred_var, n_select)
+
+                    param_names = [p.replace("IN_", "") for p in PARAM_ORDER]
+                    df = pd.DataFrame(attempt_candidates[attempt_indices].numpy(), columns=param_names)
+                    df["uncertainty"] = attempt_pred_var[attempt_indices].squeeze().numpy()
+                    attempt_csv = attempt_dir / "selected_points.csv"
+                    df.to_csv(attempt_csv, index=False)
+
+                logger.info(f"Generation attempt {attempt + 1}/{max_gen_attempts} ({len(attempt_indices)} points)...")
+                ntuple_path = generate_models_from_csv(attempt_csv, attempt_dir, logger)
+
+                if ntuple_path:
+                    batch_X, batch_Y = load_generated_data(ntuple_path, logger)
+                    if batch_X is not None and len(batch_X) > 0:
+                        collected_X.append(batch_X)
+                        collected_Y.append(batch_Y)
+
+                n_collected = sum(len(x) for x in collected_X)
+                logger.info(f"After attempt {attempt + 1}: {n_collected}/{n_target} target models collected")
+
+                if n_collected >= n_target:
+                    logger.info(f"Generation target reached after {attempt + 1} attempt(s)")
+                    break
+                if attempt < max_gen_attempts - 1:
+                    logger.info(f"Below target, retrying with next most-uncertain batch...")
+
+            if collected_X:
+                new_X = torch.cat(collected_X)
+                new_Y = torch.cat(collected_Y)
+                logger.info(f"Total generated: {len(new_X)} valid training points across {min(attempt + 1, max_gen_attempts)} attempt(s)")
+                all_selected_points[-1]["n_generated"] = len(new_X)
+            else:
+                logger.warning("No valid models generated after all attempts")
 
         # Augment training data with newly generated points for next iteration
         if new_X is not None and new_Y is not None and len(new_X) > 0:
