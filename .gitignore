@@ -6,3 +6,4 @@ data/
 __pycache__/
 plots/
 logs/
+active_learning_output*

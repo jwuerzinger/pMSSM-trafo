@@ -372,7 +372,7 @@ def train_model(train_dataset, val_dataset, epochs, dropout, device, logger):
     return model, train_losses, val_losses
 
 
-def train_model_worker(gpu_id, X, Y, idx_train, idx_val, epochs, dropout, result_queue, model_name="model", log_dir=None, plots_dir=None):
+def train_model_worker(gpu_id, X, Y, idx_train, idx_val, epochs, dropout, result_queue, model_name="model", log_dir=None, plots_dir=None, checkpoint_path=None):
     """
     Worker function for multiprocessing training.
 
@@ -388,6 +388,7 @@ def train_model_worker(gpu_id, X, Y, idx_train, idx_val, epochs, dropout, result
                  log_dir/{model_name.lower()}_training.log
         plots_dir: Directory to save diagnostic plots. If provided, plots are saved to
                    plots_dir/{model_name.lower()}/
+        checkpoint_path: If provided, save model state dict to this path after training
     """
     device = f"cuda:{gpu_id}" if isinstance(gpu_id, int) else gpu_id
 
@@ -542,6 +543,12 @@ def train_model_worker(gpu_id, X, Y, idx_train, idx_val, epochs, dropout, result
 
         logger.info(f"Diagnostic plots saved to {plots_dir}")
 
+    # Save model checkpoint if requested (used by AL worker so main process can load
+    # the trained model for MC Dropout without retraining from scratch)
+    if checkpoint_path is not None:
+        torch.save(model.state_dict(), checkpoint_path)
+        logger.info(f"Saved model checkpoint to {checkpoint_path}")
+
     # Return results via queue
     result_queue.put({
         "model_name": model_name,
@@ -629,7 +636,9 @@ def plot_iteration_metrics(iterations, al_metrics, baseline_metrics, output_dir,
     ax2.grid(True, alpha=0.3)
     ax2.set_xticks(iterations)
     all_r2 = al_metrics['r2_scores'] + baseline_metrics['r2_scores']
-    ax2.set_ylim(min(0, min(all_r2) - 0.1), 1.05)
+    finite_r2 = [v for v in all_r2 if v is not None and not (v != v) and abs(v) != float('inf')]
+    if finite_r2:
+        ax2.set_ylim(min(0, min(finite_r2) - 0.1), 1.05)
     ax2.legend(fontsize=10)
 
     # Plot 3: Dataset Sizes
@@ -974,17 +983,19 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
         iter_plots_dir.mkdir(parents=True, exist_ok=True)
         logger.info(f"Iteration directory: {iter_dir}")
 
-        # Create baseline dataset (same size as current AL training data)
-        # Both models start with same data, then grow independently
-        n_current = len(X)
-
+        # Create baseline dataset
         if iteration == 1:
-            # Iteration 1: Both AL and Baseline start with the same initial data
-            baseline_indices = initial_al_indices
-            logger.info(f"Iteration 1: Both models start with same {len(baseline_indices)} samples")
+            # First iteration: Baseline is an exact copy of the AL dataset.
+            # Use a direct clone to guarantee byte-for-byte identity without relying
+            # on index construction logic.
+            X_baseline = X.clone()
+            Y_baseline = Y.clone()
+            assert X.shape == X_baseline.shape and torch.allclose(X, X_baseline), \
+                "BUG: AL and Baseline datasets must be identical at iteration 1!"
+            logger.info(f"Iteration 1: Both models use identical dataset ({len(X_baseline)} samples) — verified by allclose check")
         else:
             # Iteration 2+: Baseline grows by sampling from X_full excluding initial AL indices
-            # Create mask of available indices (excluding initial AL indices)
+            n_current = len(X)
             all_indices = torch.arange(len(X_full))
             mask = torch.ones(len(X_full), dtype=torch.bool)
             mask[initial_al_indices] = False
@@ -992,24 +1003,18 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
 
             logger.info(f"Baseline sampling: {len(available_indices)} indices available from X_full (excluding initial {len(initial_al_indices)} AL indices)")
 
-            # Baseline needs n_current samples total
-            # Start with initial AL indices, then add random samples from available pool
             n_additional = n_current - len(initial_al_indices)
 
             if n_additional <= len(available_indices):
-                # Sample without replacement
                 additional_indices = available_indices[torch.randperm(len(available_indices))[:n_additional]]
             else:
-                # Sample with replacement if we need more samples than available
                 logger.info(f"Baseline needs {n_additional} samples but only {len(available_indices)} available - sampling with replacement")
                 additional_indices = available_indices[torch.randint(0, len(available_indices), (n_additional,))]
 
-            # Combine: initial AL indices + additional random indices
             baseline_indices = torch.cat([initial_al_indices, additional_indices])
+            X_baseline = X_full[baseline_indices]
+            Y_baseline = Y_full[baseline_indices]
             logger.info(f"Baseline dataset: {len(initial_al_indices)} initial + {n_additional} random = {len(baseline_indices)} samples")
-
-        X_baseline = X_full[baseline_indices]
-        Y_baseline = Y_full[baseline_indices]
 
         # Create train/val split indices based on AL dataset size
         # Use the same indices for both AL and Baseline to ensure identical dataset sizes
@@ -1019,6 +1024,8 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
         idx_train_base = idx_train
         idx_val_base = idx_val
 
+        al_checkpoint_path = iter_dir / "al_model_checkpoint.pt"
+
         if use_parallel:
             # Train AL and Baseline in parallel on different GPUs
             al_queue = mp.Queue()
@@ -1026,7 +1033,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
 
             al_process = mp.Process(
                 target=train_model_worker,
-                args=(0, X, Y, idx_train_al, idx_val_al, epochs, dropout, al_queue, "AL", iter_dir, iter_plots_dir)
+                args=(0, X, Y, idx_train_al, idx_val_al, epochs, dropout, al_queue, "AL", iter_dir, iter_plots_dir, al_checkpoint_path)
             )
             baseline_process = mp.Process(
                 target=train_model_worker,
@@ -1045,7 +1052,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
             # Sequential training
             logger.info("Training Active Learning model...")
             al_queue = mp.Queue()
-            train_model_worker(device, X, Y, idx_train_al, idx_val_al, epochs, dropout, al_queue, "AL", iter_dir, iter_plots_dir)
+            train_model_worker(device, X, Y, idx_train_al, idx_val_al, epochs, dropout, al_queue, "AL", iter_dir, iter_plots_dir, al_checkpoint_path)
             al_results = al_queue.get()
 
             logger.info("Training Baseline model (random samples)...")
@@ -1070,18 +1077,14 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
         baseline_n_train.append(len(idx_train_base))
         baseline_n_val.append(len(idx_val_base))
 
-        # Now run the AL-specific parts (uncertainty estimation, point selection, etc.)
-        # Re-train the AL model (or load from checkpoint) for MC dropout
+        # Load the AL model checkpoint saved by the worker for MC Dropout uncertainty estimation.
+        # This avoids training the AL model a second time.
         stats = pmssm.compute_stats(X, Y, idx_train_al)
-        train_dataset = pmssm.PMSSMDataset(X, Y, idx_train_al, stats)
-        val_dataset = pmssm.PMSSMDataset(X, Y, idx_val_al, stats)
-
-        # Train model for MC dropout (need the actual model object for uncertainty estimation)
-        logger.info("Training AL model for MC Dropout uncertainty estimation...")
-        model, _, _ = train_model(train_dataset, val_dataset, epochs, dropout, device, logger)
-
-        # Note: Diagnostic plots are already generated in train_model_worker for both AL and Baseline models
-        # They are saved in iteration_XXX/plots/al/ and iteration_XXX/plots/baseline/
+        model = pmssm.PMSSMTransformerTabular(
+            d_model=128, nhead=4, num_layers=3, dim_feedforward=512, dropout=dropout
+        )
+        model.load_state_dict(torch.load(al_checkpoint_path, map_location=device))
+        logger.info(f"Loaded AL model from {al_checkpoint_path} for MC Dropout uncertainty estimation")
 
         # Generate candidate pool and select uncertain points
         logger.info(f"Generating {n_candidates} candidate points...")
@@ -1096,10 +1099,6 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
 
         csv_path = save_selected_points(candidates, pred_var, top_indices, output_dir, iteration)
         logger.info(f"Saved selected points to {csv_path}")
-
-        # Save model checkpoint
-        model_path = iter_dir / "model_checkpoint.pt"
-        torch.save(model.state_dict(), model_path)
 
         all_selected_points.append({
             "iteration": iteration,
