@@ -1,5 +1,3 @@
-import os
-
 import warnings
 warnings.filterwarnings('ignore', message='.*enable_nested_tensor.*')
 
@@ -337,41 +335,6 @@ def setup_worker_logging(log_file_path, model_name):
     return logger
 
 
-def train_model(train_dataset, val_dataset, epochs, dropout, device, logger):
-    """Train PMSSMTransformerTabular with specified dropout for MC Dropout."""
-    train_loader = DataLoader(train_dataset, batch_size=256, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=256, shuffle=False)
-
-    model = pmssm.PMSSMTransformerTabular(
-        d_model=128,
-        nhead=4,
-        num_layers=3,
-        dim_feedforward=512,
-        dropout=dropout,
-    )
-
-    optimizer = optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-4)
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-6)
-    criterion = nn.MSELoss()
-
-    train_losses, val_losses = pmssm.train_with_validation(
-        model,
-        train_loader,
-        val_loader,
-        optimizer,
-        criterion,
-        device=device,
-        epochs=epochs,
-        early_stopping=True,
-        patience=500,
-        scheduler=scheduler,
-        grad_clip=1.0,
-        logger=logger,
-    )
-
-    return model, train_losses, val_losses
-
-
 def train_model_worker(gpu_id, X, Y, idx_train, idx_val, epochs, dropout, result_queue, model_name="model", log_dir=None, plots_dir=None, checkpoint_path=None):
     """
     Worker function for multiprocessing training.
@@ -560,44 +523,6 @@ def train_model_worker(gpu_id, X, Y, idx_train, idx_val, epochs, dropout, result
     })
 
 
-def compute_r2_score(model, dataset, stats, device):
-    """
-    Compute R² score (coefficient of determination) on a dataset.
-
-    Args:
-        model: Trained model
-        dataset: PMSSMDataset
-        stats: Normalization statistics (mean_X, std_X, mean_Y, std_Y)
-        device: Compute device
-
-    Returns:
-        R² score (float)
-    """
-    model.eval()
-    model.to(device)
-
-    _, _, mean_Y, std_Y = stats
-
-    # Get all data from dataset
-    loader = DataLoader(dataset, batch_size=len(dataset), shuffle=False)
-    X_batch, Y_batch = next(iter(loader))
-    X_batch = X_batch.to(device)
-
-    with torch.no_grad():
-        Y_pred_norm = model(X_batch).cpu()
-
-    # Denormalize predictions and targets
-    Y_true = Y_batch * std_Y + mean_Y
-    Y_pred = Y_pred_norm * std_Y + mean_Y
-
-    # Compute R² = 1 - SS_res / SS_tot
-    ss_res = ((Y_true - Y_pred) ** 2).sum()
-    ss_tot = ((Y_true - Y_true.mean()) ** 2).sum()
-
-    r2 = 1 - (ss_res / ss_tot)
-    return r2.item()
-
-
 def plot_iteration_metrics(iterations, al_metrics, baseline_metrics, output_dir, logger):
     """
     Plot validation loss, R² score, and dataset sizes across active learning iterations.
@@ -751,109 +676,6 @@ def save_selected_points(X_candidates, uncertainties, indices, output_dir, itera
     df.to_csv(csv_path, index=False)
 
     return csv_path
-
-
-def run_active_learning_iteration(
-    X_train, Y_train,
-    n_candidates,
-    n_select,
-    mc_samples,
-    epochs,
-    dropout,
-    device,
-    output_dir,
-    iteration,
-    logger,
-    generate_data=False,
-):
-    """Run a single active learning iteration.
-
-    Args:
-        generate_data: If True, generate new models using Run3ModelGen
-    """
-    logger.info(f"=== Active Learning Iteration {iteration} ===")
-
-    # Create iteration-specific plot directory
-    iter_dir = output_dir / f"iteration_{iteration:03d}"
-    iter_plots_dir = iter_dir / "plots"
-    iter_plots_dir.mkdir(parents=True, exist_ok=True)
-
-    # Split data
-    idx_train, idx_val = pmssm.make_split(X_train, logger=logger)
-    stats = pmssm.compute_stats(X_train, Y_train, idx_train)
-
-    # Create datasets
-    train_dataset = pmssm.PMSSMDataset(X_train, Y_train, idx_train, stats)
-    val_dataset = pmssm.PMSSMDataset(X_train, Y_train, idx_val, stats)
-
-    logger.info(f"Training set size: {len(train_dataset)}")
-    logger.info(f"Validation set size: {len(val_dataset)}")
-
-    # Train model
-    logger.info("Training PMSSMTransformerTabular...")
-    model, train_losses, val_losses = train_model(
-        train_dataset, val_dataset, epochs, dropout, device, logger
-    )
-
-    # Compute iteration metrics
-    best_train_loss = min(train_losses)
-    best_val_loss = min(val_losses)
-    r2_val = compute_r2_score(model, val_dataset, stats, device)
-    logger.info(f"Iteration {iteration} metrics: best_train_loss={best_train_loss:.6f}, best_val_loss={best_val_loss:.6f}, R²={r2_val:.4f}")
-
-    # Generate diagnostic plots (same as train_pmssm.py)
-    logger.info("Generating diagnostic plots...")
-    pmssm.plot_losses(train_losses, val_losses, model, plot_dir=str(iter_plots_dir))
-    pmssm.compare_random_predictions(model, stats=stats, subset=train_dataset, mode='train', device=device, n_points=min(10, len(train_dataset)), logger=logger)
-    pmssm.compare_random_predictions(model, stats=stats, subset=val_dataset, mode='validation', device=device, n_points=min(3, len(val_dataset)), logger=logger)
-    pmssm.scatter_true_vs_pred(model, stats=stats, subset=train_dataset, mode='train', device=device, plot_dir=str(iter_plots_dir))
-    pmssm.scatter_true_vs_pred(model, stats=stats, subset=val_dataset, mode='validation', device=device, plot_dir=str(iter_plots_dir))
-    pmssm.hist_true_vs_pred(model, stats=stats, subset=train_dataset, mode='train', device=device, plot_dir=str(iter_plots_dir))
-    pmssm.hist_true_vs_pred(model, stats=stats, subset=val_dataset, mode='validation', device=device, plot_dir=str(iter_plots_dir))
-
-    # Generate candidate pool
-    logger.info(f"Generating {n_candidates} candidate points...")
-    candidates = generate_candidate_pool(n_candidates, seed=iteration)
-
-    # Compute uncertainty
-    pred_mean, pred_var = compute_uncertainty_mc_dropout(
-        model, candidates, stats, mc_samples, device, logger
-    )
-
-    # Select top uncertain points
-    top_indices = select_top_uncertain(candidates, pred_var, n_select)
-    logger.info(f"Selected {len(top_indices)} most uncertain points (requested: {n_select}, available: {len(candidates)})")
-
-    # Save results
-    csv_path = save_selected_points(candidates, pred_var, top_indices, output_dir, iteration)
-    logger.info(f"Saved selected points to {csv_path}")
-
-    # Save model checkpoint
-    model_path = iter_dir / "model_checkpoint.pt"
-    torch.save(model.state_dict(), model_path)
-    logger.info(f"Saved model checkpoint to {model_path}")
-
-    # Log selected points
-    logger.info("Selected points (non-normalized):")
-    param_names = [p.replace("IN_", "") for p in PARAM_ORDER]
-    for i, idx in enumerate(top_indices):
-        point = candidates[idx].numpy()
-        unc = pred_var[idx].item()
-        logger.debug(f"  Point {i+1}: uncertainty={unc:.6f}")
-        for j, name in enumerate(param_names):
-            logger.debug(f"    {name}: {point[j]:.2f}")
-
-    # Generate new models if requested
-    new_X, new_Y = None, None
-    if generate_data:
-        logger.info("Generating new models using Run3ModelGen...")
-        ntuple_path = generate_models_from_csv(csv_path, iter_dir, logger)
-        if ntuple_path:
-            new_X, new_Y = load_generated_data(ntuple_path, logger)
-            if new_X is not None:
-                logger.info(f"Generated {len(new_X)} new valid training points")
-
-    return model, candidates[top_indices], pred_var[top_indices], new_X, new_Y, best_train_loss, best_val_loss, r2_val
 
 
 @click.command()
@@ -1035,7 +857,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
 
             al_process = mp.Process(
                 target=train_model_worker,
-                args=(0, X, Y, idx_train_al, idx_val_al, epochs, dropout, al_queue, "AL", iter_dir, iter_plots_dir, al_checkpoint_path)
+                args=(1, X, Y, idx_train_al, idx_val_al, epochs, dropout, al_queue, "AL", iter_dir, iter_plots_dir, al_checkpoint_path)
             )
             baseline_process = mp.Process(
                 target=train_model_worker,
