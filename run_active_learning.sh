@@ -1,1 +1,1 @@
-python active_learning.py --epochs 10_000 --generate-data --n-datasets 10 --n-samples 10_000 --n-iterations 30 --n-select 10_000 --n-candidates 50_000 2>&1 | tee active_learning_output.log
+python active_learning.py --epochs 10_000 --generate-data --n-datasets 10 --n-samples 100_000 --n-iterations 30 --n-select 10_000 --n-candidates 50_000
