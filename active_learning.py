@@ -39,17 +39,17 @@ PARAM_RANGES = {
     "IN_mqL1": (4000, 4000),   # Fixed
     "IN_muR": (4000, 4000),    # Fixed
     "IN_mdR": (4000, 4000),    # Fixed
-    "IN_mqL3": (0, 2000),
-    "IN_mtR": (0, 2000),
-    "IN_mbR": (0, 2000),
+    "IN_mqL3": (4000, 4000),   # Fixed
+    "IN_mtR": (4000, 4000),    # Fixed
+    "IN_mbR": (4000, 4000),    # Fixed
     "IN_M_1": (-2000, 2000),
     "IN_M_2": (-2000, 2000),
     "IN_mu": (-2000, 2000),
-    "IN_M_3": (1000, 4000),
+    "IN_M_3": (4000, 4000),    # Fixed
     "IN_At": (-8000, 8000),
     "IN_Ab": (-2000, 2000),
     "IN_Atau": (-2000, 2000),
-    "IN_mA": (0, 2000),
+    "IN_mA": (2000, 2000),     # Fixed
     "IN_tanb": (1, 60),
 }
 
@@ -136,7 +136,9 @@ def _run_modelgen(df, output_dir, logger, label=""):
         logger.error(f"{prefix}Could not find pixi executable")
         return None
 
-    cmd = f"source {setup_script} && genModels.py --config_file {config_path} --scan_dir {scan_dir}"
+    # Use relative paths to avoid exceeding SPheno's Fortran CHARACTER buffer
+    # limit (~120 chars). Absolute paths for retry directories can exceed this.
+    cmd = f"source {setup_script} && cd {output_dir} && genModels.py --config_file modelgen_config.yaml --scan_dir scan"
     logger.info(f"{prefix}Starting model generation ({n_models} models) in {scan_dir}...")
 
     try:
@@ -243,11 +245,12 @@ def load_generated_data(ntuple_path, logger):
         # Run3ModelGen uses 'susy' as tree name
         tree = root_file["susy"]
 
-        # Check if MO_Omega exists (micromegas may have failed)
-        if "MO_Omega" not in tree.keys():
-            logger.warning("MO_Omega not found in ntuple - SPheno or micromegas may have failed for all models")
-            logger.warning("No new training data available from this generation")
-            return None, None
+        # Check if required branches exist (SPheno or micromegas may have failed for all models)
+        for required in ("MO_Omega", "SP_m_h"):
+            if required not in tree.keys():
+                logger.warning(f"{required} not found in ntuple - SPheno or micromegas may have failed for all models")
+                logger.warning("No new training data available from this generation")
+                return None, None
 
         # Extract input parameters (same order as PARAM_ORDER)
         branches = [

@@ -866,7 +866,7 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples,
         # ---- Augment training data ----
         if new_X is not None and new_Y is not None and len(new_X) > 0:
             # Filter new data too (Y > 0)
-            new_valid = (new_Y.squeeze() > 0)
+            new_valid = (new_Y.squeeze(-1) > 0)
             new_X = new_X[new_valid]
             new_Y = new_Y[new_valid]
             logger.info(f"Augmenting: {len(X)} + {len(new_X)} = "

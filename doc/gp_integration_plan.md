@@ -44,4 +44,5 @@ Integrate Gaussian Process (ExactGP) and Deep GP models from the `al_pmssmwithgp
 - [x] Implement warm-starting: `warm_start_path` in `train_gp_worker` loads prev checkpoint before training
 - [x] Dynamic GPU IDs in log messages (`AL_GPU_ID`, `BASELINE_GPU_ID` constants)
 - [x] Test with DeepGP model type → passes end-to-end, uncertainty computed, points selected
+- [x] Fix CG non-convergence warning in ExactGP: raise `max_cholesky_size` to `max(n_train+1, 5000)` in `do_train_loop` to force Cholesky for typical dataset sizes; also raised `max_cg_iterations` to 500 as fallback for larger datasets
 - [ ] Full multi-iteration test with data generation
