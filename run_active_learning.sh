@@ -6,3 +6,4 @@ python active_learning.py \
     --n-select 20_000 \
     --n-candidates 50_000 \
     --gen-workers 20
+    

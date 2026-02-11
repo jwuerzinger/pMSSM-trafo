@@ -568,6 +568,12 @@ def plot_iteration_metrics(iterations, al_metrics, baseline_metrics, output_dir,
     _, axes = plt.subplots(1, 3, figsize=(18, 5))
     ax1, ax2, ax3 = axes
 
+    # Show a label every 5 iterations; fall back to every iteration for short runs
+    tick_step = 5 if len(iterations) > 10 else 1
+    label_ticks = [i for i in iterations if i % tick_step == 0]
+    if iterations[0] not in label_ticks:
+        label_ticks = [iterations[0]] + label_ticks
+
     # Plot 1: Train/Validation Loss
     ax1.plot(iterations, al_metrics['train_losses'], 'b-', linewidth=2, marker='o', markersize=6, label='AL Train')
     ax1.plot(iterations, al_metrics['val_losses'], 'b--', linewidth=2, marker='s', markersize=6, label='AL Validation')
@@ -578,7 +584,8 @@ def plot_iteration_metrics(iterations, al_metrics, baseline_metrics, output_dir,
     ax1.set_title('Train/Validation Loss vs Iteration', fontsize=14)
     ax1.grid(True, which='major', alpha=0.3)
     ax1.grid(True, which='minor', alpha=0.15)
-    ax1.set_xticks(iterations)
+    ax1.set_xticks(label_ticks)
+    ax1.set_xticks(iterations, minor=True)
     ax1.set_yscale('log')
     ax1.legend(fontsize=9)
 
@@ -588,8 +595,10 @@ def plot_iteration_metrics(iterations, al_metrics, baseline_metrics, output_dir,
     ax2.set_xlabel('Iteration', fontsize=12)
     ax2.set_ylabel('R² Score', fontsize=12)
     ax2.set_title('R² Score vs Iteration', fontsize=14)
-    ax2.grid(True, alpha=0.3)
-    ax2.set_xticks(iterations)
+    ax2.grid(True, which='major', alpha=0.3)
+    ax2.grid(True, which='minor', alpha=0.15)
+    ax2.set_xticks(label_ticks)
+    ax2.set_xticks(iterations, minor=True)
     all_r2 = al_metrics['r2_scores'] + baseline_metrics['r2_scores']
     finite_r2 = [v for v in all_r2 if v is not None and not (v != v) and abs(v) != float('inf')]
     if finite_r2:
@@ -604,8 +613,10 @@ def plot_iteration_metrics(iterations, al_metrics, baseline_metrics, output_dir,
     ax3.set_xlabel('Iteration', fontsize=12)
     ax3.set_ylabel('Number of Samples', fontsize=12)
     ax3.set_title('Dataset Size vs Iteration', fontsize=14)
-    ax3.grid(True, alpha=0.3)
-    ax3.set_xticks(iterations)
+    ax3.grid(True, which='major', alpha=0.3)
+    ax3.grid(True, which='minor', alpha=0.15)
+    ax3.set_xticks(label_ticks)
+    ax3.set_xticks(iterations, minor=True)
     ax3.legend(fontsize=9)
 
     plt.tight_layout()

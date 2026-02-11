@@ -84,6 +84,12 @@ def plot(data, output_path):
     fig, axes = plt.subplots(1, 3, figsize=(18, 5))
     ax1, ax2, ax3 = axes
 
+    # Show a label every 5 iterations; fall back to every iteration for short runs
+    tick_step = 5 if len(iters) > 10 else 1
+    label_ticks = [i for i in iters if i % tick_step == 0]
+    if iters[0] not in label_ticks:
+        label_ticks = [iters[0]] + label_ticks
+
     # --- Loss ---
     ax1.plot(iters, data["al_train_losses"],       "b-",  lw=2, marker="o", ms=6, label="AL Train")
     ax1.plot(iters, data["al_val_losses"],         "b--", lw=2, marker="s", ms=6, label="AL Validation")
@@ -93,7 +99,8 @@ def plot(data, output_path):
     ax1.set_ylabel("Best Loss (MSE)", fontsize=12)
     ax1.set_title("Train/Validation Loss vs Iteration", fontsize=14)
     ax1.set_yscale("log")
-    ax1.set_xticks(iters)
+    ax1.set_xticks(label_ticks)
+    ax1.set_xticks(iters, minor=True)
     ax1.grid(True, which="major", alpha=0.3)
     ax1.grid(True, which="minor", alpha=0.15)
     ax1.legend(fontsize=9)
@@ -104,8 +111,10 @@ def plot(data, output_path):
     ax2.set_xlabel("Iteration", fontsize=12)
     ax2.set_ylabel("R² Score", fontsize=12)
     ax2.set_title("R² Score vs Iteration", fontsize=14)
-    ax2.set_xticks(iters)
-    ax2.grid(True, alpha=0.3)
+    ax2.set_xticks(label_ticks)
+    ax2.set_xticks(iters, minor=True)
+    ax2.grid(True, which="major", alpha=0.3)
+    ax2.grid(True, which="minor", alpha=0.15)
     all_r2 = data["al_r2_scores"] + data["baseline_r2_scores"]
     finite_r2 = [v for v in all_r2 if v == v and abs(v) != float("inf")]
     if finite_r2:
@@ -118,8 +127,10 @@ def plot(data, output_path):
     ax3.set_xlabel("Iteration", fontsize=12)
     ax3.set_ylabel("Number of Samples", fontsize=12)
     ax3.set_title("Dataset Size vs Iteration", fontsize=14)
-    ax3.set_xticks(iters)
-    ax3.grid(True, alpha=0.3)
+    ax3.set_xticks(label_ticks)
+    ax3.set_xticks(iters, minor=True)
+    ax3.grid(True, which="major", alpha=0.3)
+    ax3.grid(True, which="minor", alpha=0.15)
     ax3.legend(fontsize=9)
 
     fig.suptitle(
