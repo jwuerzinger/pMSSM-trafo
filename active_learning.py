@@ -77,26 +77,22 @@ CSV_TO_MODELGEN = {
 }
 
 
-def generate_models_from_csv(csv_path, output_dir, logger):
+def _run_modelgen(df, output_dir, logger, label=""):
     """
-    Generate pMSSM models using Run3ModelGen from selected points CSV.
+    Run genModels.py for a DataFrame of candidates in output_dir.
 
-    Args:
-        csv_path: Path to selected_points.csv
-        output_dir: Directory to save generated models (iteration_XXX)
-        logger: Logger instance
-
-    Returns:
-        Path to generated ROOT ntuple, or None if generation failed
+    Returns Path to the generated ROOT ntuple, or None on failure.
     """
     import subprocess
+    import shutil
 
-    # Read the CSV file
-    df = pd.read_csv(csv_path)
+    output_dir = Path(output_dir).resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    prefix = f"[{label}] " if label else ""
     n_models = len(df)
-    logger.info(f"Read {n_models} points from {csv_path}")
 
-    # Create config for fixed prior mode
+    # Build Run3ModelGen config
     config = {
         "prior": "fixed",
         "num_models": n_models,
@@ -109,91 +105,124 @@ def generate_models_from_csv(csv_path, output_dir, logger):
         ],
     }
 
-    # Map CSV columns to Run3ModelGen parameters
     for csv_col, modelgen_param in CSV_TO_MODELGEN.items():
         if csv_col in df.columns:
             config["parameters"][modelgen_param] = df[csv_col].tolist()
         else:
-            logger.warning(f"Column {csv_col} not found in CSV")
+            logger.warning(f"{prefix}Column {csv_col} not found in DataFrame")
 
-    # Write config to file (use absolute paths since subprocess runs from Run3ModelGen dir)
-    output_dir = Path(output_dir).resolve()
     config_path = output_dir / "modelgen_config.yaml"
     with open(config_path, "w") as f:
         yaml.dump(config, f, default_flow_style=None)
-    logger.info(f"Wrote ModelGen config to {config_path}")
 
-    # Set up scan directory (absolute path)
     scan_dir = output_dir / "scan"
     scan_dir.mkdir(parents=True, exist_ok=True)
 
-    # Get paths
     project_root = Path(__file__).parent.resolve()
     run3modelgen_dir = project_root / "Run3ModelGen"
     setup_script = run3modelgen_dir / "build" / "setup.sh"
 
-    # Check if Run3ModelGen is built
     if not setup_script.exists():
-        logger.error(f"Run3ModelGen setup script not found: {setup_script}")
-        logger.error("Please build Run3ModelGen first: cd Run3ModelGen && pixi run build")
+        logger.error(f"{prefix}Run3ModelGen setup script not found: {setup_script}")
         return None
 
-    # Run model generation using pixi with setup script
-    logger.info(f"Starting model generation in {scan_dir}...")
-
-    # Command to run genModels.py with proper environment
-    cmd = f"source {setup_script} && genModels.py --config_file {config_path} --scan_dir {scan_dir}"
-
-    # Find pixi executable
-    import shutil
     pixi_path = shutil.which("pixi")
     if pixi_path is None:
-        # Try common locations
         for path in [Path.home() / ".pixi" / "bin" / "pixi", Path("/u/jwuerzin/.pixi/bin/pixi")]:
             if path.exists():
                 pixi_path = str(path)
                 break
     if pixi_path is None:
-        logger.error("Could not find pixi executable")
+        logger.error(f"{prefix}Could not find pixi executable")
         return None
 
+    cmd = f"source {setup_script} && genModels.py --config_file {config_path} --scan_dir {scan_dir}"
+    logger.info(f"{prefix}Starting model generation ({n_models} models) in {scan_dir}...")
+
     try:
-        # Run in Run3ModelGen's pixi environment
         result = subprocess.run(
             [pixi_path, "run", "bash", "-c", cmd],
             cwd=str(run3modelgen_dir),
             capture_output=True,
             text=True,
-            timeout=3600,  # 1 hour timeout
+            timeout=3600,
         )
 
         if result.returncode != 0:
-            logger.error(f"genModels.py failed with return code {result.returncode}")
-            logger.error(f"stdout: {result.stdout}")
-            logger.error(f"stderr: {result.stderr}")
+            logger.error(f"{prefix}genModels.py failed with return code {result.returncode}")
+            logger.error(f"{prefix}stderr: {result.stderr[-500:]}")
             return None
 
-        logger.info("Model generation complete")
+        logger.info(f"{prefix}Model generation complete")
         logger.info(result.stdout[-2000:] if len(result.stdout) > 2000 else result.stdout)
 
     except subprocess.TimeoutExpired:
-        logger.error("Model generation timed out after 1 hour")
+        logger.error(f"{prefix}Model generation timed out after 1 hour")
         return None
     except Exception as e:
-        logger.error(f"Model generation failed: {e}")
+        logger.error(f"{prefix}Model generation failed: {e}")
         import traceback
         logger.error(traceback.format_exc())
         return None
 
-    # Find the generated ntuple
     ntuple_files = list(scan_dir.glob("*.root"))
     if ntuple_files:
-        ntuple_path = ntuple_files[0]
-        logger.info(f"Generated ntuple: {ntuple_path}")
-        return ntuple_path
+        logger.info(f"{prefix}Generated ntuple: {ntuple_files[0]}")
+        return ntuple_files[0]
     else:
-        logger.warning("No ROOT ntuple found after generation")
+        logger.warning(f"{prefix}No ROOT ntuple found after generation")
         return None
+
+
+def generate_models_from_csv(csv_path, output_dir, logger, n_workers=1):
+    """
+    Generate pMSSM models using Run3ModelGen from selected points CSV.
+
+    When n_workers > 1, the candidate list is split evenly across workers
+    and all genModels.py subprocesses are launched in parallel.
+
+    Args:
+        csv_path:   Path to selected_points.csv
+        output_dir: Directory to save generated models (iteration_XXX)
+        logger:     Logger instance
+        n_workers:  Number of parallel genModels.py processes (default: 1)
+
+    Returns:
+        List of Paths to generated ROOT ntuples (empty list on total failure)
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    df = pd.read_csv(csv_path)
+    logger.info(f"Read {len(df)} points from {csv_path}")
+
+    output_dir = Path(output_dir).resolve()
+
+    if n_workers <= 1:
+        ntuple = _run_modelgen(df, output_dir, logger)
+        return [ntuple] if ntuple is not None else []
+
+    # Split candidates evenly across workers
+    chunk_size = int(np.ceil(len(df) / n_workers))
+    chunks = [df.iloc[i * chunk_size:(i + 1) * chunk_size] for i in range(n_workers)]
+    chunks = [c for c in chunks if len(c) > 0]  # drop empty tail chunks if len(df) < n_workers
+    n_actual = len(chunks)
+    logger.info(f"Splitting {len(df)} models across {n_actual} parallel workers "
+                f"(~{len(chunks[0])} models each)...")
+
+    def run_worker(args):
+        i, chunk = args
+        worker_dir = output_dir / f"worker_{i:02d}"
+        return _run_modelgen(chunk, worker_dir, logger, label=f"worker {i}")
+
+    with ThreadPoolExecutor(max_workers=n_actual) as executor:
+        results = list(executor.map(run_worker, enumerate(chunks)))
+
+    ntuple_paths = [r for r in results if r is not None]
+    n_failed = n_actual - len(ntuple_paths)
+    if n_failed:
+        logger.warning(f"{n_failed}/{n_actual} generation workers failed")
+    logger.info(f"Parallel generation complete: {len(ntuple_paths)}/{n_actual} workers succeeded")
+    return ntuple_paths
 
 
 def load_generated_data(ntuple_path, logger):
@@ -434,7 +463,7 @@ def train_model_worker(gpu_id, X, Y, idx_train, idx_val, epochs, dropout, result
         device=device,
         epochs=epochs,
         early_stopping=True,
-        patience=500,
+        patience=200,
         scheduler=scheduler,
         grad_clip=1.0,
         logger=logger,
@@ -693,7 +722,8 @@ def save_selected_points(X_candidates, uncertainties, indices, output_dir, itera
 @click.option('--generate-data', is_flag=True, help="Generate new models using Run3ModelGen.")
 @click.option('--min-gen-fraction', default=0.6, type=float, help="Minimum fraction of n-select that must be generated successfully before stopping retries (default: 0.6).")
 @click.option('--max-gen-attempts', default=10, type=int, help="Maximum number of generation attempts per iteration (default: 10).")
-def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, dropout, n_datasets, n_samples, output_dir, generate_data, min_gen_fraction, max_gen_attempts):
+@click.option('--gen-workers', default=1, type=int, help="Number of parallel genModels.py workers per generation attempt (default: 1).")
+def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, dropout, n_datasets, n_samples, output_dir, generate_data, min_gen_fraction, max_gen_attempts, gen_workers):
     """
     Active learning pipeline for pMSSM relic density prediction.
 
@@ -742,6 +772,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
     if generate_data:
         logger.info(f"  min_gen_fraction: {min_gen_fraction} (target: {int(n_select * min_gen_fraction)} valid models per iteration)")
         logger.info(f"  max_gen_attempts: {max_gen_attempts}")
+        logger.info(f"  gen_workers: {gen_workers}")
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     logger.info(f"Device: {device}")
@@ -970,9 +1001,9 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
                     df.to_csv(attempt_csv, index=False)
 
                 logger.info(f"Generation attempt {attempt + 1}/{max_gen_attempts} ({len(attempt_indices)} points)...")
-                ntuple_path = generate_models_from_csv(attempt_csv, attempt_dir, logger)
+                ntuple_paths = generate_models_from_csv(attempt_csv, attempt_dir, logger, n_workers=gen_workers)
 
-                if ntuple_path:
+                for ntuple_path in ntuple_paths:
                     batch_X, batch_Y = load_generated_data(ntuple_path, logger)
                     if batch_X is not None and len(batch_X) > 0:
                         collected_X.append(batch_X)
