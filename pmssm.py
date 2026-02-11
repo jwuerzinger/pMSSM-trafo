@@ -39,44 +39,52 @@ class Dummy_PMSSMDataset(Dataset):
         return self.x[idx], self.y[idx]
 
 def load_pmssm_data(n_datasets=-1, logger=None, plot_dir="plots"):
+    """Load pMSSM ROOT data with the combined filter used by all pipelines.
+
+    Applies ``(MO_Omega > 0) & (MO_Omega < 1.0) & (SP_m_h != -1)``:
+    - ``MO_Omega > 0``: valid relic density (positive, non-sentinel)
+    - ``MO_Omega < 1.0``: sub-dominant dark matter candidates
+    - ``SP_m_h != -1``: valid Higgs mass computation (SPheno did not fail)
+    """
     import uproot, glob, numpy as np, torch
 
-    # Collect all ROOT files in the directory
-    files = glob.glob("data/18387358/*.root")
+    files = sorted(glob.glob("data/18387358/*.root"))
     logger.info(f"Found {len(files)} ROOT files")
 
-    # Open all files
-    if n_datasets != -1: 
+    if n_datasets != -1:
         logger.info(f"Only using {n_datasets} out of the {len(files)} datasets!!")
-        files = files[:n_datasets] # For testing only!
-    trees = [uproot.open(f)["susy"] for f in files]
+        files = files[:n_datasets]
 
+    trees = [uproot.open(f)["susy"] for f in files]
 
     branches = [
         "IN_meL", "IN_meR", "IN_mtauL", "IN_mtauR",
         "IN_mqL1", "IN_muR", "IN_mdR", "IN_mqL3",
         "IN_mtR", "IN_mbR", "IN_M_1", "IN_M_2",
         "IN_mu", "IN_M_3", "IN_At", "IN_Ab",
-        "IN_Atau", "IN_mA", "IN_tanb"
+        "IN_Atau", "IN_mA", "IN_tanb",
     ]
 
-    X = np.column_stack([
+    X_raw = np.column_stack([
         np.concatenate([t[b].array(library="np") for t in trees])
         for b in branches
     ])
+    Y_raw = np.concatenate([t["MO_Omega"].array(library="np") for t in trees])
+    sp_mh = np.concatenate([t["SP_m_h"].array(library="np") for t in trees])
 
-    Y = np.concatenate([t["MO_Omega"].array(library="np") for t in trees])
-    plt.hist(Y, bins=20, range=[0.0, 1.0])
+    mask = (Y_raw > 0) & (Y_raw < 1.0) & (sp_mh != -1)
+    logger.info(f"Filter (MO_Omega > 0 & < 1 & SP_m_h != -1): "
+                f"{mask.sum()} / {len(Y_raw)} samples kept")
+
+    plt.hist(Y_raw[mask], bins=20, range=[0.0, 1.0])
     if not running_in_notebook():
         plt.savefig(f"{plot_dir}/hist_dataset.png")
         plt.close()
-    else: plt.show()
+    else:
+        plt.show()
 
-    # pruning
-    mask = (Y != -1.0) & (Y < 1.0)
-    X = torch.from_numpy(X[mask]).float()
-    Y = torch.from_numpy(Y[mask]).float().unsqueeze(1)
-
+    X = torch.from_numpy(X_raw[mask]).float()
+    Y = torch.from_numpy(Y_raw[mask]).float().unsqueeze(1)
     return X, Y
 
 def make_split(X, train_split=0.9, seed=42, logger=None):

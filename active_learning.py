@@ -260,14 +260,16 @@ def load_generated_data(ntuple_path, logger):
 
         X = np.column_stack([tree[b].array(library="np") for b in branches])
         Y = tree["MO_Omega"].array(library="np")
+        sp_mh = tree["SP_m_h"].array(library="np")
 
-        # Filter valid entries (Omega != -1 and < 1)
-        mask = (Y != -1.0) & (Y < 1.0)
+        # Combined filter matching pmssm.load_pmssm_data:
+        # valid relic density, sub-dominant DM, and valid Higgs mass
+        mask = (Y > 0) & (Y < 1.0) & (sp_mh != -1)
         X = torch.from_numpy(X[mask]).float()
         Y = torch.from_numpy(Y[mask]).float().unsqueeze(1)
 
         if len(X) == 0:
-            logger.warning("No valid models found after filtering (Omega != -1 and < 1)")
+            logger.warning("No valid models found after filtering (MO_Omega > 0 & < 1 & SP_m_h != -1)")
             return None, None
 
         logger.info(f"Loaded {len(X)} valid models from ntuple (filtered from {len(mask)} total)")
@@ -678,7 +680,7 @@ def compute_uncertainty_mc_dropout(model, X_candidates, stats, n_samples, device
     logger.info(f"Running {n_samples} MC Dropout forward passes...")
 
     with torch.no_grad():
-        for i in range(n_samples):
+        for _ in range(n_samples):
             y_pred = model(X_norm)
             predictions.append(y_pred.cpu())
 
