@@ -630,6 +630,8 @@ def plot_losses(train_losses, val_losses, model, plot_dir="plots"):
     modelname = get_model_name(model)
     plt.title(f"{modelname} Training for pMSSM Relic Density")
     plt.yscale('log')
+    plt.grid(True, which='major', alpha=0.3)
+    plt.grid(True, which='minor', alpha=0.15)
 
     if not running_in_notebook():
         plt.savefig(f"{plot_dir}/losses_{modelname}.png")
