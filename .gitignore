@@ -7,3 +7,4 @@ __pycache__/
 plots/
 logs/
 active_learning_output*
+active_learning_gp_output*
