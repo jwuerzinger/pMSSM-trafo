@@ -3,4 +3,4 @@
 	url = ssh://git@gitlab.cern.ch:7999/jwuerzin/Run3ModelGen.git
 [submodule "al_pmssmwithgp"]
 	path = al_pmssmwithgp
-	url = git@github.com:dominikvoss95/al_pmssmwithgp.git
+	url = git@github.com:jwuerzinger/al_pmssmwithgp.git
