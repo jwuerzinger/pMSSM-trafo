@@ -1058,28 +1058,28 @@ def train_gp_worker(gpu_id, X, Y, X_val, Y_val, data_min, data_max,
         y_pred_train = gp_predict(model, x_train_norm, model_type,
                                   jitter=jitter, num_samples=num_samples)
 
-        # Combined diagnostics plot (loss curves + val scatter in transformed space)
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
-        ax1.plot(train_losses, label='Train')
-        ax1.plot(val_losses, label='Validation')
-        ax1.set_xlabel('Iteration')
-        ax1.set_ylabel('Loss')
-        ax1.set_title(f'{model_name} Loss Curves')
-        ax1.legend()
-        ax1.grid(True, alpha=0.3)
+        # # Combined diagnostics plot (loss curves + val scatter in transformed space)
+        # fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+        # ax1.plot(train_losses, label='Train')
+        # ax1.plot(val_losses, label='Validation')
+        # ax1.set_xlabel('Iteration')
+        # ax1.set_ylabel('Loss')
+        # ax1.set_title(f'{model_name} Loss Curves')
+        # ax1.legend()
+        # ax1.grid(True, alpha=0.3)
 
-        ax2.scatter(y_val_t.cpu().numpy(), y_pred_val.numpy(), alpha=0.5, s=10)
-        lims = [min(y_val_t.min().item(), y_pred_val.min().item()),
-                max(y_val_t.max().item(), y_pred_val.max().item())]
-        ax2.plot(lims, lims, 'r--', linewidth=1)
-        ax2.set_xlabel('True (transformed)')
-        ax2.set_ylabel('Predicted')
-        ax2.set_title(f'{model_name} True vs Predicted (R²={r2:.4f})')
-        ax2.grid(True, alpha=0.3)
+        # ax2.scatter(y_val_t.cpu().numpy(), y_pred_val.numpy(), alpha=0.5, s=10)
+        # lims = [min(y_val_t.min().item(), y_pred_val.min().item()),
+        #         max(y_val_t.max().item(), y_pred_val.max().item())]
+        # ax2.plot(lims, lims, 'r--', linewidth=1)
+        # ax2.set_xlabel('True (transformed)')
+        # ax2.set_ylabel('Predicted')
+        # ax2.set_title(f'{model_name} True vs Predicted (R²={r2:.4f})')
+        # ax2.grid(True, alpha=0.3)
 
-        plt.tight_layout()
-        plt.savefig(plots_dir / 'diagnostics.png', dpi=150, bbox_inches='tight')
-        plt.close()
+        # plt.tight_layout()
+        # plt.savefig(plots_dir / 'diagnostics.png', dpi=150, bbox_inches='tight')
+        # plt.close()
 
         # --- Plots matching active_learning.py ---
         # Rolling average loss curve (separate file)
