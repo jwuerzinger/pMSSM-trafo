@@ -1,10 +1,10 @@
 # pMSSM-trafo
 
-Transformer-based neural networks for predicting dark matter relic density from pMSSM (phenomenological Minimal Supersymmetric Standard Model) parameters.
+Machine learning models for predicting pMSSM (phenomenological Minimal Supersymmetric Standard Model) observables, with active learning pipelines for efficient data collection.
 
 ## Overview
 
-This project trains and compares different neural network architectures to predict the dark matter relic density (Ωh²) from 19 pMSSM input parameters. The models learn to map supersymmetric particle mass parameters to cosmological observables.
+This project trains and compares neural network and Gaussian Process architectures to predict dark matter relic density (Ωh²) and other observables from 19 pMSSM input parameters. Two active learning pipelines intelligently select the most informative parameter points for expensive physics simulations (SPheno + micromegas).
 
 ### Input Parameters (19 features)
 - Slepton masses: `meL`, `meR`, `mtauL`, `mtauR`
@@ -187,32 +187,107 @@ pixi run python active_learning.py --generate-data --n-iterations 10
 
 ### Documentation
 
-See [doc/active_learning_plan.md](doc/active_learning_plan.md) for:
-- Detailed algorithm description
-- Complete CLI reference
-- Troubleshooting guide
-- Implementation details
+See [doc/active_learning_plan.md](doc/active_learning_plan.md) for detailed algorithm description and CLI reference.
+
+## GP Active Learning Pipeline
+
+An alternative active learning pipeline using Gaussian Process models for native uncertainty estimation (no MC Dropout needed).
+
+### Models
+
+| Model | Uncertainty | Use Case |
+|-------|-----------|----------|
+| ExactGP | GP posterior variance | Default, best for <10k samples |
+| DeepGP | Deep GP posterior | Larger datasets |
+| SparseGP | Variational GP with inducing points | Scalable to large datasets |
+| MLP | None (random fallback) | Comparison baseline |
+
+### Quick Start
+
+```bash
+# Quick test
+python active_learning_gp.py --testing
+
+# Full run with entropy-based batch selection (default)
+python active_learning_gp.py \
+    --n-iterations 10 \
+    --n-samples 100000 \
+    --generate-data
+
+# Simpler top-K variance selection
+python active_learning_gp.py \
+    --selection-strategy top_k \
+    --n-iterations 10
+
+# Production run
+bash run_active_learning_gp.sh
+```
+
+### Key Features
+
+1. **Native GP Uncertainty**: No MC Dropout needed - uses posterior variance directly
+2. **Entropy-Based Batch Selection** (default): LHS candidate sampling, threshold filtering, Gibbs sampling for diverse batches
+3. **Early Stopping**: Patience 200 on validation loss (configurable via `--patience`, disable with `--no-early-stopping`)
+4. **Multiple Targets**: DMRD (relic density), CrossSection, CLs via `--target`
+5. **Comprehensive Metrics**: Accuracy, chi2, pulls, weighted accuracy via `--compute-full-metrics`
+6. **ARD Lengthscale Tracking**: Per-iteration lengthscale CSV via `--track-lengthscales`
+7. **Parallel Training**: AL and baseline models on separate GPUs
+8. **YAML Config + SLURM Sweeps**: `--config-file sweep.yaml --sweep-index $SLURM_ARRAY_TASK_ID`
+
+### Training Configuration
+
+| Setting | Default | CLI Option |
+|---------|---------|------------|
+| Max iterations | 2000 | `--training-iterations` |
+| Early stopping | On | `--early-stopping/--no-early-stopping` |
+| Patience | 200 | `--patience` |
+| Learning rate | 1e-3 | `--learning-rate` |
+| Selection | entropy_batch | `--selection-strategy` |
+| Kernel | RBF with ARD | `--kernel`, `--use-ard` |
+
+### Output
+
+```
+active_learning_gp_output/
+├── active_learning.log
+├── iteration_001/
+│   ├── selected_points.csv
+│   ├── model_checkpoint.pt
+│   ├── plots/{al,baseline}/     # Losses, scatter, histogram, random predictions
+│   └── scan/                    # [If --generate-data]
+├── plots/iteration_metrics.png  # AL vs Baseline comparison
+├── lengthscales.csv             # [If --track-lengthscales]
+└── summary.json
+```
+
+### Documentation
+
+See [doc/gp_integration_plan.md](doc/gp_integration_plan.md) for progress tracking and [doc/gp_pipeline_comparison.md](doc/gp_pipeline_comparison.md) for full feature reference and CLI options.
 
 ## Project Structure
 
 ```
 pMSSM-trafo/
 ├── pmssm.py                    # Model definitions and training utilities
-├── train_pmssm.py              # Main training script with CLI
-├── active_learning.py          # Active learning pipeline with baseline comparison
+├── train_pmssm.py              # Transformer training script with CLI
+├── active_learning.py          # Transformer active learning pipeline
+├── active_learning_gp.py       # GP active learning pipeline
+├── run_active_learning_gp.sh   # Production GP AL run script
+├── run_active_learning_gp_medium_test.sh  # Medium test script
 ├── pixi.toml                   # Dependency configuration
 ├── data/                       # ROOT files with pMSSM data
 ├── logs/                       # Training logs (timestamped)
 ├── plots/                      # Output plots (organized by run)
-├── active_learning_output/     # Active learning results
+├── al_pmssmwithgp/             # GP models submodule (ExactGP, DeepGP, SparseGP, MLP)
 ├── Run3ModelGen/               # Submodule for pMSSM model generation
 ├── tests/                      # Unit tests
 └── doc/                        # Documentation
-    ├── TRAINING_GUIDE.md
-    ├── LOGGING_INFO.md
-    ├── PARALLEL_TRAINING.md
-    ├── transformer_configs.md
-    └── active_learning_plan.md # Active learning documentation
+    ├── SUMMARY.md              # Project overview
+    ├── TRAINING_GUIDE.md       # Transformer training guide
+    ├── PARALLEL_TRAINING.md    # Multi-GPU setup
+    ├── active_learning_plan.md # Transformer AL design
+    ├── gp_integration_plan.md  # GP AL integration & progress
+    └── gp_pipeline_comparison.md  # GP pipeline features & CLI
 ```
 
 ## Output
@@ -235,10 +310,12 @@ See [doc/PARALLEL_TRAINING.md](doc/PARALLEL_TRAINING.md) for details.
 
 ## Documentation
 
-- [Training Guide](doc/TRAINING_GUIDE.md) - Detailed training instructions
+- [Project Summary](doc/SUMMARY.md) - Overview of all pipelines
+- [Training Guide](doc/TRAINING_GUIDE.md) - Transformer training instructions
 - [Parallel Training](doc/PARALLEL_TRAINING.md) - Multi-GPU setup
-- [Logging Info](doc/LOGGING_INFO.md) - Log configuration
-- [Transformer Configs](doc/transformer_configs.md) - Model architecture details
+- [Transformer AL](doc/active_learning_plan.md) - Transformer active learning design
+- [GP Integration](doc/gp_integration_plan.md) - GP pipeline progress tracker
+- [GP Pipeline Reference](doc/gp_pipeline_comparison.md) - GP features, CLI options, comparison
 
 ## License
 

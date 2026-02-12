@@ -1,18 +1,20 @@
-# Summary of Training Improvements
+# Project Summary
 
-This document summarizes all improvements made to the pMSSM transformer training code.
+This document summarizes the pMSSM-trafo project: transformer and GP-based models for predicting pMSSM observables (relic density, cross sections, exclusion limits), with active learning pipelines for efficient data collection.
 
 ## Quick Start
 
 ```bash
-# Parallel training (default with 2+ GPUs)
-python train_pmssm.py
+# --- Transformer training ---
+python train_pmssm.py                          # Full training (parallel GPUs)
+python train_pmssm.py --testing --epochs 100   # Quick test
 
-# Sequential training (1 GPU or forced)
-python train_pmssm.py --no-parallel
+# --- Transformer active learning ---
+python active_learning.py --n-iterations 5 --generate-data
 
-# Quick test
-python train_pmssm.py --testing --epochs 100
+# --- GP active learning ---
+python active_learning_gp.py --n-iterations 5 --generate-data
+python active_learning_gp.py --testing         # Quick test
 ```
 
 ## Major Improvements
@@ -79,28 +81,74 @@ Options:
   --help                Show this message
 ```
 
+## Active Learning Pipelines
+
+### Transformer Active Learning (`active_learning.py`)
+
+Uses MC Dropout uncertainty estimation with the tabular transformer model:
+- 2000 training epochs, early stopping (patience 200) on validation loss
+- Parallel training of AL + baseline models on separate GPUs
+- Candidate selection via top-K variance from MC Dropout forward passes
+- Closed-loop data generation via Run3ModelGen
+- See [active_learning_plan.md](active_learning_plan.md) for details
+
+### GP Active Learning (`active_learning_gp.py`)
+
+Uses GP posterior variance or entropy-based batch selection:
+- Models: ExactGP, DeepGP, SparseGP, MLP
+- 2000 training iterations (default), early stopping (patience 200) on validation loss
+- Selection strategies: entropy batch (default, LHS + Gibbs sampling) or top-K variance
+- Parallel training of AL + baseline models on separate GPUs
+- Multiple targets: DMRD (relic density), CrossSection, CLs
+- Comprehensive metrics: accuracy, chi2, pulls, weighted accuracy
+- ARD lengthscale tracking, advanced diagnostic plots
+- YAML config + SLURM parameter sweep support
+- See [gp_integration_plan.md](gp_integration_plan.md) and [gp_pipeline_comparison.md](gp_pipeline_comparison.md) for details
+
+### Pipeline Comparison
+
+| Feature | Transformer | GP |
+|---------|------------|-----|
+| Uncertainty | MC Dropout (N forward passes) | GP posterior variance |
+| Normalization | Z-score (mean/std) | Min-max to [0,1] |
+| Default selection | Top-K variance | Entropy batch |
+| Training | DataLoader + optimizer loop | `model.do_train_loop()` |
+| Default epochs | 2000 | 2000 |
+| Early stopping | Patience 200 | Patience 200 |
+| Models | PMSSMTransformerTabular | ExactGP, DeepGP, SparseGP, MLP |
+
 ## File Organization
 
 ```
 pMSSM-trafo/
-├── train_pmssm.py         # Main training script (parallel support)
-├── pmssm.py               # Model definitions and training functions
+├── train_pmssm.py              # Transformer training script
+├── pmssm.py                    # Model definitions and training functions
+├── active_learning.py          # Transformer active learning pipeline
+├── active_learning_gp.py       # GP active learning pipeline
+├── run_active_learning_gp.sh   # Production GP AL run script
+├── run_active_learning_gp_medium_test.sh  # Medium test script
+├── al_pmssmwithgp/             # GP models submodule
+│   └── model/gp_pipeline/
+│       ├── models/             # ExactGP, DeepGP, SparseGP, MLP
+│       └── utils/              # Selection, evaluation, plotting
+├── Run3ModelGen/               # Physics simulation submodule
 ├── logs/
 │   └── training_YYYYMMDD_HHMMSS.log
 ├── plots/
 │   └── run_YYYYMMDD_HHMMSS/
-│       ├── transformer_losses.png
-│       ├── transformer_tabular_losses.png
-│       └── MLP_losses.png
 ├── doc/
-│   ├── TRAINING_GUIDE.md         # Complete training guide
-│   ├── PARALLEL_TRAINING.md      # Parallel GPU setup
-│   ├── PLOT_ORGANIZATION.md      # Plot organization
-│   └── LOGGING_INFO.md           # Logging configuration
+│   ├── SUMMARY.md                   # This file
+│   ├── TRAINING_GUIDE.md            # Transformer training guide
+│   ├── PARALLEL_TRAINING.md         # Parallel GPU setup
+│   ├── PLOT_ORGANIZATION.md         # Plot organization
+│   ├── LOGGING_INFO.md              # Logging configuration
+│   ├── active_learning_plan.md      # Transformer AL design
+│   ├── gp_integration_plan.md       # GP AL integration progress
+│   └── gp_pipeline_comparison.md    # GP pipeline comparison & features
 └── tests/
-    ├── test_parallel_gpus.py     # GPU configuration test
-    ├── test_sequential_mode.py   # Sequential mode test
-    └── test_plot_organization.py # Plot directory test
+    ├── test_parallel_gpus.py
+    ├── test_sequential_mode.py
+    └── test_plot_organization.py
 ```
 
 ## Expected Performance
@@ -176,10 +224,13 @@ python train_pmssm.py --testing --epochs 10
 ## Documentation
 
 See detailed documentation in `doc/`:
-- [TRAINING_GUIDE.md](doc/TRAINING_GUIDE.md) - Complete usage guide
-- [PARALLEL_TRAINING.md](doc/PARALLEL_TRAINING.md) - Parallel GPU details
-- [PLOT_ORGANIZATION.md](doc/PLOT_ORGANIZATION.md) - Plot organization
-- [LOGGING_INFO.md](doc/LOGGING_INFO.md) - Logging setup
+- [TRAINING_GUIDE.md](TRAINING_GUIDE.md) - Transformer training guide
+- [PARALLEL_TRAINING.md](PARALLEL_TRAINING.md) - Parallel GPU setup
+- [PLOT_ORGANIZATION.md](PLOT_ORGANIZATION.md) - Plot organization
+- [LOGGING_INFO.md](LOGGING_INFO.md) - Logging configuration
+- [active_learning_plan.md](active_learning_plan.md) - Transformer active learning design
+- [gp_integration_plan.md](gp_integration_plan.md) - GP pipeline integration & progress
+- [gp_pipeline_comparison.md](gp_pipeline_comparison.md) - GP pipeline features & CLI reference
 
 ## Changes to Your Code
 
@@ -199,10 +250,13 @@ See detailed documentation in `doc/`:
 
 ## Next Steps
 
-1. Run tests to verify setup: `python tests/test_parallel_gpus.py`
-2. Try quick test: `python train_pmssm.py --testing --epochs 100`
-3. Run full training: `python train_pmssm.py`
-4. Compare results in `plots/run_YYYYMMDD_HHMMSS/`
-5. Check logs in `logs/training_YYYYMMDD_HHMMSS.log`
+### Transformer
+1. Run tests: `python tests/test_parallel_gpus.py`
+2. Quick test: `python train_pmssm.py --testing --epochs 100`
+3. Full training: `python train_pmssm.py`
 
-Enjoy your improved training pipeline! 🚀
+### GP Active Learning
+1. Quick test: `python active_learning_gp.py --testing`
+2. Medium test: `bash run_active_learning_gp_medium_test.sh`
+3. Production run: `bash run_active_learning_gp.sh`
+4. Remaining end-to-end tests: SparseGP, MLP, entropy_batch, CrossSection/CLs targets

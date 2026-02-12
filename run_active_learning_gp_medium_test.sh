@@ -1,11 +1,11 @@
 #!/bin/bash
 
-python active_learning_gp.py \
+.pixi/envs/default/bin/python active_learning_gp.py \
     --n-datasets 3 \
     --generate-data \
     --model-type exact_gp \
     --n-samples 2000 \
-    --n-iterations 1 \
+    --n-iterations 3 \
     --training-iterations 500 \
     --learning-rate 1e-3 \
     --n-candidates 20000 \
