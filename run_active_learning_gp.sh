@@ -1,7 +1,9 @@
 #!/bin/bash
 .pixi/envs/default/bin/python active_learning_gp.py \
     --model-type exact_gp \
-    --training-iterations 1000 \
+    --training-iterations 10000 \
+    --early-stopping \
+    --patience 100 \
     --learning-rate 1e-3 \
     --generate-data \
     --n-samples 100000 \

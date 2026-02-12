@@ -1393,6 +1393,7 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples,
 
     # Previous model state for warm starting
     prev_al_checkpoint = None
+    prev_baseline_checkpoint = None
 
     for iteration in range(1, n_iterations + 1):
         logger.info(f"=== GP Active Learning Iteration {iteration} ===")
@@ -1457,6 +1458,7 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples,
         Y_val_base = Y_baseline[perm_base[n_train_base:]]
 
         al_checkpoint_path = iter_dir / "al_model_checkpoint.pt"
+        baseline_checkpoint_path = iter_dir / "baseline_model_checkpoint.pt"
 
         if use_parallel:
             # ---- Train AL and Baseline in parallel on different GPUs ----
@@ -1464,6 +1466,7 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples,
             baseline_queue = mp.Queue()
 
             al_warm_start = prev_al_checkpoint if warm_starting else None
+            baseline_warm_start = prev_baseline_checkpoint if warm_starting else None
             al_process = mp.Process(
                 target=train_gp_worker,
                 args=(AL_GPU_ID, X_train_al, Y_train_al, X_val_al, Y_val_al,
@@ -1477,8 +1480,9 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples,
                 args=(BASELINE_GPU_ID, X_train_base, Y_train_base, X_val_base, Y_val_base,
                       data_min, data_max, model_type, len(PARAM_ORDER), gp_kwargs,
                       learning_rate, training_iterations, batch_size, jitter,
-                      baseline_queue, "Baseline", iter_dir, iter_plots_dir, None,
-                      gp_num_samples, None, target, effective_patience),
+                      baseline_queue, "Baseline", iter_dir, iter_plots_dir,
+                      baseline_checkpoint_path,
+                      gp_num_samples, baseline_warm_start, target, effective_patience),
             )
 
             logger.info(f"Launching parallel training: AL on cuda:{AL_GPU_ID}, "
@@ -1493,6 +1497,7 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples,
         else:
             # ---- Train AL and Baseline sequentially ----
             al_warm_start = prev_al_checkpoint if warm_starting else None
+            baseline_warm_start = prev_baseline_checkpoint if warm_starting else None
             logger.info(f"Training AL {model_type} model ({n_train} train, {n_val} val)...")
             al_queue = mp.Queue()
             train_gp_worker(
@@ -1512,8 +1517,9 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples,
                 data_min, data_max, model_type, len(PARAM_ORDER), gp_kwargs,
                 learning_rate, training_iterations, batch_size, jitter,
                 baseline_queue, "Baseline", iter_dir, iter_plots_dir,
-                num_samples=gp_num_samples, target=target,
-                patience=effective_patience,
+                baseline_checkpoint_path,
+                num_samples=gp_num_samples, warm_start_path=baseline_warm_start,
+                target=target, patience=effective_patience,
             )
             baseline_results = baseline_queue.get()
 
@@ -1741,6 +1747,7 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples,
             Y = torch.cat([Y, new_Y], dim=0)
 
         prev_al_checkpoint = al_checkpoint_path
+        prev_baseline_checkpoint = baseline_checkpoint_path
 
     # ---- Plot iteration metrics ----
     al_metrics = {
