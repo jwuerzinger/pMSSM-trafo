@@ -310,7 +310,7 @@ def load_config_with_sweep(config_file, sweep_index=None):
 @click.option('--noise', default=1e-2, type=float, help="Initial noise level.")
 @click.option('--jitter', default=1e-3, type=float, help="Cholesky jitter.")
 @click.option('--learning-rate', default=1e-3, type=float, help="Optimizer learning rate.")
-@click.option('--training-iterations', default=2000, type=int, help="Max training iterations per AL iteration (default: 2000).")
+@click.option('--epochs', default=2000, type=int, help="Max training epochs per AL iteration (default: 2000).")
 @click.option('--early-stopping/--no-early-stopping', default=True, help="Enable early stopping on validation loss.")
 @click.option('--patience', default=200, type=int, help="Early stopping patience (iterations without improvement).")
 @click.option('--use-ard/--no-ard', default=True, help="Use ARD (Automatic Relevance Determination).")
@@ -347,7 +347,7 @@ def load_config_with_sweep(config_file, sweep_index=None):
 def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples,
          output_dir, generate_data, min_gen_fraction, max_gen_attempts, gen_workers,
          target, model_type, kernel, lengthscale, noise, jitter, learning_rate,
-         training_iterations, early_stopping, patience,
+         epochs, early_stopping, patience,
          use_ard, use_dkl, feature_dim,
          num_hidden_dims, num_middle_dims, num_inducing_max, inducing_strategy,
          gp_num_samples, batch_size, warm_starting, m_nu, num_mixtures,
@@ -369,7 +369,7 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples,
         _cfg_map = {
             'target': 'target', 'model_type': 'model_type', 'kernel': 'kernel',
             'lengthscale': 'lengthscale', 'noise': 'noise', 'jitter': 'jitter',
-            'learning_rate': 'learning_rate', 'training_iterations': 'training_iterations',
+            'learning_rate': 'learning_rate', 'epochs': 'epochs',
             'n_iterations': 'n_iterations', 'n_candidates': 'n_candidates',
             'n_select': 'n_select', 'selection_strategy': 'selection_strategy',
             'entropy_blur': 'entropy_blur', 'entropy_beta': 'entropy_beta',
@@ -387,7 +387,7 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples,
         noise = float(_locals.get('noise', noise))
         jitter = float(_locals.get('jitter', jitter))
         learning_rate = float(_locals.get('learning_rate', learning_rate))
-        training_iterations = int(_locals.get('training_iterations', training_iterations))
+        epochs = int(_locals.get('epochs', epochs))
         n_iterations = int(_locals.get('n_iterations', n_iterations))
         n_candidates = int(_locals.get('n_candidates', n_candidates))
         n_select = int(_locals.get('n_select', n_select))
@@ -429,7 +429,7 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples,
     if testing:
         n_datasets = n_datasets if n_datasets is not None else 3
         n_samples = n_samples if n_samples is not None else 30
-        training_iterations = 50
+        epochs = 50
         n_candidates = 100
         logger.info("Testing mode enabled")
     else:
@@ -443,7 +443,7 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples,
     logger.info(f"  n_candidates: {n_candidates}")
     logger.info(f"  n_select: {n_select}")
     logger.info(f"  selection_strategy: {selection_strategy}")
-    logger.info(f"  training_iterations: {training_iterations}")
+    logger.info(f"  epochs: {epochs}")
     logger.info(f"  early_stopping: {early_stopping} (patience={patience})")
     logger.info(f"  learning_rate: {learning_rate}")
     logger.info(f"  kernel: {kernel}")
@@ -637,7 +637,7 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples,
                 target=train_gp_worker,
                 args=(AL_GPU_ID, X_train_al, Y_train_al, X_val_al, Y_val_al,
                       data_min, data_max, model_type, len(PARAM_ORDER), gp_kwargs,
-                      learning_rate, training_iterations, batch_size, jitter,
+                      learning_rate, epochs, batch_size, jitter,
                       al_queue, "AL", iter_dir, iter_plots_dir, al_checkpoint_path,
                       gp_num_samples, al_warm_start, target, effective_patience),
             )
@@ -645,7 +645,7 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples,
                 target=train_gp_worker,
                 args=(BASELINE_GPU_ID, X_train_base, Y_train_base, X_val_base, Y_val_base,
                       data_min, data_max, model_type, len(PARAM_ORDER), gp_kwargs,
-                      learning_rate, training_iterations, batch_size, jitter,
+                      learning_rate, epochs, batch_size, jitter,
                       baseline_queue, "Baseline", iter_dir, iter_plots_dir,
                       baseline_checkpoint_path,
                       gp_num_samples, baseline_warm_start, target, effective_patience),
@@ -669,7 +669,7 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples,
             train_gp_worker(
                 device, X_train_al, Y_train_al, X_val_al, Y_val_al,
                 data_min, data_max, model_type, len(PARAM_ORDER), gp_kwargs,
-                learning_rate, training_iterations, batch_size, jitter,
+                learning_rate, epochs, batch_size, jitter,
                 al_queue, "AL", iter_dir, iter_plots_dir, al_checkpoint_path,
                 num_samples=gp_num_samples, warm_start_path=al_warm_start,
                 target=target, patience=effective_patience,
@@ -681,7 +681,7 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples,
             train_gp_worker(
                 device, X_train_base, Y_train_base, X_val_base, Y_val_base,
                 data_min, data_max, model_type, len(PARAM_ORDER), gp_kwargs,
-                learning_rate, training_iterations, batch_size, jitter,
+                learning_rate, epochs, batch_size, jitter,
                 baseline_queue, "Baseline", iter_dir, iter_plots_dir,
                 baseline_checkpoint_path,
                 num_samples=gp_num_samples, warm_start_path=baseline_warm_start,
@@ -956,7 +956,7 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples,
             "n_candidates": n_candidates,
             "n_select": n_select,
             "selection_strategy": selection_strategy,
-            "training_iterations": training_iterations,
+            "epochs": epochs,
             "learning_rate": learning_rate,
             "kernel": kernel,
             "lengthscale": lengthscale,
