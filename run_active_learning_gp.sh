@@ -9,7 +9,7 @@
     --n-samples 50000 \
     --n-iterations 40 \
     --n-select 200 \
-    --n-candidates 50000 \
+    --n-candidates 10000 \
     --gen-workers 20 \
     --kernel RBF \
     --lengthscale 1.0 \
