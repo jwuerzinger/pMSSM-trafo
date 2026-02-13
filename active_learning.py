@@ -11,7 +11,6 @@ import warnings
 warnings.filterwarnings('ignore', message='.*enable_nested_tensor.*')
 
 from pathlib import Path
-import sys
 from datetime import datetime
 import logging
 import structlog
