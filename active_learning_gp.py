@@ -899,6 +899,86 @@ def compare_random_predictions_gp(y_true_phys, y_pred_phys, mode, model_type,
     logger.info("-" * 60)
 
 
+def plot_data_histograms_gp(X, Y, idx_train, idx_val, output_dir, model_name, iteration, logger):
+    """
+    Plot histograms of all input parameters and target for training and validation sets.
+
+    Args:
+        X: Full input tensor (N, 19) - raw physical units
+        Y: Full target tensor (N, 1) or (N,) - raw physical units
+        idx_train: Training indices
+        idx_val: Validation indices
+        output_dir: Directory to save plots
+        model_name: Name identifier (e.g., "AL", "Baseline")
+        iteration: Current iteration number
+        logger: Logger instance
+    """
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    X_train = X[idx_train].numpy() if hasattr(X, 'numpy') else X[idx_train]
+    X_val = X[idx_val].numpy() if hasattr(X, 'numpy') else X[idx_val]
+    Y_train = Y[idx_train].squeeze().numpy() if hasattr(Y, 'numpy') else Y[idx_train].squeeze()
+    Y_val = Y[idx_val].squeeze().numpy() if hasattr(Y, 'numpy') else Y[idx_val].squeeze()
+
+    # Plot input parameters
+    param_names = [p.replace("IN_", "") for p in PARAM_ORDER]
+    n_params = len(param_names)
+
+    # Create grid for input parameters (5 columns)
+    n_cols = 5
+    n_rows = int(np.ceil(n_params / n_cols))
+
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(20, 4 * n_rows))
+    axes = axes.flatten()
+
+    for i, param_name in enumerate(param_names):
+        ax = axes[i]
+
+        # Plot histograms
+        ax.hist(X_train[:, i], bins=30, alpha=0.5, label='Train', color='blue', density=True)
+        ax.hist(X_val[:, i], bins=30, alpha=0.5, label='Val', color='orange', density=True)
+
+        ax.set_xlabel(param_name, fontsize=10)
+        ax.set_ylabel('Density', fontsize=10)
+        ax.set_title(f'{param_name}', fontsize=11)
+        ax.legend(fontsize=9)
+        ax.grid(True, alpha=0.3)
+
+    # Hide unused subplots
+    for i in range(n_params, len(axes)):
+        axes[i].axis('off')
+
+    plt.tight_layout()
+    plot_path = output_dir / f'{model_name.lower()}_input_histograms_iter{iteration:03d}.png'
+    plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+    plt.close()
+
+    # Plot target (MO_Omega)
+    fig, ax = plt.subplots(1, 1, figsize=(8, 6))
+    ax.hist(Y_train, bins=50, alpha=0.5, label='Train', color='blue', density=True)
+    ax.hist(Y_val, bins=50, alpha=0.5, label='Val', color='orange', density=True)
+    ax.set_xlabel('MO_Omega (Ωh²)', fontsize=12)
+    ax.set_ylabel('Density (log scale)', fontsize=12)
+    ax.set_yscale('log')
+    ax.set_title(f'{model_name} Target Distribution - Iteration {iteration}', fontsize=14)
+    ax.legend(fontsize=11)
+    ax.grid(True, alpha=0.3, which='both')
+
+    plt.tight_layout()
+    plot_path = output_dir / f'{model_name.lower()}_target_histogram_iter{iteration:03d}.png'
+    plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+    plt.close()
+
+    if logger:
+        logger.info(f"{model_name} histograms saved to {output_dir}")
+
+
 # ---------------------------------------------------------------------------
 # YAML config + parameter sweep (Phase 8)
 # ---------------------------------------------------------------------------
@@ -1469,6 +1549,17 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples,
         Y_train_base = Y_baseline[perm_base[:n_train_base]]
         X_val_base = X_baseline[perm_base[n_train_base:]]
         Y_val_base = Y_baseline[perm_base[n_train_base:]]
+
+        # Plot data distribution histograms for AL
+        al_hist_dir = iter_plots_dir / "al"
+        al_hist_dir.mkdir(parents=True, exist_ok=True)
+        plot_data_histograms_gp(X, Y, idx_train, idx_val, al_hist_dir, "AL", iteration, logger)
+
+        # Plot data distribution histograms for Baseline
+        baseline_hist_dir = iter_plots_dir / "baseline"
+        baseline_hist_dir.mkdir(parents=True, exist_ok=True)
+        plot_data_histograms_gp(X_baseline, Y_baseline, perm_base[:n_train_base], perm_base[n_train_base:],
+                                baseline_hist_dir, "Baseline", iteration, logger)
 
         al_checkpoint_path = iter_dir / "al_model_checkpoint.pt"
         baseline_checkpoint_path = iter_dir / "baseline_model_checkpoint.pt"
