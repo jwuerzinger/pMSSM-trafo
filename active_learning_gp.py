@@ -993,6 +993,14 @@ def train_gp_worker(gpu_id, X, Y, X_val, Y_val, data_min, data_max,
             ))
             logger.addHandler(handler)
 
+    # Route submodule loggers (gp_pipeline.*) through the same handlers
+    gp_logger = logging.getLogger("gp_pipeline")
+    gp_logger.setLevel(logging.INFO)
+    gp_logger.handlers = []
+    for h in logger.handlers:
+        gp_logger.addHandler(h)
+    gp_logger.propagate = False
+
     # Normalize data
     x_train_norm = normalize_x(X, data_min, data_max)
     x_val_norm = normalize_x(X_val, data_min, data_max)
@@ -1258,6 +1266,11 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples,
 
     log_file, logger = setup_logging(timestamp, output_dir=output_dir)
 
+    # Route submodule loggers (gp_pipeline.*) through the root logger's handlers
+    # so they appear with proper formatting instead of raw text
+    gp_logger = logging.getLogger("gp_pipeline")
+    gp_logger.setLevel(logging.INFO)
+
     logger.info("=" * 60)
     logger.info("Active Learning Pipeline for pMSSM (GP Models)")
     logger.info("=" * 60)
@@ -1365,7 +1378,7 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples,
 
     # Determine if we can train AL and Baseline in parallel (2+ GPUs)
     AL_GPU_ID = 0
-    BASELINE_GPU_ID = 3
+    BASELINE_GPU_ID = 1
     use_parallel = torch.cuda.is_available() and torch.cuda.device_count() >= 2
     if use_parallel:
         logger.info(f"Parallel training enabled: {torch.cuda.device_count()} GPUs available")

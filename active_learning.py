@@ -20,6 +20,10 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 
+# Add gp_pipeline to import path for EntropySelectionStrategy
+_GP_PIPELINE_ROOT = Path(__file__).parent / "al_pmssmwithgp" / "model"
+sys.path.insert(0, str(_GP_PIPELINE_ROOT))
+
 
 # pMSSM parameter ranges (from physics constraints)
 # Order matches load_pmssm_data branches
@@ -654,7 +658,8 @@ def generate_candidate_pool(n_candidates, seed=None):
     return torch.from_numpy(candidates).float()
 
 
-def compute_uncertainty_mc_dropout(model, X_candidates, stats, n_samples, device, logger):
+def compute_uncertainty_mc_dropout(model, X_candidates, stats, n_samples, device, logger,
+                                   return_predictions=False):
     """
     Compute predictive uncertainty using MC Dropout.
 
@@ -665,10 +670,12 @@ def compute_uncertainty_mc_dropout(model, X_candidates, stats, n_samples, device
         n_samples: Number of stochastic forward passes
         device: Compute device
         logger: Logger instance
+        return_predictions: If True, also return the raw (T, N, 1) predictions tensor
 
     Returns:
         pred_mean: (N, 1) mean predictions (normalized)
         pred_var: (N, 1) prediction variance (uncertainty)
+        predictions: (T, N, 1) raw predictions (only if return_predictions=True)
     """
     model.to(device)
     model.train()  # Keep dropout active for MC sampling
@@ -694,6 +701,8 @@ def compute_uncertainty_mc_dropout(model, X_candidates, stats, n_samples, device
 
     logger.info(f"Uncertainty stats: mean={pred_var.mean():.6f}, max={pred_var.max():.6f}")
 
+    if return_predictions:
+        return pred_mean, pred_var, predictions
     return pred_mean, pred_var
 
 
@@ -702,6 +711,88 @@ def select_top_uncertain(X_candidates, uncertainties, n_select):
     uncertainties_flat = uncertainties.squeeze().numpy()
     all_sorted = np.argsort(uncertainties_flat)[::-1].copy()
     return all_sorted[:n_select].copy()
+
+
+def select_entropy_batch_mc(X_candidates, predictions, pred_mean, pred_var,
+                            n_select, blur=0.15, beta=50.0, n_pool=5000,
+                            device='cpu', logger=None):
+    """
+    Entropy-based batch selection using MC Dropout sample covariance.
+
+    Pre-filters candidates by variance to a focused pool, computes sample
+    covariance from MC Dropout predictions, then uses EntropySelectionStrategy
+    for iterative batch selection with diversity.
+
+    Args:
+        X_candidates: (N, D) candidate points
+        predictions: (T, N, 1) MC Dropout predictions tensor
+        pred_mean: (N, 1) mean predictions
+        pred_var: (N, 1) prediction variance
+        n_select: Number of points to select
+        blur: Entropy smoothing parameter
+        beta: Gibbs sampling temperature (high=deterministic, low=random)
+        n_pool: Focused pool size (pre-filtered by variance)
+        device: Torch device
+        logger: Logger instance
+
+    Returns:
+        selected_indices: Indices into X_candidates of selected points
+    """
+    from gp_pipeline.utils.selection import EntropySelectionStrategy
+
+    N = X_candidates.shape[0]
+    n_pool = min(n_pool, N)
+    n_select = min(n_select, n_pool)
+
+    # Pre-filter to focused pool: top n_pool candidates by variance
+    var_flat = pred_var.squeeze()
+    pool_indices = torch.argsort(var_flat, descending=True)[:n_pool]
+
+    if logger:
+        logger.info(f"Entropy batch: focused pool of {n_pool} candidates (from {N} total)")
+
+    # Extract predictions for the focused pool: (T, n_pool, 1)
+    pool_preds = predictions[:, pool_indices, :]  # (T, n_pool, 1)
+    pool_mean = pred_mean[pool_indices].squeeze()  # (n_pool,)
+
+    # Compute sample covariance from MC Dropout predictions
+    # preds shape: (T, n_pool) after squeeze
+    preds_2d = pool_preds.squeeze(-1)  # (T, n_pool)
+    mean_2d = preds_2d.mean(dim=0)     # (n_pool,)
+    centered = preds_2d - mean_2d      # (T, n_pool)
+    T = preds_2d.shape[0]
+    sample_cov = (centered.T @ centered) / (T - 1)  # (n_pool, n_pool)
+
+    # Regularize: sample covariance is rank-deficient when T < n_pool
+    sample_cov += 1e-4 * torch.eye(n_pool)
+
+    if logger:
+        logger.info(f"Sample covariance: shape={sample_cov.shape}, rank≤{T}, "
+                     f"diag range=[{sample_cov.diag().min():.6f}, {sample_cov.diag().max():.6f}]")
+
+    # Move to device for entropy computation
+    pool_mean_dev = pool_mean.to(device)
+    sample_cov_dev = sample_cov.to(device)
+
+    # Run entropy-based iterative batch selection
+    strategy = EntropySelectionStrategy(blur=blur, beta=beta)
+    score_function = strategy.smoothed_batch_entropy(blur=blur, device=device)
+    choice_function = lambda score, indices: strategy.gibbs_sample(score, beta, device)
+
+    if logger:
+        logger.info(f"Running iterative batch selector for {n_select} points...")
+
+    selected_in_pool = strategy.iterative_batch_selector(
+        score_function, choice_function, pool_mean_dev, sample_cov_dev, n_select, device
+    )
+
+    # Map back to original candidate indices
+    selected_indices = pool_indices[selected_in_pool].numpy()
+
+    if logger:
+        logger.info(f"Entropy batch selection complete: {len(selected_indices)} points selected")
+
+    return selected_indices
 
 
 def save_selected_points(X_candidates, uncertainties, indices, output_dir, iteration):
@@ -739,7 +830,11 @@ def save_selected_points(X_candidates, uncertainties, indices, output_dir, itera
 @click.option('--min-gen-fraction', default=0.6, type=float, help="Minimum fraction of n-select that must be generated successfully before stopping retries (default: 0.6).")
 @click.option('--max-gen-attempts', default=10, type=int, help="Maximum number of generation attempts per iteration (default: 10).")
 @click.option('--gen-workers', default=1, type=int, help="Number of parallel genModels.py workers per generation attempt (default: 1).")
-def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, dropout, n_datasets, n_samples, output_dir, generate_data, min_gen_fraction, max_gen_attempts, gen_workers):
+@click.option('--selection-strategy', default='top_k', type=click.Choice(['top_k', 'entropy_batch']), help="Selection strategy: top_k (default) or entropy_batch.")
+@click.option('--entropy-blur', default=0.15, type=float, help="Entropy smoothing parameter (entropy_batch only).")
+@click.option('--entropy-beta', default=50.0, type=float, help="Gibbs sampling temperature (entropy_batch only).")
+@click.option('--entropy-pool-size', default=5000, type=int, help="Focused pool size for entropy_batch pre-filtering.")
+def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, dropout, n_datasets, n_samples, output_dir, generate_data, min_gen_fraction, max_gen_attempts, gen_workers, selection_strategy, entropy_blur, entropy_beta, entropy_pool_size):
     """
     Active learning pipeline for pMSSM relic density prediction.
 
@@ -784,6 +879,11 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
     logger.info(f"  dropout: {dropout}")
     logger.info(f"  n_datasets: {n_datasets}")
     logger.info(f"  n_samples: {n_samples if n_samples else 'all'}")
+    logger.info(f"  selection_strategy: {selection_strategy}")
+    if selection_strategy == 'entropy_batch':
+        logger.info(f"  entropy_blur: {entropy_blur}")
+        logger.info(f"  entropy_beta: {entropy_beta}")
+        logger.info(f"  entropy_pool_size: {entropy_pool_size}")
     logger.info(f"  generate_data: {generate_data}")
     if generate_data:
         logger.info(f"  min_gen_fraction: {min_gen_fraction} (target: {int(n_select * min_gen_fraction)} valid models per iteration)")
@@ -905,11 +1005,11 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
 
             al_process = mp.Process(
                 target=train_model_worker,
-                args=(1, X, Y, idx_train_al, idx_val_al, epochs, dropout, al_queue, "AL", iter_dir, iter_plots_dir, al_checkpoint_path)
+                args=(2, X, Y, idx_train_al, idx_val_al, epochs, dropout, al_queue, "AL", iter_dir, iter_plots_dir, al_checkpoint_path)
             )
             baseline_process = mp.Process(
                 target=train_model_worker,
-                args=(2, X_baseline, Y_baseline, idx_train_base, idx_val_base, epochs, dropout, baseline_queue, "Baseline", iter_dir, iter_plots_dir)
+                args=(3, X_baseline, Y_baseline, idx_train_base, idx_val_base, epochs, dropout, baseline_queue, "Baseline", iter_dir, iter_plots_dir)
             )
 
             al_process.start()
@@ -962,12 +1062,22 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
         logger.info(f"Generating {n_candidates} candidate points...")
         candidates = generate_candidate_pool(n_candidates, seed=iteration)
 
-        _, pred_var = compute_uncertainty_mc_dropout(
-            model, candidates, stats, mc_samples, device, logger
-        )
+        if selection_strategy == 'entropy_batch':
+            pred_mean, pred_var, predictions = compute_uncertainty_mc_dropout(
+                model, candidates, stats, mc_samples, device, logger, return_predictions=True
+            )
+            top_indices = select_entropy_batch_mc(
+                candidates, predictions, pred_mean, pred_var,
+                n_select, blur=entropy_blur, beta=entropy_beta,
+                n_pool=entropy_pool_size, device=device, logger=logger
+            )
+        else:
+            _, pred_var = compute_uncertainty_mc_dropout(
+                model, candidates, stats, mc_samples, device, logger
+            )
+            top_indices = select_top_uncertain(candidates, pred_var, n_select)
 
-        top_indices = select_top_uncertain(candidates, pred_var, n_select)
-        logger.info(f"Selected {len(top_indices)} most uncertain points (requested: {n_select}, available: {len(candidates)})")
+        logger.info(f"Selected {len(top_indices)} points via {selection_strategy} (requested: {n_select}, available: {len(candidates)})")
 
         csv_path = save_selected_points(candidates, pred_var, top_indices, output_dir, iteration)
         logger.info(f"Saved selected points to {csv_path}")
@@ -1005,14 +1115,26 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
 
                     attempt_seed = iteration * 1000 + attempt
                     attempt_candidates = generate_candidate_pool(n_candidates, seed=attempt_seed)
-                    _, attempt_pred_var = compute_uncertainty_mc_dropout(
-                        model, attempt_candidates, stats, mc_samples, device, logger
-                    )
-                    attempt_indices = select_top_uncertain(attempt_candidates, attempt_pred_var, n_select)
+
+                    if selection_strategy == 'entropy_batch':
+                        attempt_mean, attempt_pred_var, attempt_preds = compute_uncertainty_mc_dropout(
+                            model, attempt_candidates, stats, mc_samples, device, logger, return_predictions=True
+                        )
+                        attempt_indices = select_entropy_batch_mc(
+                            attempt_candidates, attempt_preds, attempt_mean, attempt_pred_var,
+                            n_select, blur=entropy_blur, beta=entropy_beta,
+                            n_pool=entropy_pool_size, device=device, logger=logger
+                        )
+                    else:
+                        _, attempt_pred_var = compute_uncertainty_mc_dropout(
+                            model, attempt_candidates, stats, mc_samples, device, logger
+                        )
+                        attempt_indices = select_top_uncertain(attempt_candidates, attempt_pred_var, n_select)
 
                     param_names = [p.replace("IN_", "") for p in PARAM_ORDER]
                     df = pd.DataFrame(attempt_candidates[attempt_indices].numpy(), columns=param_names)
-                    df["uncertainty"] = attempt_pred_var[attempt_indices].squeeze().numpy()
+                    if selection_strategy != 'entropy_batch':
+                        df["uncertainty"] = attempt_pred_var[attempt_indices].squeeze().numpy()
                     attempt_csv = attempt_dir / "selected_points.csv"
                     df.to_csv(attempt_csv, index=False)
 
@@ -1081,6 +1203,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
             "epochs": epochs,
             "dropout": dropout,
             "generate_data": generate_data,
+            "selection_strategy": selection_strategy,
         },
         "iterations": all_selected_points,
         "final_dataset_size": len(X),
