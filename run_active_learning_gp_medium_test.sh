@@ -6,7 +6,7 @@
     --model-type exact_gp \
     --n-samples 2000 \
     --n-iterations 3 \
-    --training-iterations 500 \
+    --epochs 500 \
     --learning-rate 1e-3 \
     --n-candidates 20000 \
     --n-select 10 \

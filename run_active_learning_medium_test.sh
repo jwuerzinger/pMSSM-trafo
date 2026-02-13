@@ -1,6 +1,15 @@
 #!/bin/bash
+# Transformer Active Learning - Medium Test
+#
+# Test run: 3 datasets, 2000 samples, 3 iterations
+# Model: PMSSMTransformerTabular with MC Dropout
+#
+# New features available:
+#   --config-file <file.yaml>     # YAML config with parameter sweeps
+#   --eval-data-path <file.root>  # External validation dataset
+#   --compute-full-metrics        # Comprehensive evaluation metrics
 
-python active_learning.py \
+.pixi/envs/default/bin/python active_learning.py \
     --n-datasets 3 \
     --generate-data \
     --n-samples 2000 \

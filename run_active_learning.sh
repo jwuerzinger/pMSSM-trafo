@@ -1,9 +1,27 @@
-python active_learning.py \
+#!/bin/bash
+# Transformer-based Active Learning for pMSSM
+#
+# Full production run with data generation
+# Model: PMSSMTransformerTabular with MC Dropout uncertainty estimation
+#
+# Features enabled:
+#   --warm-starting               # Continue from previous iteration checkpoints
+#   --early-stopping              # Stop when validation loss plateaus (patience=200)
+#
+# Additional features available (add as needed):
+#   --config-file <file.yaml>     # YAML config with parameter sweeps
+#   --sweep-index <N>             # Sweep combination index
+#   --eval-data-path <file.root>  # External validation dataset
+#   --compute-full-metrics        # Comprehensive evaluation metrics
+
+.pixi/envs/default/bin/python active_learning.py \
     --epochs 10_000 \
     --generate-data \
     --n-samples 50_000 \
     --n-iterations 40 \
     --n-select 20_000 \
     --n-candidates 50_000 \
-    --gen-workers 20
+    --gen-workers 20 \
+    --warm-starting \
+    --early-stopping
     

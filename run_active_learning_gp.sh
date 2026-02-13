@@ -1,7 +1,7 @@
 #!/bin/bash
 .pixi/envs/default/bin/python active_learning_gp.py \
     --model-type deep_gp \
-    --training-iterations 10000 \
+    --epochs 10000 \
     --early-stopping \
     --patience 100 \
     --learning-rate 1e-3 \

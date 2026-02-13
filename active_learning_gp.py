@@ -288,14 +288,14 @@ def load_config_with_sweep(config_file, sweep_index=None):
 # ---------------------------------------------------------------------------
 
 @click.command()
-@click.option('--testing', is_flag=True, help="Run in testing mode (small data, few iterations).")
+@click.option('--testing/--no-testing', default=False, help="Run in testing mode (small data, few iterations).")
 @click.option('--n-iterations', default=1, type=int, help="Number of active learning iterations.")
 @click.option('--n-candidates', default=1000, type=int, help="Candidate pool size.")
 @click.option('--n-select', default=10, type=int, help="Number of points to select per iteration.")
 @click.option('--n-datasets', default=None, type=int, help="Number of ROOT datasets to load.")
 @click.option('--n-samples', default=None, type=int, help="Number of samples to use from data.")
 @click.option('--output-dir', default='active_learning_gp_output', type=str, help="Output directory.")
-@click.option('--generate-data', is_flag=True, help="Generate new models using Run3ModelGen.")
+@click.option('--generate-data/--no-generate-data', default=False, help="Generate new models using Run3ModelGen.")
 @click.option('--min-gen-fraction', default=0.6, type=float, help="Minimum fraction of n-select that must be generated successfully.")
 @click.option('--max-gen-attempts', default=10, type=int, help="Maximum generation attempts per iteration.")
 @click.option('--gen-workers', default=1, type=int, help="Number of parallel genModels.py workers.")

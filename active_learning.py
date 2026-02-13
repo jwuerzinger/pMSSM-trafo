@@ -72,8 +72,50 @@ from pmssm import (
 # visualization, logging) are now imported from the unified pmssm package
 
 
+def load_config_with_sweep(config_file, sweep_index=None):
+    """
+    Load YAML config and optionally apply sweep combination.
+
+    List-valued parameters are treated as sweep dimensions.
+    The sweep_index selects one combination from the Cartesian product.
+
+    Args:
+        config_file: Path to YAML configuration file
+        sweep_index: Optional index to select from parameter sweep
+
+    Returns:
+        dict of parameter name -> resolved value
+
+    Example:
+        config.yaml:
+            epochs: [100, 200, 500]
+            dropout: [0.1, 0.2]
+            # Total: 3 × 2 = 6 combinations
+
+        load_config_with_sweep('config.yaml', sweep_index=0)
+        # Returns: {'epochs': 100, 'dropout': 0.1}
+    """
+    from itertools import product as iterproduct
+
+    with open(config_file) as f:
+        cfg = yaml.safe_load(f)
+
+    sweep_params = {k: v for k, v in cfg.items() if isinstance(v, list)}
+    if sweep_index is not None and sweep_params:
+        combinations = list(iterproduct(*sweep_params.values()))
+        if sweep_index >= len(combinations):
+            raise ValueError(
+                f"Sweep index {sweep_index} out of range "
+                f"(max {len(combinations)-1}, {len(combinations)} total combinations)"
+            )
+        for key, value in zip(sweep_params.keys(), combinations[sweep_index]):
+            cfg[key] = value
+
+    return cfg
+
+
 @click.command()
-@click.option('--testing', is_flag=True, help="Run in testing mode (small data, few epochs).")
+@click.option('--testing/--no-testing', default=False, help="Run in testing mode (small data, few epochs).")
 @click.option('--n-iterations', default=1, type=int, help="Number of active learning iterations.")
 @click.option('--n-candidates', default=1000, type=int, help="Candidate pool size.")
 @click.option('--n-select', default=10, type=int, help="Number of points to select per iteration.")
@@ -83,7 +125,7 @@ from pmssm import (
 @click.option('--n-datasets', default=None, type=int, help="Number of ROOT datasets to load.")
 @click.option('--n-samples', default=None, type=int, help="Number of samples to use from data.")
 @click.option('--output-dir', default='active_learning_output', type=str, help="Output directory.")
-@click.option('--generate-data', is_flag=True, help="Generate new models using Run3ModelGen.")
+@click.option('--generate-data/--no-generate-data', default=False, help="Generate new models using Run3ModelGen.")
 @click.option('--min-gen-fraction', default=0.6, type=float, help="Minimum fraction of n-select that must be generated successfully before stopping retries (default: 0.6).")
 @click.option('--max-gen-attempts', default=10, type=int, help="Maximum number of generation attempts per iteration (default: 10).")
 @click.option('--gen-workers', default=1, type=int, help="Number of parallel genModels.py workers per generation attempt (default: 1).")
@@ -97,13 +139,85 @@ from pmssm import (
               help="Gaussian proximity weighting width around target value (0 to disable, default: 0.1).")
 @click.option('--target-value', default=0.12, type=float,
               help="Target relic density value for proximity weighting (default: 0.12).")
-def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, dropout, n_datasets, n_samples, output_dir, generate_data, min_gen_fraction, max_gen_attempts, gen_workers, selection_strategy, entropy_blur, entropy_beta, entropy_pool_size, candidate_generation, proximity_sampling, target_value):
+@click.option('--config-file', default=None, type=str,
+              help="YAML config file (overrides CLI args). Supports parameter sweeps.")
+@click.option('--sweep-index', default=None, type=int,
+              help="Sweep combination index (requires --config-file).")
+@click.option('--early-stopping/--no-early-stopping', default=True,
+              help="Enable early stopping on validation loss (default: enabled).")
+@click.option('--patience', default=200, type=int,
+              help="Early stopping patience (epochs without improvement, default: 200).")
+@click.option('--warm-starting/--no-warm-starting', default=True,
+              help="Warm-start from previous iteration checkpoint (default: enabled).")
+@click.option('--eval-data-path', default=None, type=str,
+              help="Path to external eval dataset (ROOT/CSV) for validation.")
+@click.option('--compute-full-metrics/--no-compute-full-metrics', default=False,
+              help="Compute comprehensive evaluation metrics (accuracy, MSE, RMSE).")
+def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, dropout, n_datasets, n_samples, output_dir, generate_data, min_gen_fraction, max_gen_attempts, gen_workers, selection_strategy, entropy_blur, entropy_beta, entropy_pool_size, candidate_generation, proximity_sampling, target_value, config_file, sweep_index, early_stopping, patience, warm_starting, eval_data_path, compute_full_metrics):
     """
     Active learning pipeline for pMSSM relic density prediction.
 
     Trains PMSSMTransformerTabular, computes uncertainty via MC Dropout,
     and selects most informative points for data generation.
     """
+    # Load config file and override parameters if provided
+    if config_file is not None:
+        cfg = load_config_with_sweep(config_file, sweep_index)
+
+        # Map config keys to local variables
+        _cfg_map = {
+            'n_iterations': 'n_iterations',
+            'n_candidates': 'n_candidates',
+            'n_select': 'n_select',
+            'mc_samples': 'mc_samples',
+            'epochs': 'epochs',
+            'dropout': 'dropout',
+            'selection_strategy': 'selection_strategy',
+            'entropy_blur': 'entropy_blur',
+            'entropy_beta': 'entropy_beta',
+            'entropy_pool_size': 'entropy_pool_size',
+            'candidate_generation': 'candidate_generation',
+            'proximity_sampling': 'proximity_sampling',
+            'target_value': 'target_value',
+            'early_stopping': 'early_stopping',
+            'patience': 'patience',
+            'warm_starting': 'warm_starting',
+            'compute_full_metrics': 'compute_full_metrics',
+        }
+
+        # Override locals with config values
+        for cfg_key, local_key in _cfg_map.items():
+            if cfg_key in cfg:
+                # Type conversion
+                val = cfg[cfg_key]
+                if cfg_key in ('n_iterations', 'n_candidates', 'n_select', 'mc_samples', 'epochs', 'entropy_pool_size', 'patience'):
+                    val = int(val)
+                elif cfg_key in ('dropout', 'entropy_blur', 'entropy_beta', 'proximity_sampling', 'target_value'):
+                    val = float(val)
+                elif cfg_key in ('early_stopping', 'warm_starting', 'compute_full_metrics'):
+                    val = bool(val)
+                # String values: selection_strategy, candidate_generation
+                locals()[local_key] = val
+
+        # Re-assign variables from locals (Python locals() quirk workaround)
+        n_iterations = locals().get('n_iterations', n_iterations)
+        n_candidates = locals().get('n_candidates', n_candidates)
+        n_select = locals().get('n_select', n_select)
+        mc_samples = locals().get('mc_samples', mc_samples)
+        epochs = locals().get('epochs', epochs)
+        dropout = locals().get('dropout', dropout)
+        selection_strategy = locals().get('selection_strategy', selection_strategy)
+        entropy_blur = locals().get('entropy_blur', entropy_blur)
+        entropy_beta = locals().get('entropy_beta', entropy_beta)
+        entropy_pool_size = locals().get('entropy_pool_size', entropy_pool_size)
+        candidate_generation = locals().get('candidate_generation', candidate_generation)
+        proximity_sampling = locals().get('proximity_sampling', proximity_sampling)
+        target_value = locals().get('target_value', target_value)
+        early_stopping = locals().get('early_stopping', early_stopping)
+        patience = locals().get('patience', patience)
+        warm_starting = locals().get('warm_starting', warm_starting)
+        compute_full_metrics = locals().get('compute_full_metrics', compute_full_metrics)
+
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     # Increase n_candidates if needed:
@@ -120,12 +234,15 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
     logger.info("=" * 60)
     logger.info(f"Log file: {log_file}")
     logger.info(f"Output directory: {output_dir}")
+    if config_file:
+        logger.info(f"Config file: {config_file}" +
+                    (f" (sweep index {sweep_index})" if sweep_index is not None else ""))
 
     # Apply testing mode defaults
     if testing:
         n_datasets = n_datasets if n_datasets is not None else 3
         n_samples = n_samples if n_samples is not None else 30
-        epochs = 10
+        epochs = 50  # Aligned with GP script (was 10)
         n_candidates = 100
         mc_samples = 10
         logger.info("Testing mode enabled")
@@ -150,6 +267,11 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
     logger.info(f"  candidate_generation: {candidate_generation}")
     logger.info(f"  proximity_sampling: {proximity_sampling}")
     logger.info(f"  target_value: {target_value}")
+    logger.info(f"  early_stopping: {early_stopping} (patience={patience})")
+    logger.info(f"  warm_starting: {warm_starting}")
+    logger.info(f"  compute_full_metrics: {compute_full_metrics}")
+    if eval_data_path:
+        logger.info(f"  eval_data_path: {eval_data_path}")
     logger.info(f"  generate_data: {generate_data}")
     if generate_data:
         logger.info(f"  min_gen_fraction: {min_gen_fraction} (target: {int(n_select * min_gen_fraction)} valid models per iteration)")
@@ -210,6 +332,14 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
     baseline_r2_scores = []
     baseline_n_train = []
     baseline_n_val = []
+
+    # Checkpoint tracking for warm-starting
+    prev_al_checkpoint = None
+    prev_baseline_checkpoint = None
+
+    # External eval dataset (loaded lazily on first use)
+    X_eval_full, Y_eval_full = None, None
+    eval_r2_scores = []
 
     for iteration in range(1, n_iterations + 1):
         logger.info(f"=== Global Iteration {iteration} ===")
@@ -273,6 +403,11 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
         plot_data_histograms(X_baseline, Y_baseline, idx_train_base, idx_val_base, baseline_hist_dir, "Baseline", iteration, logger)
 
         al_checkpoint_path = iter_dir / "al_model_checkpoint.pt"
+        baseline_checkpoint_path = iter_dir / "baseline_model_checkpoint.pt"
+
+        # Determine warm-start paths
+        al_warm_start = prev_al_checkpoint if (iteration > 1 and warm_starting) else None
+        baseline_warm_start = prev_baseline_checkpoint if (iteration > 1 and warm_starting) else None
 
         if use_parallel:
             # Train AL and Baseline in parallel on different GPUs
@@ -281,11 +416,15 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
 
             al_process = mp.Process(
                 target=train_model_worker,
-                args=(2, X, Y, idx_train_al, idx_val_al, epochs, dropout, al_queue, "AL", iter_dir, iter_plots_dir, al_checkpoint_path)
+                args=(2, X, Y, idx_train_al, idx_val_al, epochs, dropout, al_queue, "AL",
+                      iter_dir, iter_plots_dir, al_checkpoint_path, al_warm_start,
+                      early_stopping, patience)
             )
             baseline_process = mp.Process(
                 target=train_model_worker,
-                args=(3, X_baseline, Y_baseline, idx_train_base, idx_val_base, epochs, dropout, baseline_queue, "Baseline", iter_dir, iter_plots_dir)
+                args=(3, X_baseline, Y_baseline, idx_train_base, idx_val_base, epochs,
+                      dropout, baseline_queue, "Baseline", iter_dir, iter_plots_dir,
+                      baseline_checkpoint_path, baseline_warm_start, early_stopping, patience)
             )
 
             al_process.start()
@@ -300,12 +439,17 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
             # Sequential training
             logger.info("Training Active Learning model...")
             al_queue = mp.Queue()
-            train_model_worker(device, X, Y, idx_train_al, idx_val_al, epochs, dropout, al_queue, "AL", iter_dir, iter_plots_dir, al_checkpoint_path)
+            train_model_worker(device, X, Y, idx_train_al, idx_val_al, epochs, dropout,
+                             al_queue, "AL", iter_dir, iter_plots_dir, al_checkpoint_path,
+                             al_warm_start, early_stopping, patience)
             al_results = al_queue.get()
 
             logger.info("Training Baseline model (random samples)...")
             baseline_queue = mp.Queue()
-            train_model_worker(device, X_baseline, Y_baseline, idx_train_base, idx_val_base, epochs, dropout, baseline_queue, "Baseline", iter_dir, iter_plots_dir)
+            train_model_worker(device, X_baseline, Y_baseline, idx_train_base, idx_val_base,
+                             epochs, dropout, baseline_queue, "Baseline", iter_dir,
+                             iter_plots_dir, baseline_checkpoint_path, baseline_warm_start,
+                             early_stopping, patience)
             baseline_results = baseline_queue.get()
 
         # Log results
@@ -333,6 +477,95 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
         )
         model.load_state_dict(torch.load(al_checkpoint_path, map_location=device))
         logger.info(f"Loaded AL model from {al_checkpoint_path} for MC Dropout uncertainty estimation")
+
+        # Evaluate on external dataset if provided
+        if eval_data_path is not None:
+            # Lazy load eval dataset on first use
+            if X_eval_full is None:
+                logger.info(f"Loading external eval dataset from {eval_data_path}")
+                from pmssm import load_true_eval_dataset
+                X_eval_full, Y_eval_full = load_true_eval_dataset(
+                    eval_data_path, target=None, logger=logger  # No target transformation for transformer
+                )
+
+            # Compute R² on eval dataset
+            from sklearn.metrics import r2_score
+            model.eval()
+            model.to(device)
+
+            # Normalize eval data using training stats
+            mean_X, std_X, mean_Y, std_Y = stats
+            X_eval_norm = (X_eval_full - mean_X) / std_X
+            Y_eval_norm = (Y_eval_full - mean_Y) / std_Y
+
+            with torch.no_grad():
+                y_pred_norm = model(X_eval_norm.to(device)).cpu()
+
+            eval_r2 = r2_score(Y_eval_norm.numpy(), y_pred_norm.numpy())
+            logger.info(f"External eval R²: {eval_r2:.4f}")
+            eval_r2_scores.append(eval_r2)
+
+        # Compute comprehensive metrics if requested
+        if compute_full_metrics:
+            from sklearn.metrics import mean_squared_error, r2_score
+            import numpy as np
+
+            # Get validation predictions
+            model.eval()
+            model.to(device)
+            val_dataset = PMSSMDataset(X, Y, idx_val_al, stats)
+            val_loader = DataLoader(val_dataset, batch_size=256, shuffle=False)
+
+            all_preds = []
+            all_true = []
+            for x_batch, y_batch in val_loader:
+                with torch.no_grad():
+                    preds = model(x_batch.to(device)).cpu()
+                all_preds.append(preds)
+                all_true.append(y_batch)
+
+            y_pred_norm = torch.cat(all_preds).squeeze()
+            y_true_norm = torch.cat(all_true).squeeze()
+
+            # Denormalize for physical space metrics
+            mean_X, std_X, mean_Y, std_Y = stats
+            y_true = y_true_norm * std_Y + mean_Y
+            y_pred = y_pred_norm * std_Y + mean_Y
+
+            # Compute metrics in normalized space
+            mse_norm = mean_squared_error(y_true_norm.numpy(), y_pred_norm.numpy())
+            rmse_norm = np.sqrt(mse_norm)
+            r2_norm = r2_score(y_true_norm.numpy(), y_pred_norm.numpy())
+
+            # Compute metrics in physical space
+            mse_phys = mean_squared_error(y_true.numpy(), y_pred.numpy())
+            rmse_phys = np.sqrt(mse_phys)
+            r2_phys = r2_score(y_true.numpy(), y_pred.numpy())
+
+            # Classification accuracy (threshold at target_value in physical space)
+            threshold_phys = target_value  # 0.12
+            threshold_norm = (threshold_phys - mean_Y) / std_Y
+            acc = ((y_pred_norm >= threshold_norm) == (y_true_norm >= threshold_norm)).float().mean().item()
+
+            metrics = {
+                "iteration": iteration,
+                "n_val": len(y_true),
+                "mse_normalized": float(mse_norm),
+                "rmse_normalized": float(rmse_norm),
+                "r2_normalized": float(r2_norm),
+                "mse_physical": float(mse_phys),
+                "rmse_physical": float(rmse_phys),
+                "r2_physical": float(r2_phys),
+                "accuracy": float(acc),
+                "threshold": float(threshold_phys),
+            }
+
+            # Save to CSV
+            metrics_path = iter_dir / "metrics_al.csv"
+            pd.DataFrame([metrics]).to_csv(metrics_path, index=False)
+            logger.info(f"Comprehensive metrics: MSE={mse_phys:.6f}, RMSE={rmse_phys:.6f}, "
+                       f"R²={r2_phys:.4f}, Acc={acc:.4f}")
+            logger.info(f"Metrics saved to {metrics_path}")
 
         # Generate candidate pool and select uncertain points
         logger.info(f"Generating {n_candidates} candidate points using {candidate_generation} sampling...")
@@ -466,6 +699,10 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
             X = torch.cat([X, new_X], dim=0)
             Y = torch.cat([Y, new_Y], dim=0)
 
+        # Update previous checkpoints for warm-starting next iteration
+        prev_al_checkpoint = al_checkpoint_path
+        prev_baseline_checkpoint = baseline_checkpoint_path
+
     # Plot iteration metrics
     al_metrics = {
         'train_losses': al_train_losses,
@@ -500,10 +737,17 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
             "dropout": dropout,
             "generate_data": generate_data,
             "selection_strategy": selection_strategy,
+            "early_stopping": early_stopping,
+            "patience": patience,
+            "warm_starting": warm_starting,
+            "compute_full_metrics": compute_full_metrics,
         },
         "iterations": all_selected_points,
         "final_dataset_size": len(X),
     }
+
+    if eval_r2_scores:
+        summary["eval_r2_scores"] = eval_r2_scores
 
     summary_path = output_dir / "summary.json"
     with open(summary_path, "w") as f:

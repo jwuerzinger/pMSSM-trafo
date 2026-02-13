@@ -156,7 +156,8 @@ def train_with_validation(
 
 def train_model_worker(gpu_id, X, Y, idx_train, idx_val, epochs, dropout,
                       result_queue, model_name="model", log_dir=None,
-                      plots_dir=None, checkpoint_path=None):
+                      plots_dir=None, checkpoint_path=None,
+                      warm_start_path=None, early_stopping=True, patience=200):
     """
     Worker function for multiprocessing transformer training.
 
@@ -171,6 +172,9 @@ def train_model_worker(gpu_id, X, Y, idx_train, idx_val, epochs, dropout,
         log_dir: Directory to save log files
         plots_dir: Directory to save diagnostic plots
         checkpoint_path: If provided, save model state dict to this path after training
+        warm_start_path: If provided, load model weights from this checkpoint before training
+        early_stopping: Whether to use early stopping (default: True)
+        patience: Early stopping patience in epochs (default: 200)
     """
     device = f"cuda:{gpu_id}" if isinstance(gpu_id, int) else gpu_id
 
@@ -241,6 +245,14 @@ def train_model_worker(gpu_id, X, Y, idx_train, idx_val, epochs, dropout,
         dropout=dropout,
     )
 
+    # Warm-start from previous checkpoint if provided
+    if warm_start_path is not None:
+        if Path(warm_start_path).exists():
+            model.load_state_dict(torch.load(warm_start_path, map_location='cpu'))
+            logger.info(f"Warm-started from checkpoint: {warm_start_path}")
+        else:
+            logger.warning(f"Warm-start checkpoint not found: {warm_start_path}, training from scratch")
+
     optimizer = optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-4)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-6)
     criterion = nn.MSELoss()
@@ -253,8 +265,8 @@ def train_model_worker(gpu_id, X, Y, idx_train, idx_val, epochs, dropout,
         criterion,
         device=device,
         epochs=epochs,
-        early_stopping=True,
-        patience=200,
+        early_stopping=early_stopping,  # Use parameter from function args
+        patience=patience,  # Use parameter from function args
         scheduler=scheduler,
         grad_clip=1.0,
         logger=logger,
