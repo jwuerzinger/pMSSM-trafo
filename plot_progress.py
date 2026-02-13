@@ -59,7 +59,7 @@ def parse_log(log_path):
         r"=== (?:Global|GP Active Learning) Iteration (\d+) ==="
     )
     # Dataset size — transformer main log
-    split_re = re.compile(r"Have n_train=(\d+), n_val=(\d+)")
+    split_re = re.compile(r"Split: n_train=(\d+), n_val=(\d+)")
     # Dataset size — GP sequential mode
     gp_seq_re = re.compile(r"Training AL \S+ model \((\d+) train, (\d+) val\)")
     # Metric lines (same format for both pipelines)
