@@ -61,7 +61,6 @@ import logging
 import structlog
 import json
 import multiprocessing as mp
-import copy
 
 import click
 import pandas as pd

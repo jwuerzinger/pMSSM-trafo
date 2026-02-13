@@ -23,8 +23,6 @@ import numpy as np
 import pandas as pd
 import yaml
 import torch
-import torch.nn as nn
-import torch.optim as optim
 from torch.utils.data import DataLoader
 
 # Import from unified pmssm package
@@ -306,11 +304,13 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
     logger.info(f"Initial AL indices from X_full: [0, ..., {initial_al_size-1}] (will be excluded from baseline sampling)")
 
     # Determine if we can use parallel training (2+ GPUs for AL + baseline)
+    AL_GPU_ID = 2
+    BASELINE_GPU_ID = 3
     use_parallel = torch.cuda.is_available() and torch.cuda.device_count() >= 2
     if use_parallel:
         logger.info(f"Parallel training enabled: {torch.cuda.device_count()} GPUs available")
-        logger.info("  - Active Learning model on cuda:0")
-        logger.info("  - Baseline model on cuda:1")
+        logger.info(f"  - Active Learning model on cuda:{AL_GPU_ID}")
+        logger.info(f"  - Baseline model on cuda:{BASELINE_GPU_ID}")
         mp.set_start_method('spawn', force=True)
     else:
         logger.info("Sequential training (need 2+ GPUs for parallel)")
@@ -416,13 +416,13 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
 
             al_process = mp.Process(
                 target=train_model_worker,
-                args=(2, X, Y, idx_train_al, idx_val_al, epochs, dropout, al_queue, "AL",
+                args=(AL_GPU_ID, X, Y, idx_train_al, idx_val_al, epochs, dropout, al_queue, "AL",
                       iter_dir, iter_plots_dir, al_checkpoint_path, al_warm_start,
                       early_stopping, patience)
             )
             baseline_process = mp.Process(
                 target=train_model_worker,
-                args=(3, X_baseline, Y_baseline, idx_train_base, idx_val_base, epochs,
+                args=(BASELINE_GPU_ID, X_baseline, Y_baseline, idx_train_base, idx_val_base, epochs,
                       dropout, baseline_queue, "Baseline", iter_dir, iter_plots_dir,
                       baseline_checkpoint_path, baseline_warm_start, early_stopping, patience)
             )
