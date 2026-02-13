@@ -1,3 +1,51 @@
+"""
+DEPRECATED: This file is maintained for backward compatibility only.
+
+Please use the modular pmssm package instead:
+    from pmssm import data, models, selection, training, ...
+
+Or import specific functions:
+    from pmssm import load_pmssm_data, PMSSMTransformerTabular, ...
+
+The pmssm package provides better organization and eliminates code duplication.
+"""
+
+import warnings
+warnings.warn(
+    "Importing from pmssm.py is deprecated. "
+    "Please use 'from pmssm import ...' instead. "
+    "See pmssm/__init__.py for available exports.",
+    DeprecationWarning,
+    stacklevel=2
+)
+
+# Re-export all functions from the new pmssm package for backward compatibility
+from pmssm import (
+    # Data
+    load_pmssm_data,
+    make_split,
+    compute_stats,
+    # Datasets
+    Dummy_PMSSMDataset,
+    PMSSMDataset,
+    # Models
+    PMSSMTransformer,
+    PMSSMTransformerTabular,
+    PMSSMFeedForward,
+    is_transformer,
+    get_model_name,
+    # Training
+    train_with_validation,
+    # Evaluation
+    compare_random_predictions,
+    # Visualization
+    plot_losses,
+    scatter_true_vs_pred,
+    hist_true_vs_pred,
+    running_in_notebook,
+)
+
+# Keep original imports for compatibility with any remaining local code
 import numpy as np
 import random
 import torch
@@ -6,6 +54,9 @@ from torch.utils.data import Dataset
 
 import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
+
+# Note: Functions below are kept for reference but are now imported from pmssm package above
+# This prevents import errors for any code still using "import pmssm; pmssm.function()"
 
 def running_in_notebook():
     try:

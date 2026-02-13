@@ -1,0 +1,253 @@
+"""
+Data loading, filtering, and normalization utilities for pMSSM pipeline.
+
+This module provides functions for:
+- Loading ROOT physics data files
+- Train/validation splitting
+- Z-score normalization (for transformer models)
+- Min-max normalization (for GP models)
+- Target transformations (log-space for relic density)
+"""
+
+import glob
+import numpy as np
+import torch
+import matplotlib.pyplot as plt
+
+from .config import TARGET_CONFIG, PARAM_ORDER, PARAM_TO_GP_RANGE_KEY, GP_RANGE_DICT
+
+
+# ===== Utility Functions =====
+
+def running_in_notebook():
+    """Check if code is running in a Jupyter notebook."""
+    try:
+        from IPython import get_ipython
+        ip = get_ipython()
+        if ip is None:
+            return False
+        return ip.__class__.__name__ == "ZMQInteractiveShell"
+    except Exception:
+        return False
+
+
+# ===== Data Loading =====
+
+def load_pmssm_data(n_datasets=-1, logger=None, plot_dir="plots", target="DMRD"):
+    """
+    Load pMSSM ROOT data with combined filter.
+
+    Applies ``(Y > 0) & (Y < 1.0) & (SP_m_h != -1)``:
+    - ``Y > 0``: valid target value (positive, non-sentinel)
+    - ``Y < 1.0``: sub-dominant dark matter candidates
+    - ``SP_m_h != -1``: valid Higgs mass computation (SPheno did not fail)
+
+    Args:
+        n_datasets: Number of ROOT files to load (-1 for all)
+        logger: Logger instance for output
+        plot_dir: Directory to save histogram plot
+        target: Target variable name (default: "DMRD")
+
+    Returns:
+        X: Input tensor (N, 19) in physical units
+        Y: Target tensor (N, 1) in physical units
+    """
+    import uproot
+
+    files = sorted(glob.glob("data/18387358/*.root"))
+    if logger:
+        logger.info(f"Found {len(files)} ROOT files")
+
+    if n_datasets != -1:
+        if logger:
+            logger.info(f"Only using {n_datasets} out of the {len(files)} datasets")
+        files = files[:n_datasets]
+
+    trees = [uproot.open(f)["susy"] for f in files]
+
+    # Load input parameters
+    branches = PARAM_ORDER
+
+    X_raw = np.column_stack([
+        np.concatenate([t[b].array(library="np") for t in trees])
+        for b in branches
+    ])
+
+    # Load target variable
+    target_branch = TARGET_CONFIG[target]["branch"]
+    Y_raw = np.concatenate([t[target_branch].array(library="np") for t in trees])
+    sp_mh = np.concatenate([t["SP_m_h"].array(library="np") for t in trees])
+
+    # Apply combined filter
+    mask = (Y_raw > 0) & (Y_raw < 1.0) & (sp_mh != -1)
+    if logger:
+        logger.info(
+            f"Filter ({target_branch} > 0 & < 1 & SP_m_h != -1): "
+            f"{mask.sum()} / {len(Y_raw)} samples kept"
+        )
+
+    # Plot target distribution
+    plt.hist(Y_raw[mask], bins=20, range=[0.0, 1.0])
+    if not running_in_notebook():
+        plt.savefig(f"{plot_dir}/hist_dataset.png")
+        plt.close()
+    else:
+        plt.show()
+
+    X = torch.from_numpy(X_raw[mask]).float()
+    Y = torch.from_numpy(Y_raw[mask]).float().unsqueeze(1)
+
+    return X, Y
+
+
+# ===== Train/Val Splitting =====
+
+def make_split(X, train_split=0.9, seed=42, logger=None):
+    """
+    Create reproducible train/validation split.
+
+    Args:
+        X: Input tensor to split
+        train_split: Fraction of data for training (default: 0.9)
+        seed: Random seed for reproducibility
+        logger: Logger instance
+
+    Returns:
+        idx_train: Training indices
+        idx_val: Validation indices
+    """
+    N = len(X)
+    g = torch.Generator().manual_seed(seed)
+    perm = torch.randperm(N, generator=g)
+
+    n_train = int(train_split * N)
+    idx_train = perm[:n_train]
+    idx_val = perm[n_train:]
+
+    if logger:
+        logger.info(f"Split: n_train={len(idx_train)}, n_val={len(idx_val)}")
+
+    return idx_train, idx_val
+
+
+# ===== Z-score Normalization (Transformer Models) =====
+
+def compute_stats(X, Y, idx_train):
+    """
+    Compute z-score normalization statistics from training data.
+
+    Args:
+        X: Input tensor (N, D)
+        Y: Target tensor (N, 1)
+        idx_train: Training indices
+
+    Returns:
+        mean_X: Mean of training inputs (D,)
+        std_X: Std of training inputs (D,)
+        mean_Y: Mean of training targets (1,)
+        std_Y: Std of training targets (1,)
+    """
+    mean_X = X[idx_train].mean(dim=0)
+    std_X = X[idx_train].std(dim=0) + 1e-8
+    mean_Y = Y[idx_train].mean(dim=0)
+    std_Y = Y[idx_train].std(dim=0) + 1e-8
+
+    return mean_X, std_X, mean_Y, std_Y
+
+
+# ===== Min-Max Normalization (GP Models) =====
+
+def build_norm_tensors(param_order=PARAM_ORDER, gp_range_dict=GP_RANGE_DICT):
+    """
+    Build min/max tensors for min-max normalization in PARAM_ORDER.
+
+    Args:
+        param_order: List of parameter names
+        gp_range_dict: Dict mapping GP parameter names to [min, max]
+
+    Returns:
+        data_min: Minimum values tensor (D,)
+        data_max: Maximum values tensor (D,)
+    """
+    mins, maxs = [], []
+    for param in param_order:
+        key = PARAM_TO_GP_RANGE_KEY[param]
+        lo, hi = gp_range_dict[key]
+        mins.append(lo)
+        maxs.append(hi)
+
+    return torch.tensor(mins, dtype=torch.float32), torch.tensor(maxs, dtype=torch.float32)
+
+
+def normalize_x(X, data_min, data_max):
+    """
+    Min-max normalize inputs to [0, 1].
+
+    Args:
+        X: Input tensor (N, D)
+        data_min: Minimum values (D,)
+        data_max: Maximum values (D,)
+
+    Returns:
+        X_norm: Normalized tensor (N, D)
+    """
+    return (X - data_min) / (data_max - data_min)
+
+
+def unnormalize_x(X_norm, data_min, data_max):
+    """
+    Reverse min-max normalization.
+
+    Args:
+        X_norm: Normalized tensor (N, D)
+        data_min: Minimum values (D,)
+        data_max: Maximum values (D,)
+
+    Returns:
+        X: Unnormalized tensor (N, D)
+    """
+    return X_norm * (data_max - data_min) + data_min
+
+
+# ===== Target Transformations =====
+
+def transform_y(Y, target="DMRD"):
+    """
+    Transform target values to training space.
+
+    For DMRD/CrossSection: log(Y / true_value)
+    For CLs: identity (no transformation)
+
+    This puts the target value at 0 in transformed space,
+    making it easier to set decision thresholds.
+
+    Args:
+        Y: Target tensor in physical units
+        target: Target name (DMRD, CrossSection, CLs)
+
+    Returns:
+        Y_transformed: Transformed target tensor
+    """
+    if target == "CLs":
+        return Y.clone()
+
+    true_value = TARGET_CONFIG[target]["true_value"]
+    return torch.log(Y / true_value)
+
+
+def inverse_transform_y(Y_t, target="DMRD"):
+    """
+    Inverse transform: convert from training space back to physical units.
+
+    Args:
+        Y_t: Transformed target tensor
+        target: Target name (DMRD, CrossSection, CLs)
+
+    Returns:
+        Y: Target tensor in physical units
+    """
+    if target == "CLs":
+        return Y_t.clone()
+
+    true_value = TARGET_CONFIG[target]["true_value"]
+    return true_value * torch.exp(Y_t)

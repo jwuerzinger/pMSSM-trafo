@@ -4,6 +4,7 @@ pixi.lock
 !.pixi/config.toml
 data/
 __pycache__/
+pmssm/__pycache__/
 plots/
 logs/
 active_learning_output*
