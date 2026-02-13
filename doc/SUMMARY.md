@@ -121,12 +121,34 @@ Uses GP posterior variance or entropy-based batch selection:
 
 ```
 pMSSM-trafo/
+├── pmssm/                      # 🆕 Unified package (13 modules, ~5500 lines)
+│   ├── __init__.py             # Package exports
+│   ├── config.py               # Constants, parameter ranges
+│   ├── data.py                 # Data loading & normalization
+│   ├── datasets.py             # PyTorch Dataset classes
+│   ├── models/                 # Neural network architectures
+│   │   ├── transformer.py      # PMSSMTransformer variants
+│   │   └── feedforward.py      # PMSSMFeedForward (MLP)
+│   ├── selection.py            # Candidate generation (LHS), selection strategies
+│   ├── uncertainty.py          # MC Dropout & GP uncertainty
+│   ├── training.py             # Training loops for transformer & GP
+│   ├── evaluation.py           # R², metrics, lengthscales
+│   ├── visualization.py        # Plotting utilities
+│   ├── logging_utils.py        # Structured logging
+│   └── model_generation.py     # Run3ModelGen interface
+├── pmssm.py                    # Backward compatibility wrapper (re-exports from pmssm/)
 ├── train_pmssm.py              # Transformer training script
-├── pmssm.py                    # Model definitions and training functions
-├── active_learning.py          # Transformer active learning pipeline
-├── active_learning_gp.py       # GP active learning pipeline
-├── run_active_learning_gp.sh   # Production GP AL run script
-├── run_active_learning_gp_medium_test.sh  # Medium test script
+├── active_learning.py          # Transformer AL pipeline (~760 lines)
+├── active_learning_gp.py       # GP AL pipeline (~990 lines)
+├── plot_progress.py            # Visualization utility for AL progress
+├── Shell Scripts:
+│   ├── run_active_learning.sh                    # Transformer AL production run
+│   ├── run_active_learning_medium_test.sh        # Transformer AL test run
+│   ├── run_active_learning_with_config.sh        # 🆕 Config file & sweep example
+│   ├── run_active_learning_with_eval.sh          # 🆕 External evaluation example
+│   ├── run_active_learning_gp.sh                 # GP AL production run (DeepGP)
+│   ├── run_active_learning_gp_2h.sh              # 🆕 GP AL 2-hour test run
+│   └── run_active_learning_gp_medium_test.sh     # GP AL medium test
 ├── al_pmssmwithgp/             # GP models submodule
 │   └── model/gp_pipeline/
 │       ├── models/             # ExactGP, DeepGP, SparseGP, MLP
@@ -138,6 +160,7 @@ pMSSM-trafo/
 │   └── run_YYYYMMDD_HHMMSS/
 ├── doc/
 │   ├── SUMMARY.md                   # This file
+│   ├── HARMONIZATION_SUMMARY.md     # Feb 2026 refactoring details
 │   ├── TRAINING_GUIDE.md            # Transformer training guide
 │   ├── PARALLEL_TRAINING.md         # Parallel GPU setup
 │   ├── PLOT_ORGANIZATION.md         # Plot organization
@@ -232,14 +255,27 @@ See detailed documentation in `doc/`:
 - [gp_integration_plan.md](gp_integration_plan.md) - GP pipeline integration & progress
 - [gp_pipeline_comparison.md](gp_pipeline_comparison.md) - GP pipeline features & CLI reference
 
-## Changes to Your Code
+## Major Code Changes (Feb 2026)
 
-### pmssm.py
-1. Added PMSSMTransformerTabular class
-2. Improved PMSSMTransformer architecture
-3. Added plot_dir parameter to plotting functions
-4. Added logger parameter to train_with_validation
-5. Added LogNorm for 2D histogram colormaps
+### pmssm/ Package Restructuring
+The monolithic `pmssm.py` (~3000 lines) was refactored into a modular package:
+1. **pmssm/models/** - PMSSMTransformer, PMSSMTransformerTabular, PMSSMFeedForward
+2. **pmssm/data.py** - Data loading & normalization
+3. **pmssm/training.py** - Training loops for transformer & GP
+4. **pmssm/visualization.py** - Plotting utilities
+5. **pmssm/uncertainty.py** - MC Dropout & GP uncertainty
+6. **pmssm/selection.py** - LHS candidate generation, selection strategies
+7. **pmssm.py** - Backward compatibility wrapper (re-exports from pmssm/)
+
+See [HARMONIZATION_SUMMARY.md](HARMONIZATION_SUMMARY.md) for complete details.
+
+### CLI Harmonization
+Unified command-line interface across both active learning pipelines:
+1. Changed `--training-iterations` to `--epochs` (both pipelines)
+2. Added config file support: `--config-file sweep.yaml --sweep-index N`
+3. Added `--warm-starting` and `--early-stopping` flags (default: enabled)
+4. Added `--eval-data-path` for external validation datasets
+5. Added `--compute-full-metrics` for comprehensive evaluation
 
 ### train_pmssm.py
 1. Added multiprocessing for parallel training

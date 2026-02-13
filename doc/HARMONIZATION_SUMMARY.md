@@ -66,7 +66,7 @@ Both scripts support identical core AL workflow:
 
 #### GP-Only ([active_learning_gp.py](active_learning_gp.py))
 - Model: `--model-type`, `--kernel`, `--lengthscale`, `--noise`, `--use-ard`, `--use-dkl`
-- Training: `--learning-rate`, `--training-iterations`, `--early-stopping`, `--patience`, `--warm-starting`
+- Training: `--learning-rate`, `--epochs`, `--early-stopping`, `--patience`, `--warm-starting`
 - DeepGP/SparseGP: `--num-hidden-dims`, `--num-middle-dims`, `--num-inducing-max`, `--inducing-strategy`, `--gp-num-samples`, `--batch-size`
 - Kernels: `--m-nu`, `--num-mixtures`, `--jitter`, `--feature-dim`
 - Selection: `--tolerance-sampling` (GP-specific pre-filtering)
@@ -174,7 +174,7 @@ python active_learning_gp.py --testing \
     --proximity-sampling 0.1 \
     --tolerance-sampling 1.0 \
     --selection-strategy entropy_batch \
-    --training-iterations 50
+    --epochs 50
 ```
 
 ### Test 3: Backward Compatibility

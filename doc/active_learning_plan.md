@@ -370,3 +370,11 @@ Found 2 identical data samples appearing in both train and val sets!
 4. **Parallel Model Generation**: Use Condor for distributed generation
 5. **Adaptive Sampling**: Adjust candidate pool based on previous iterations
 6. **Cross-validation**: K-fold validation for more robust uncertainty estimates
+
+## See Also
+
+- [gp_pipeline_comparison.md](gp_pipeline_comparison.md) - GP active learning pipeline features and comparison
+- [CLI_REFERENCE.md](CLI_REFERENCE.md) - Complete command-line interface reference
+- [PACKAGE_STRUCTURE.md](PACKAGE_STRUCTURE.md) - pmssm/ package architecture and usage
+- [TRAINING_GUIDE.md](TRAINING_GUIDE.md) - Transformer training guide
+- [README.md](../README.md) - Quick start guide

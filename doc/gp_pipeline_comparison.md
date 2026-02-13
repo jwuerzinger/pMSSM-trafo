@@ -56,7 +56,7 @@ The original pipeline (`al_pmssmwithgp`) is a self-contained GP-based active lea
 
 | Setting | al_pmssmwithgp | active_learning_gp.py |
 |---------|---------------|----------------------|
-| Default iterations | 1000 | 2000 (`--training-iterations`) |
+| Default iterations | 1000 | 2000 (`--epochs`) |
 | Early stopping | Not supported | Patience 200 on val loss (`--early-stopping --patience 200`) |
 | Best model tracking | ExactGP: train loss (bug); others: val loss | All models: val loss (fixed) |
 | Learning rate | 0.005 (in `do_train_loop`) | 1e-3 (`--learning-rate`) |
@@ -208,12 +208,12 @@ python active_learning_gp.py --selection-strategy top_k --n-iterations 10
 
 ### Disable early stopping (train for full iteration budget)
 ```bash
-python active_learning_gp.py --no-early-stopping --training-iterations 500
+python active_learning_gp.py --no-early-stopping --epochs 500
 ```
 
 ### Custom early stopping patience
 ```bash
-python active_learning_gp.py --patience 100 --training-iterations 3000
+python active_learning_gp.py --patience 100 --epochs 3000
 ```
 
 ### Full metrics with true dataset evaluation
@@ -295,7 +295,7 @@ python active_learning_gp.py --target CrossSection --model-type exact_gp
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--learning-rate` | 1e-3 | Optimizer learning rate |
-| `--training-iterations` | 2000 | Max training iterations per AL iteration |
+| `--epochs` | 2000 | Max training epochs per AL iteration |
 | `--early-stopping` | on | Early stopping on validation loss |
 | `--patience` | 200 | Iterations without improvement before stop |
 | `--batch-size` | 256 | Batch size (DeepGP/SparseGP) |
@@ -326,3 +326,11 @@ python active_learning_gp.py --target CrossSection --model-type exact_gp
 |--------|---------|-------------|
 | `--config-file` | None | YAML config override |
 | `--sweep-index` | None | Sweep combination index (for SLURM arrays) |
+
+## See Also
+
+- [active_learning_plan.md](active_learning_plan.md) - Transformer active learning design and algorithms
+- [CLI_REFERENCE.md](CLI_REFERENCE.md) - Complete command-line interface reference for both pipelines
+- [PACKAGE_STRUCTURE.md](PACKAGE_STRUCTURE.md) - pmssm/ package architecture and usage
+- [gp_integration_plan.md](gp_integration_plan.md) - GP integration progress (completed)
+- [README.md](../README.md) - Quick start guide

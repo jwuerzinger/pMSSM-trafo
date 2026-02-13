@@ -238,12 +238,75 @@ bash run_active_learning_gp.sh
 
 | Setting | Default | CLI Option |
 |---------|---------|------------|
-| Max iterations | 2000 | `--training-iterations` |
+| Max training epochs | 2000 | `--epochs` |
 | Early stopping | On | `--early-stopping/--no-early-stopping` |
 | Patience | 200 | `--patience` |
 | Learning rate | 1e-3 | `--learning-rate` |
 | Selection | entropy_batch | `--selection-strategy` |
 | Kernel | RBF with ARD | `--kernel`, `--use-ard` |
+
+### Advanced Features
+
+Both pipelines support several advanced capabilities for production workflows:
+
+#### Config Files & Parameter Sweeps
+Use YAML configuration files for systematic hyperparameter exploration:
+
+```bash
+# Create a sweep configuration
+cat > sweep_config.yaml <<EOF
+epochs: [1000, 2000, 5000]
+dropout: [0.1, 0.15, 0.2]
+# Total: 3 × 3 = 9 combinations
+EOF
+
+# Run specific combination
+python active_learning.py --config-file sweep_config.yaml --sweep-index 0
+
+# Or with SLURM array jobs
+#SBATCH --array=0-8
+python active_learning.py --config-file sweep_config.yaml --sweep-index $SLURM_ARRAY_TASK_ID
+```
+
+See [run_active_learning_with_config.sh](run_active_learning_with_config.sh) for a complete example.
+
+#### Warm Starting (Default: Enabled)
+Resume training from previous iteration checkpoints for faster convergence:
+
+```bash
+# Enabled by default
+python active_learning.py --warm-starting
+
+# Train from scratch each iteration
+python active_learning.py --no-warm-starting
+```
+
+#### Early Stopping (Default: Enabled)
+Automatically stop training when validation loss plateaus:
+
+```bash
+# Default: enabled with patience=200
+python active_learning.py --early-stopping --patience 200
+
+# Disable to see full training curves
+python active_learning.py --no-early-stopping
+```
+
+#### External Evaluation Dataset
+Evaluate models on a separate held-out dataset:
+
+```bash
+python active_learning.py \
+    --eval-data-path /path/to/eval_data.root \
+    --compute-full-metrics
+```
+
+#### Comprehensive Metrics
+Compute full evaluation suite (accuracy, MSE, RMSE, chi², pulls):
+
+```bash
+python active_learning.py --compute-full-metrics
+```
 
 ### Output
 
@@ -268,12 +331,34 @@ See [doc/gp_integration_plan.md](doc/gp_integration_plan.md) for progress tracki
 
 ```
 pMSSM-trafo/
-├── pmssm.py                    # Model definitions and training utilities
-├── train_pmssm.py              # Transformer training script with CLI
-├── active_learning.py          # Transformer active learning pipeline
-├── active_learning_gp.py       # GP active learning pipeline
-├── run_active_learning_gp.sh   # Production GP AL run script
-├── run_active_learning_gp_medium_test.sh  # Medium test script
+├── pmssm/                      # 🆕 Unified package (13 modules, ~5500 lines)
+│   ├── __init__.py             # Package exports
+│   ├── config.py               # Constants, parameter ranges
+│   ├── data.py                 # Data loading & normalization
+│   ├── datasets.py             # PyTorch Dataset classes
+│   ├── models/                 # Neural network architectures
+│   │   ├── transformer.py      # PMSSMTransformer variants
+│   │   └── feedforward.py      # PMSSMFeedForward (MLP)
+│   ├── selection.py            # Candidate generation (LHS), selection strategies
+│   ├── uncertainty.py          # MC Dropout & GP uncertainty
+│   ├── training.py             # Training loops for transformer & GP
+│   ├── evaluation.py           # R², metrics, lengthscales
+│   ├── visualization.py        # Plotting utilities
+│   ├── logging_utils.py        # Structured logging
+│   └── model_generation.py     # Run3ModelGen interface
+├── pmssm.py                    # Backward compatibility wrapper (re-exports from pmssm/)
+├── train_pmssm.py              # Transformer training script
+├── active_learning.py          # Transformer AL pipeline (~760 lines)
+├── active_learning_gp.py       # GP AL pipeline (~990 lines)
+├── plot_progress.py            # Visualization utility for AL progress
+├── Shell Scripts:
+│   ├── run_active_learning.sh                    # Transformer AL production run
+│   ├── run_active_learning_medium_test.sh        # Transformer AL test run
+│   ├── run_active_learning_with_config.sh        # 🆕 Config file & sweep example
+│   ├── run_active_learning_with_eval.sh          # 🆕 External evaluation example
+│   ├── run_active_learning_gp.sh                 # GP AL production run (DeepGP)
+│   ├── run_active_learning_gp_2h.sh              # 🆕 GP AL 2-hour test run
+│   └── run_active_learning_gp_medium_test.sh     # GP AL medium test
 ├── pixi.toml                   # Dependency configuration
 ├── data/                       # ROOT files with pMSSM data
 ├── logs/                       # Training logs (timestamped)
@@ -310,12 +395,28 @@ See [doc/PARALLEL_TRAINING.md](doc/PARALLEL_TRAINING.md) for details.
 
 ## Documentation
 
-- [Project Summary](doc/SUMMARY.md) - Overview of all pipelines
-- [Training Guide](doc/TRAINING_GUIDE.md) - Transformer training instructions
-- [Parallel Training](doc/PARALLEL_TRAINING.md) - Multi-GPU setup
-- [Transformer AL](doc/active_learning_plan.md) - Transformer active learning design
-- [GP Integration](doc/gp_integration_plan.md) - GP pipeline progress tracker
-- [GP Pipeline Reference](doc/gp_pipeline_comparison.md) - GP features, CLI options, comparison
+### Getting Started
+- **[README.md](README.md)** - This file (quick start, overview)
+- [Project Summary](doc/SUMMARY.md) - Overview of all pipelines and status
+
+### Architecture & Code Organization
+- [HARMONIZATION_SUMMARY.md](doc/HARMONIZATION_SUMMARY.md) - Feb 2026 refactoring details ⭐
+- **pmssm/ package** - Unified codebase (13 modules replacing monolithic pmssm.py)
+
+### Training Guides
+- [Training Guide](doc/TRAINING_GUIDE.md) - Transformer training with train_pmssm.py
+- [Parallel Training](doc/PARALLEL_TRAINING.md) - Multi-GPU setup and configuration
+
+### Active Learning Pipelines
+- [Transformer AL Plan](doc/active_learning_plan.md) - Detailed design and algorithms ⭐
+- [GP Pipeline Reference](doc/gp_pipeline_comparison.md) - GP features, CLI options, models ⭐
+- [GP Integration](doc/gp_integration_plan.md) - GP integration progress (completed)
+
+### Reference
+- [Logging Info](doc/LOGGING_INFO.md) - Structured logging with structlog
+- [Plot Organization](doc/PLOT_ORGANIZATION.md) - Output plot structure
+
+⭐ = Recommended for new users
 
 ## License
 

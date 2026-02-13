@@ -1,5 +1,15 @@
 # GP/DeepGP Active Learning Integration
 
+> **STATUS: COMPLETED** ✅
+>
+> This document tracked GP integration during January-February 2026.
+> Integration is now complete. For current documentation, see:
+> - [gp_pipeline_comparison.md](gp_pipeline_comparison.md) - Features & CLI reference
+> - [CLI_REFERENCE.md](CLI_REFERENCE.md) - Complete CLI options
+> - [PACKAGE_STRUCTURE.md](PACKAGE_STRUCTURE.md) - Code organization
+>
+> Retained for historical reference.
+
 ## Overview
 
 Integrate Gaussian Process (ExactGP) and Deep GP models from the `al_pmssmwithgp` repo into the existing active learning pipeline. Creates `active_learning_gp.py` — an analogous script to `active_learning.py` that swaps the tabular transformer for GP models while keeping the same infrastructure (data loading, parallel generation, baseline comparison, metrics tracking).
