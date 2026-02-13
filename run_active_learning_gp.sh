@@ -6,10 +6,10 @@
     --patience 100 \
     --learning-rate 1e-3 \
     --generate-data \
-    --n-samples 50000 \
+    --n-samples 10000 \
     --n-iterations 40 \
     --n-select 200 \
-    --n-candidates 10000 \
+    --n-candidates 50000 \
     --gen-workers 20 \
     --kernel RBF \
     --lengthscale 1.0 \
