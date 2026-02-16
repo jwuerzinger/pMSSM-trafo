@@ -54,21 +54,21 @@ Options only available in `active_learning.py`:
 | `--y-transform` | str | log | Target transformation: `log` (log-space training) or `zscore` (z-score normalization) |
 | `--dropout` | float | 0.1 | Dropout rate for PMSSMTransformerTabular |
 | `--mc-samples` | int | 30 | Number of Monte Carlo forward passes for uncertainty estimation |
-| `--selection-strategy` | str | top_k | Point selection strategy: `top_k`, `entropy_batch`, `proximity_weighted` |
+| `--selection-strategy` | str | entropy_batch | Point selection strategy: `entropy_batch` (default), `top_k`, `proximity_weighted` |
 | `--entropy-pool-size` | int | 5000 | Size of high-uncertainty pool for entropy-based selection |
 | `--candidate-generation` | str | lhs | Candidate generation method: `lhs` (Latin Hypercube), `uniform` |
 | `--proximity-sampling` | float | 0.1 | Proximity weighting width (0 = disabled, 0.1 = moderate focus near θ=0.12). Default enables proximity weighting. |
 
 ### Selection Strategies (Transformer)
 
-**top_k** (default):
-- Select top-K points by MC Dropout variance
-- Simple, fast, no diversity guarantee
-
-**entropy_batch**:
+**entropy_batch** (default):
 - Pre-filter candidates with high entropy
 - Use Latin Hypercube Sampling for candidates
 - More diverse selection
+
+**top_k**:
+- Select top-K points by MC Dropout variance
+- Simple, fast, no diversity guarantee
 
 **proximity_weighted**:
 - Weight uncertainty by proximity to target value (θ = 0.12 for DMRD)

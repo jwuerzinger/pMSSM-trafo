@@ -227,8 +227,10 @@ Proximity weighting was originally implemented in the `al_pmssmwithgp` submodule
 
 | Pipeline | Default | Alternative |
 |----------|---------|-------------|
-| **Transformer** | `top_k` (variance ranking) | `entropy_batch` |
+| **Transformer** | `entropy_batch` (sophisticated batch) | `top_k` |
 | **GP** | `entropy_batch` (sophisticated batch) | `top_k` |
+
+**Note**: Both pipelines now use `entropy_batch` by default for better diversity and space coverage.
 
 ### Learning Rate & Optimizer
 

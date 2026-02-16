@@ -311,7 +311,7 @@ def load_config_with_sweep(config_file, sweep_index=None):
 @click.option('--learning-rate', default=1e-3, type=float, help="Optimizer learning rate.")
 @click.option('--epochs', default=2000, type=int, help="Max training epochs per AL iteration (default: 2000).")
 @click.option('--early-stopping/--no-early-stopping', default=True, help="Enable early stopping on validation loss.")
-@click.option('--patience', default=200, type=int, help="Early stopping patience (iterations without improvement).")
+@click.option('--patience', default=200, type=int, help="Early stopping patience (epochs without improvement, default: 200).")
 @click.option('--use-ard/--no-ard', default=True, help="Use ARD (Automatic Relevance Determination).")
 @click.option('--use-dkl/--no-dkl', default=False, help="Use Deep Kernel Learning (ExactGP only).")
 @click.option('--feature-dim', default=2, type=int, help="DKL feature dimension.")
@@ -333,7 +333,7 @@ def load_config_with_sweep(config_file, sweep_index=None):
 @click.option('--tolerance-sampling', default=1.0, type=float, help="Threshold filter width (entropy_batch only).")
 @click.option('--proximity-sampling', default=0.1, type=float, help="Proximity weighting width (entropy_batch only).")
 # Evaluation options
-@click.option('--compute-full-metrics/--no-full-metrics', default=False,
+@click.option('--compute-full-metrics/--no-compute-full-metrics', default=False,
               help="Compute comprehensive GoF metrics (accuracy, chi2, pulls, etc.).")
 @click.option('--eval-data-path', default=None, type=str, help="Path to true eval dataset (ROOT/CSV).")
 @click.option('--track-lengthscales/--no-track-lengthscales', default=True,

@@ -126,7 +126,7 @@ def load_config_with_sweep(config_file, sweep_index=None):
 @click.option('--min-gen-fraction', default=0.6, type=float, help="Minimum fraction of n-select that must be generated successfully before stopping retries (default: 0.6).")
 @click.option('--max-gen-attempts', default=10, type=int, help="Maximum number of generation attempts per iteration (default: 10).")
 @click.option('--gen-workers', default=1, type=int, help="Number of parallel genModels.py workers per generation attempt (default: 1).")
-@click.option('--selection-strategy', default='top_k', type=click.Choice(['top_k', 'entropy_batch']), help="Selection strategy: top_k (default) or entropy_batch.")
+@click.option('--selection-strategy', default='entropy_batch', type=click.Choice(['top_k', 'entropy_batch']), help="Selection strategy: top_k or entropy_batch (default).")
 @click.option('--entropy-blur', default=0.15, type=float, help="Entropy smoothing parameter (entropy_batch only).")
 @click.option('--entropy-beta', default=50.0, type=float, help="Gibbs sampling temperature (entropy_batch only).")
 @click.option('--entropy-pool-size', default=5000, type=int, help="Focused pool size for entropy_batch pre-filtering.")
