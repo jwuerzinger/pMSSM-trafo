@@ -249,6 +249,7 @@ python train_pmssm.py --testing --epochs 10
 ## Documentation
 
 See detailed documentation in `doc/`:
+- **[IMPLEMENTATION_DETAILS.md](IMPLEMENTATION_DETAILS.md)** - Advanced topics & performance analysis ⭐
 - [TRAINING_GUIDE.md](TRAINING_GUIDE.md) - Transformer training guide
 - [PARALLEL_TRAINING.md](PARALLEL_TRAINING.md) - Parallel GPU setup
 - [PLOT_ORGANIZATION.md](PLOT_ORGANIZATION.md) - Plot organization
@@ -256,6 +257,9 @@ See detailed documentation in `doc/`:
 - [active_learning_plan.md](active_learning_plan.md) - Transformer active learning design
 - [gp_integration_plan.md](gp_integration_plan.md) - GP pipeline integration & progress
 - [gp_pipeline_comparison.md](gp_pipeline_comparison.md) - GP pipeline features & CLI reference
+- [CLI_REFERENCE.md](CLI_REFERENCE.md) - Complete command-line options
+
+⭐ = Recommended for understanding pipeline behavior
 
 ## Major Code Changes (Feb 2026)
 

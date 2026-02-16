@@ -200,6 +200,12 @@ See [doc/active_learning_plan.md](doc/active_learning_plan.md) for detailed algo
 
 An alternative active learning pipeline using Gaussian Process models for native uncertainty estimation (no MC Dropout needed).
 
+⚠️ **Important**: GP and Transformer pipelines use **different input normalization**:
+- **Transformer**: Z-score normalization `(X - mean) / std` → centered at 0, unit variance
+- **GP**: Min-max normalization `(X - min) / (max - min)` → scaled to [0, 1]
+
+This means models see the **same physical points in different normalized spaces**, which affects kernel/embedding behavior and uncertainty estimates. Both use the same log-space target transformation. See [Implementation Details](doc/IMPLEMENTATION_DETAILS.md#key-pipeline-differences) for full analysis.
+
 ### Models
 
 | Model | Uncertainty | Use Case |
@@ -379,11 +385,13 @@ pMSSM-trafo/
 ├── tests/                      # Unit tests
 └── doc/                        # Documentation
     ├── SUMMARY.md              # Project overview
+    ├── IMPLEMENTATION_DETAILS.md  # Advanced topics & performance analysis
     ├── TRAINING_GUIDE.md       # Transformer training guide
     ├── PARALLEL_TRAINING.md    # Multi-GPU setup
     ├── active_learning_plan.md # Transformer AL design
     ├── gp_integration_plan.md  # GP AL integration & progress
-    └── gp_pipeline_comparison.md  # GP pipeline features & CLI
+    ├── gp_pipeline_comparison.md  # GP pipeline features & CLI
+    └── CLI_REFERENCE.md        # Complete CLI options
 ```
 
 ## Output
@@ -424,6 +432,8 @@ See [doc/PARALLEL_TRAINING.md](doc/PARALLEL_TRAINING.md) for details.
 - [GP Integration](doc/gp_integration_plan.md) - GP integration progress (completed)
 
 ### Reference
+- [Implementation Details](doc/IMPLEMENTATION_DETAILS.md) - Advanced topics: uncertainty computation, warm starting impact, proximity weighting ⭐
+- [CLI Reference](doc/CLI_REFERENCE.md) - Complete command-line options for both pipelines
 - [Logging Info](doc/LOGGING_INFO.md) - Structured logging with structlog
 - [Plot Organization](doc/PLOT_ORGANIZATION.md) - Output plot structure
 
