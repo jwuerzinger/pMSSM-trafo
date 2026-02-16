@@ -57,7 +57,7 @@ Options only available in `active_learning.py`:
 | `--selection-strategy` | str | top_k | Point selection strategy: `top_k`, `entropy_batch`, `proximity_weighted` |
 | `--entropy-pool-size` | int | 5000 | Size of high-uncertainty pool for entropy-based selection |
 | `--candidate-generation` | str | lhs | Candidate generation method: `lhs` (Latin Hypercube), `uniform` |
-| `--proximity-sampling` | float | 0.0 | Proximity weighting width (0 = disabled, 0.1 = focus near θ=0.12) |
+| `--proximity-sampling` | float | 0.1 | Proximity weighting width (0 = disabled, 0.1 = moderate focus near θ=0.12). Default enables proximity weighting. |
 
 ### Selection Strategies (Transformer)
 

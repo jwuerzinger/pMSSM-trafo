@@ -187,9 +187,9 @@ Weighted:        0.00   0.01   0.57   0.50   0.49   0.04   0.00
 
 **Transformer:**
 ```bash
-# Default: disabled
-python active_learning.py --proximity-sampling 0.0  # No weighting
-python active_learning.py --proximity-sampling 0.1  # Enable weighting
+# Default: 0.1 (enabled)
+python active_learning.py --proximity-sampling 0.1  # Moderate focus (default)
+python active_learning.py --proximity-sampling 0.0  # Disable weighting
 ```
 
 **GP:**

@@ -150,8 +150,8 @@ def load_config_with_sweep(config_file, sweep_index=None):
               help="Path to external eval dataset (ROOT/CSV) for validation.")
 @click.option('--compute-full-metrics/--no-compute-full-metrics', default=False,
               help="Compute comprehensive evaluation metrics (accuracy, MSE, RMSE).")
-@click.option('--y-transform', default='zscore', type=click.Choice(['zscore', 'log']),
-              help="Y transformation: 'zscore' (default) or 'log' (like GP pipeline).")
+@click.option('--y-transform', default='log', type=click.Choice(['zscore', 'log']),
+              help="Y transformation: 'log' (default, recommended) or 'zscore' (legacy).")
 def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, dropout, n_datasets, n_samples, output_dir, generate_data, min_gen_fraction, max_gen_attempts, gen_workers, selection_strategy, entropy_blur, entropy_beta, entropy_pool_size, candidate_generation, proximity_sampling, target_value, config_file, sweep_index, early_stopping, patience, warm_starting, eval_data_path, compute_full_metrics, y_transform):
     """
     Active learning pipeline for pMSSM relic density prediction.
