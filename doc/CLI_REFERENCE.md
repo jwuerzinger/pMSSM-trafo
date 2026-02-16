@@ -5,11 +5,11 @@ Complete command-line interface reference for both active learning pipelines.
 ## Quick Reference
 
 ```bash
-# Transformer AL - Quick test
-python active_learning.py --testing
+# Transformer AL - Quick test (log-space training)
+python active_learning.py --y-transform log --testing
 
-# Transformer AL - Production
-python active_learning.py --n-iterations 40 --generate-data --epochs 10000
+# Transformer AL - Production (log-space training)
+python active_learning.py --y-transform log --n-iterations 40 --generate-data --epochs 10000
 
 # GP AL - Quick test
 python active_learning_gp.py --testing
@@ -51,6 +51,7 @@ Options only available in `active_learning.py`:
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
+| `--y-transform` | str | log | Target transformation: `log` (log-space training) or `zscore` (z-score normalization) |
 | `--dropout` | float | 0.1 | Dropout rate for PMSSMTransformerTabular |
 | `--mc-samples` | int | 30 | Number of Monte Carlo forward passes for uncertainty estimation |
 | `--selection-strategy` | str | top_k | Point selection strategy: `top_k`, `entropy_batch`, `proximity_weighted` |
@@ -119,8 +120,8 @@ Options only available in `active_learning_gp.py`:
 Test both pipelines with minimal compute:
 
 ```bash
-# Transformer - 3 datasets, 2 iterations, 100 epochs
-python active_learning.py --testing
+# Transformer - 3 datasets, 2 iterations, 100 epochs, log-space training
+python active_learning.py --y-transform log --testing
 
 # GP - 3 datasets, 2 iterations, 100 epochs
 python active_learning_gp.py --testing
@@ -131,8 +132,9 @@ python active_learning_gp.py --testing
 Full active learning with data generation:
 
 ```bash
-# Transformer - 40 iterations, 50k samples, 10k epochs
+# Transformer - 40 iterations, 50k samples, 10k epochs, log-space training
 python active_learning.py \
+    --y-transform log \
     --n-iterations 40 \
     --n-samples 50000 \
     --n-select 20000 \
@@ -162,6 +164,7 @@ python active_learning_gp.py \
 **Transformer with entropy-based selection**:
 ```bash
 python active_learning.py \
+    --y-transform log \
     --selection-strategy entropy_batch \
     --entropy-pool-size 5000 \
     --candidate-generation lhs \
@@ -171,6 +174,7 @@ python active_learning.py \
 **Transformer with proximity weighting** (focus near DMRD target):
 ```bash
 python active_learning.py \
+    --y-transform log \
     --selection-strategy proximity_weighted \
     --proximity-sampling 0.1 \
     --candidate-generation lhs \
@@ -205,6 +209,7 @@ dropout: [0.1, 0.15, 0.2]   # 3 values (Transformer only)
 # Total: 3 × 3 = 9 combinations
 
 # Fixed parameters
+y_transform: log
 n_iterations: 5
 n_candidates: 10000
 n_select: 100
@@ -252,6 +257,7 @@ Evaluate on separate held-out dataset:
 ```bash
 # Transformer
 python active_learning.py \
+    --y-transform log \
     --eval-data-path /path/to/eval_data.root \
     --compute-full-metrics \
     --n-iterations 10
@@ -296,23 +302,23 @@ python active_learning_gp.py --model-type mlp --n-iterations 10
 
 **Disable early stopping** (train for full epoch budget):
 ```bash
-python active_learning.py --no-early-stopping --epochs 5000
+python active_learning.py --y-transform log --no-early-stopping --epochs 5000
 ```
 
 **Custom early stopping patience**:
 ```bash
-python active_learning.py --early-stopping --patience 500 --epochs 10000
+python active_learning.py --y-transform log --early-stopping --patience 500 --epochs 10000
 ```
 
 **Train from scratch each iteration** (no warm-starting):
 ```bash
-python active_learning.py --no-warm-starting --n-iterations 10
+python active_learning.py --y-transform log --no-warm-starting --n-iterations 10
 ```
 
 **Custom learning rate**:
 ```bash
 # Transformer
-python active_learning.py --learning-rate 1e-4 --epochs 5000
+python active_learning.py --y-transform log --learning-rate 1e-4 --epochs 5000
 
 # GP
 python active_learning_gp.py --learning-rate 1e-2 --epochs 3000
@@ -322,12 +328,12 @@ python active_learning_gp.py --learning-rate 1e-2 --epochs 3000
 
 **Full training curves** (no early stopping):
 ```bash
-python active_learning.py --no-early-stopping --epochs 2000
+python active_learning.py --y-transform log --no-early-stopping --epochs 2000
 ```
 
 **Longer patience** for better convergence:
 ```bash
-python active_learning.py --patience 500 --epochs 10000
+python active_learning.py --y-transform log --patience 500 --epochs 10000
 ```
 
 **Advanced GP diagnostics**:
@@ -340,7 +346,7 @@ python active_learning_gp.py \
 
 **Comprehensive evaluation metrics**:
 ```bash
-python active_learning.py --compute-full-metrics
+python active_learning.py --y-transform log --compute-full-metrics
 ```
 Metrics include:
 - Accuracy (within 1σ, 2σ, 3σ)
@@ -358,8 +364,9 @@ Pre-configured shell scripts for common workflows:
 
 | Script | Purpose | Configuration |
 |--------|---------|---------------|
-| [run_active_learning.sh](../run_active_learning.sh) | Production run | 40 iterations, 50k samples, 10k epochs, data generation |
-| [run_active_learning_medium_test.sh](../run_active_learning_medium_test.sh) | Medium test | 3 datasets, 2000 samples, 3 iterations, 500 epochs |
+| [run_active_learning.sh](../run_active_learning.sh) | Production run | 40 iterations, 50k samples, 10k epochs, log-space training, data generation |
+| [run_active_learning_1h.sh](../run_active_learning_1h.sh) | 1-hour test | 2 iterations, 50k samples, log-space training |
+| [run_active_learning_medium_test.sh](../run_active_learning_medium_test.sh) | Medium test | 3 datasets, 2000 samples, 3 iterations, 500 epochs, log-space training |
 | [run_active_learning_with_config.sh](../run_active_learning_with_config.sh) | Config file example | Demonstrates YAML config and parameter sweeps |
 | [run_active_learning_with_eval.sh](../run_active_learning_with_eval.sh) | External eval example | Shows external dataset evaluation |
 
@@ -368,6 +375,7 @@ Pre-configured shell scripts for common workflows:
 | Script | Purpose | Configuration |
 |--------|---------|---------------|
 | [run_active_learning_gp.sh](../run_active_learning_gp.sh) | Production run | DeepGP, 40 iterations, 100k samples, 2k epochs |
+| [run_active_learning_gp_1h.sh](../run_active_learning_gp_1h.sh) | 1-hour test | DeepGP, 3 iterations, 50k samples, log-space training |
 | [run_active_learning_gp_2h.sh](../run_active_learning_gp_2h.sh) | 2-hour test | ExactGP, shorter run for quick validation |
 | [run_active_learning_gp_medium_test.sh](../run_active_learning_gp_medium_test.sh) | Medium test | 3 datasets, 2000 samples, 3 iterations |
 
@@ -377,6 +385,7 @@ YAML configuration files can override any CLI parameter:
 
 ```yaml
 # Single values - override defaults
+y_transform: log
 n_iterations: 10
 epochs: 5000
 learning_rate: 1e-3

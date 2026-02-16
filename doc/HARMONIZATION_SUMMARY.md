@@ -57,6 +57,7 @@ Both scripts support identical core AL workflow:
 ### Model-Specific Options
 
 #### Transformer-Only ([active_learning.py](active_learning.py))
+- **`--y-transform`** - 🆕 Target transformation [zscore, log] (default: log)
 - `--mc-samples` - MC Dropout forward passes
 - `--epochs` - Training epochs
 - `--dropout` - Dropout rate
@@ -121,6 +122,35 @@ Focuses candidate selection near the target value (0.12 for relic density):
 - Concentrates exploration on scientifically interesting region
 - Reduces wasted evaluations far from target
 - Improves sample efficiency
+
+### Feature 3: Log-Space Training Harmonization
+**Status**: ✅ Available in both scripts
+
+Both pipelines now train in log-space by default for the relic density target, enabling direct performance comparison:
+
+- **active_learning.py**:
+  ```bash
+  --y-transform log  # Default (or zscore for legacy behavior)
+  ```
+  - Transformer models train in log-space: `log(Y / 0.12)`
+  - R² computed in physical space for consistent evaluation
+  - Added to `PMSSMDataset` class with target-aware transformation
+
+- **active_learning_gp.py**:
+  - GP models always train in log-space for DMRD target
+  - Uses same transformation: `log(Y / 0.12)`
+  - R² computed in physical space
+
+**Benefits**:
+- **Fair comparison**: Both pipelines use identical target transformation
+- **Improved stability**: Log-space handles large dynamic range of relic density values
+- **Consistent evaluation**: R² always computed in physical space across both pipelines
+- **Better performance**: Matches theoretical best practices for relic density modeling
+
+**Implementation**:
+- `pmssm/datasets.py`: Added `y_transform` parameter to `PMSSMDataset`
+- `pmssm/data.py`: `transform_y()` and `inverse_transform_y()` functions
+- All shell scripts updated to use `--y-transform log` by default
 
 ---
 

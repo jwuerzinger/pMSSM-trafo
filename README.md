@@ -107,11 +107,15 @@ In addition to standard training, this project includes an **active learning pip
 ### Quick Start
 
 ```bash
-# Testing mode (quick verification)
-pixi run python active_learning.py --testing
+# Testing mode (quick verification, 3 min)
+bash run_active_learning_medium_test.sh
+
+# 1-hour test with 50k samples, log transformation
+bash run_active_learning_1h.sh
 
 # Full active learning with automatic data generation
 pixi run python active_learning.py \
+    --y-transform log \
     --n-iterations 10 \
     --n-candidates 10000 \
     --n-select 1000 \
@@ -120,6 +124,7 @@ pixi run python active_learning.py \
 
 # Without data generation (just point selection)
 pixi run python active_learning.py \
+    --y-transform log \
     --n-iterations 5 \
     --n-candidates 5000 \
     --n-select 100
@@ -127,11 +132,13 @@ pixi run python active_learning.py \
 
 ### Key Features
 
-1. **Baseline Comparison**: Trains both active learning and random baseline models in parallel
-2. **MC Dropout Uncertainty**: Uses Monte Carlo Dropout for uncertainty estimation
-3. **Data Quality Checks**: Automatic detection of duplicates, leakage, and contamination
-4. **Contamination-Free**: Strict separation between AL and baseline datasets
-5. **Comprehensive Tracking**: Logs losses, R² scores, and dataset sizes across iterations
+1. **Log Transformation** (NEW): Trains in log space matching GP pipeline for fair comparison
+2. **Baseline Comparison**: Trains both active learning and random baseline models in parallel
+3. **MC Dropout Uncertainty**: Uses Monte Carlo Dropout for uncertainty estimation
+4. **Data Quality Checks**: Automatic detection of duplicates, leakage, and contamination
+5. **Contamination-Free**: Strict separation between AL and baseline datasets
+6. **Comprehensive Tracking**: Logs losses, R² scores, and dataset sizes across iterations
+7. **Consistent R² Calculation**: Always computed in physical space regardless of training space
 
 ### Pipeline Stages
 
@@ -205,8 +212,11 @@ An alternative active learning pipeline using Gaussian Process models for native
 ### Quick Start
 
 ```bash
-# Quick test
-python active_learning_gp.py --testing
+# Quick test (3 min)
+bash run_active_learning_gp_medium_test.sh
+
+# 1-hour test with 50k samples
+bash run_active_learning_gp_1h.sh
 
 # Full run with entropy-based batch selection (default)
 python active_learning_gp.py \
@@ -226,13 +236,14 @@ bash run_active_learning_gp.sh
 ### Key Features
 
 1. **Native GP Uncertainty**: No MC Dropout needed - uses posterior variance directly
-2. **Entropy-Based Batch Selection** (default): LHS candidate sampling, threshold filtering, Gibbs sampling for diverse batches
-3. **Early Stopping**: Patience 200 on validation loss (configurable via `--patience`, disable with `--no-early-stopping`)
-4. **Multiple Targets**: DMRD (relic density), CrossSection, CLs via `--target`
-5. **Comprehensive Metrics**: Accuracy, chi2, pulls, weighted accuracy via `--compute-full-metrics`
-6. **ARD Lengthscale Tracking**: Per-iteration lengthscale CSV via `--track-lengthscales`
-7. **Parallel Training**: AL and baseline models on separate GPUs
-8. **YAML Config + SLURM Sweeps**: `--config-file sweep.yaml --sweep-index $SLURM_ARRAY_TASK_ID`
+2. **Log Transformation**: Trains in log space: `log(Y / 0.12)` for DMRD target
+3. **Entropy-Based Batch Selection** (default): LHS candidate sampling, threshold filtering, Gibbs sampling for diverse batches
+4. **Early Stopping**: Patience 200 on validation loss (configurable via `--patience`, disable with `--no-early-stopping`)
+5. **Multiple Targets**: DMRD (relic density), CrossSection, CLs via `--target`
+6. **Comprehensive Metrics**: Accuracy, chi2, pulls, weighted accuracy via `--compute-full-metrics`
+7. **ARD Lengthscale Tracking**: Per-iteration lengthscale CSV via `--track-lengthscales`
+8. **Parallel Training**: AL and baseline models on separate GPUs
+9. **YAML Config + SLURM Sweeps**: `--config-file sweep.yaml --sweep-index $SLURM_ARRAY_TASK_ID`
 
 ### Training Configuration
 

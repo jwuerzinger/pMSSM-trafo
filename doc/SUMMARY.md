@@ -10,7 +10,7 @@ python train_pmssm.py                          # Full training (parallel GPUs)
 python train_pmssm.py --testing --epochs 100   # Quick test
 
 # --- Transformer active learning ---
-python active_learning.py --n-iterations 5 --generate-data
+python active_learning.py --y-transform log --n-iterations 5 --generate-data
 
 # --- GP active learning ---
 python active_learning_gp.py --n-iterations 5 --generate-data
@@ -86,6 +86,7 @@ Options:
 ### Transformer Active Learning (`active_learning.py`)
 
 Uses MC Dropout uncertainty estimation with the tabular transformer model:
+- Log-space training: `log(Y / 0.12)` for relic density (matching GP pipeline)
 - 2000 training epochs, early stopping (patience 200) on validation loss
 - Parallel training of AL + baseline models on separate GPUs
 - Candidate selection via top-K variance from MC Dropout forward passes
@@ -110,7 +111,8 @@ Uses GP posterior variance or entropy-based batch selection:
 | Feature | Transformer | GP |
 |---------|------------|-----|
 | Uncertainty | MC Dropout (N forward passes) | GP posterior variance |
-| Normalization | Z-score (mean/std) | Min-max to [0,1] |
+| Input normalization | Z-score (mean/std) | Z-score (mean/std) |
+| Target transformation | Log-space: `log(Y / 0.12)` | Log-space: `log(Y / 0.12)` |
 | Default selection | Top-K variance | Entropy batch |
 | Training | DataLoader + optimizer loop | `model.do_train_loop()` |
 | Default epochs | 2000 | 2000 |

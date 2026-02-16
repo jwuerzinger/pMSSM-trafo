@@ -9,6 +9,19 @@ This document compares the two GP-based pipelines in the repository and document
 
 The original pipeline (`al_pmssmwithgp`) is a self-contained GP-based active learning system with its own data loading, model training, evaluation, and physics simulation. The refactored pipeline (`active_learning_gp.py`) integrates GP models into the main repo's infrastructure, sharing utilities with the transformer-based `active_learning.py` (data generation, candidate pooling, logging, plotting).
 
+### Transformer-GP Harmonization
+
+Both the transformer pipeline (`active_learning.py`) and GP pipeline (`active_learning_gp.py`) now use **log-space training** by default for the relic density target:
+
+```python
+Y_transformed = log(Y / 0.12)  # 0.12 is the target relic density
+```
+
+This harmonization enables direct performance comparison between the two approaches:
+- **Transformer**: Uses `--y-transform log` (default)
+- **GP**: Always trains in log space for DMRD target
+- **R² scores**: Both pipelines compute R² in physical space after inverse transformation for consistent evaluation
+
 ## Pipeline Comparison
 
 ### Execution Flow

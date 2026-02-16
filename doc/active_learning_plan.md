@@ -44,6 +44,23 @@ The pipeline trains two models in parallel for fair comparison:
 - Baseline grows by randomly sampling from the original input dataset (excluding initial AL samples)
 - **No data contamination**: Baseline never samples from AL's pool or generated data
 
+## Target Transformation
+
+By default, the pipeline trains in **log space** for the relic density target:
+
+```python
+Y_transformed = log(Y / 0.12)  # 0.12 is the target relic density
+```
+
+This transformation:
+- Matches the GP pipeline for fair comparison
+- Better handles the large dynamic range of relic density values
+- Improves numerical stability during training
+
+The R² score is always computed in **physical space** (after inverse transformation) for consistent evaluation across different transformation methods.
+
+Use `--y-transform zscore` to use z-score normalization instead (legacy behavior).
+
 ## Uncertainty Estimation: MC Dropout
 
 We use Monte Carlo Dropout for uncertainty estimation:
@@ -102,6 +119,7 @@ Uses small data (30 samples, 10 epochs) for quick verification.
 
 ```bash
 python active_learning.py \
+    --y-transform log \
     --n-iterations 5 \
     --n-candidates 10000 \
     --n-select 10 \
@@ -115,6 +133,7 @@ python active_learning.py \
 
 ```bash
 python active_learning.py \
+    --y-transform log \
     --n-iterations 5 \
     --n-select 10 \
     --generate-data \
@@ -139,6 +158,7 @@ This will:
 | `--mc-samples` | 30 | MC Dropout forward passes |
 | `--epochs` | 100 | Training epochs per iteration |
 | `--dropout` | 0.1 | Dropout rate for MC Dropout |
+| `--y-transform` | log | Transformation: 'zscore' or 'log' |
 | `--n-datasets` | -1 | Number of ROOT files to load |
 | `--n-samples` | None | Limit training samples |
 | `--output-dir` | active_learning_output | Output directory |
