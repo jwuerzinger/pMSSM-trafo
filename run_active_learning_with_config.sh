@@ -18,6 +18,7 @@ dropout: [0.1, 0.15, 0.2]   # 3 values
 # Total: 3 × 3 = 9 combinations (sweep indices 0-8)
 
 # Fixed parameters
+y_transform: log
 n_iterations: 5
 n_candidates: 10000
 n_select: 100

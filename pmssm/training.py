@@ -157,7 +157,8 @@ def train_with_validation(
 def train_model_worker(gpu_id, X, Y, idx_train, idx_val, epochs, dropout,
                       result_queue, model_name="model", log_dir=None,
                       plots_dir=None, checkpoint_path=None,
-                      warm_start_path=None, early_stopping=True, patience=200):
+                      warm_start_path=None, early_stopping=True, patience=200,
+                      y_transform='zscore', target='DMRD'):
     """
     Worker function for multiprocessing transformer training.
 
@@ -175,6 +176,8 @@ def train_model_worker(gpu_id, X, Y, idx_train, idx_val, epochs, dropout,
         warm_start_path: If provided, load model weights from this checkpoint before training
         early_stopping: Whether to use early stopping (default: True)
         patience: Early stopping patience in epochs (default: 200)
+        y_transform: Y transformation type: 'zscore' (default) or 'log'
+        target: Target function name (e.g., 'DMRD') for log transformation
     """
     device = f"cuda:{gpu_id}" if isinstance(gpu_id, int) else gpu_id
 
@@ -198,8 +201,8 @@ def train_model_worker(gpu_id, X, Y, idx_train, idx_val, epochs, dropout,
 
     # Compute stats and create datasets
     stats = compute_stats(X, Y, idx_train)
-    train_dataset = PMSSMDataset(X, Y, idx_train, stats)
-    val_dataset = PMSSMDataset(X, Y, idx_val, stats)
+    train_dataset = PMSSMDataset(X, Y, idx_train, stats, y_transform=y_transform, target=target)
+    val_dataset = PMSSMDataset(X, Y, idx_val, stats, y_transform=y_transform, target=target)
 
     # Log device and dataset sizes
     logger.info(f"Training on device: {device}")
@@ -284,9 +287,16 @@ def train_model_worker(gpu_id, X, Y, idx_train, idx_val, epochs, dropout,
     X_batch, Y_batch = next(iter(loader))
     X_batch = X_batch.to(device)
     with torch.no_grad():
-        Y_pred_norm = model(X_batch).cpu()
-    Y_true = Y_batch * std_Y + mean_Y
-    Y_pred = Y_pred_norm * std_Y + mean_Y
+        Y_pred_transformed = model(X_batch).cpu()
+
+    # Convert to physical space for R² calculation
+    if y_transform == 'log':
+        Y_true = inverse_transform_y(Y_batch, target=target)
+        Y_pred = inverse_transform_y(Y_pred_transformed, target=target)
+    else:  # zscore
+        Y_true = Y_batch * std_Y + mean_Y
+        Y_pred = Y_pred_transformed * std_Y + mean_Y
+
     ss_res = ((Y_true - Y_pred) ** 2).sum()
     ss_tot = ((Y_true - Y_true.mean()) ** 2).sum()
     r2 = (1 - (ss_res / ss_tot)).item()
@@ -315,11 +325,17 @@ def train_model_worker(gpu_id, X, Y, idx_train, idx_val, epochs, dropout,
         X_train_batch, Y_train_batch = next(iter(train_loader_full))
         X_train_batch = X_train_batch.to(device)
         with torch.no_grad():
-            Y_train_pred_norm = model(X_train_batch).cpu()
-        Y_train_true = Y_train_batch * std_Y + mean_Y
-        Y_train_pred = Y_train_pred_norm * std_Y + mean_Y
+            Y_train_pred_transformed = model(X_train_batch).cpu()
 
-        # Validation set predictions (already computed)
+        # Convert to physical space for plotting
+        if y_transform == 'log':
+            Y_train_true = inverse_transform_y(Y_train_batch, target=target)
+            Y_train_pred = inverse_transform_y(Y_train_pred_transformed, target=target)
+        else:  # zscore
+            Y_train_true = Y_train_batch * std_Y + mean_Y
+            Y_train_pred = Y_train_pred_transformed * std_Y + mean_Y
+
+        # Validation set predictions (already computed in physical space)
         # Y_true, Y_pred from R² calculation
 
         # Compare random predictions (text log)

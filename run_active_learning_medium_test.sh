@@ -10,6 +10,7 @@
 #   --compute-full-metrics        # Comprehensive evaluation metrics
 
 .pixi/envs/default/bin/python active_learning.py \
+    --y-transform log \
     --n-datasets 3 \
     --generate-data \
     --n-samples 2000 \

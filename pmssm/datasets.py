@@ -41,11 +41,11 @@ class Dummy_PMSSMDataset(Dataset):
 
 class PMSSMDataset(Dataset):
     """
-    pMSSM dataset with z-score normalization.
+    pMSSM dataset with z-score or log normalization.
 
-    Applies z-score normalization using training set statistics:
-    X_norm = (X - mean_X) / std_X
-    Y_norm = (Y - mean_Y) / std_Y
+    Applies normalization using training set statistics:
+    - For z-score: X_norm = (X - mean_X) / std_X, Y_norm = (Y - mean_Y) / std_Y
+    - For log: X_norm = (X - mean_X) / std_X, Y_transformed = transform_y(Y, target)
 
     Args:
         X: Input tensor (N, 19) in physical units
@@ -53,16 +53,24 @@ class PMSSMDataset(Dataset):
         indices: Indices to select from X and Y
         stats: Tuple of (mean_X, std_X, mean_Y, std_Y)
         n_samples: Optional limit on number of samples to use
+        y_transform: Transformation type: 'zscore' (default) or 'log'
+        target: Target function name for log transformation (e.g., 'DMRD')
     """
 
-    def __init__(self, X, Y, indices, stats, n_samples=None):
+    def __init__(self, X, Y, indices, stats, n_samples=None, y_transform='zscore', target='DMRD'):
         super().__init__()
 
         mean_X, std_X, mean_Y, std_Y = stats
 
-        # Normalize using training statistics
+        # Normalize X using training statistics
         X = (X[indices] - mean_X) / std_X
-        Y = (Y[indices] - mean_Y) / std_Y
+
+        # Transform Y based on specified method
+        if y_transform == 'log':
+            from .data import transform_y
+            Y = transform_y(Y[indices], target=target)
+        else:  # zscore
+            Y = (Y[indices] - mean_Y) / std_Y
 
         if n_samples is not None:
             X = X[:n_samples]

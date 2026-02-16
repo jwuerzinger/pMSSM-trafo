@@ -150,7 +150,9 @@ def load_config_with_sweep(config_file, sweep_index=None):
               help="Path to external eval dataset (ROOT/CSV) for validation.")
 @click.option('--compute-full-metrics/--no-compute-full-metrics', default=False,
               help="Compute comprehensive evaluation metrics (accuracy, MSE, RMSE).")
-def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, dropout, n_datasets, n_samples, output_dir, generate_data, min_gen_fraction, max_gen_attempts, gen_workers, selection_strategy, entropy_blur, entropy_beta, entropy_pool_size, candidate_generation, proximity_sampling, target_value, config_file, sweep_index, early_stopping, patience, warm_starting, eval_data_path, compute_full_metrics):
+@click.option('--y-transform', default='zscore', type=click.Choice(['zscore', 'log']),
+              help="Y transformation: 'zscore' (default) or 'log' (like GP pipeline).")
+def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, dropout, n_datasets, n_samples, output_dir, generate_data, min_gen_fraction, max_gen_attempts, gen_workers, selection_strategy, entropy_blur, entropy_beta, entropy_pool_size, candidate_generation, proximity_sampling, target_value, config_file, sweep_index, early_stopping, patience, warm_starting, eval_data_path, compute_full_metrics, y_transform):
     """
     Active learning pipeline for pMSSM relic density prediction.
 
@@ -180,6 +182,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
             'patience': 'patience',
             'warm_starting': 'warm_starting',
             'compute_full_metrics': 'compute_full_metrics',
+            'y_transform': 'y_transform',
         }
 
         # Override locals with config values
@@ -193,7 +196,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
                     val = float(val)
                 elif cfg_key in ('early_stopping', 'warm_starting', 'compute_full_metrics'):
                     val = bool(val)
-                # String values: selection_strategy, candidate_generation
+                # String values: selection_strategy, candidate_generation, y_transform
                 locals()[local_key] = val
 
         # Re-assign variables from locals (Python locals() quirk workaround)
@@ -214,6 +217,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
         patience = locals().get('patience', patience)
         warm_starting = locals().get('warm_starting', warm_starting)
         compute_full_metrics = locals().get('compute_full_metrics', compute_full_metrics)
+        y_transform = locals().get('y_transform', y_transform)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
@@ -266,6 +270,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
     logger.info(f"  target_value: {target_value}")
     logger.info(f"  early_stopping: {early_stopping} (patience={patience})")
     logger.info(f"  warm_starting: {warm_starting}")
+    logger.info(f"  y_transform: {y_transform}")
     logger.info(f"  compute_full_metrics: {compute_full_metrics}")
     if eval_data_path:
         logger.info(f"  eval_data_path: {eval_data_path}")
@@ -417,13 +422,14 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
                 target=train_model_worker,
                 args=(AL_GPU_ID, X, Y, idx_train_al, idx_val_al, epochs, dropout, al_queue, "AL",
                       iter_dir, iter_plots_dir, al_checkpoint_path, al_warm_start,
-                      early_stopping, patience)
+                      early_stopping, patience, y_transform, "DMRD")
             )
             baseline_process = mp.Process(
                 target=train_model_worker,
                 args=(BASELINE_GPU_ID, X_baseline, Y_baseline, idx_train_base, idx_val_base, epochs,
                       dropout, baseline_queue, "Baseline", iter_dir, iter_plots_dir,
-                      baseline_checkpoint_path, baseline_warm_start, early_stopping, patience)
+                      baseline_checkpoint_path, baseline_warm_start, early_stopping, patience,
+                      y_transform, "DMRD")
             )
 
             al_process.start()
@@ -440,7 +446,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
             al_queue = mp.Queue()
             train_model_worker(device, X, Y, idx_train_al, idx_val_al, epochs, dropout,
                              al_queue, "AL", iter_dir, iter_plots_dir, al_checkpoint_path,
-                             al_warm_start, early_stopping, patience)
+                             al_warm_start, early_stopping, patience, y_transform, "DMRD")
             al_results = al_queue.get()
 
             logger.info("Training Baseline model (random samples)...")
@@ -448,7 +454,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
             train_model_worker(device, X_baseline, Y_baseline, idx_train_base, idx_val_base,
                              epochs, dropout, baseline_queue, "Baseline", iter_dir,
                              iter_plots_dir, baseline_checkpoint_path, baseline_warm_start,
-                             early_stopping, patience)
+                             early_stopping, patience, y_transform, "DMRD")
             baseline_results = baseline_queue.get()
 
         # Log results
@@ -543,8 +549,12 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
 
             # Classification accuracy (threshold at target_value in physical space)
             threshold_phys = target_value  # 0.12
-            threshold_norm = (threshold_phys - mean_Y) / std_Y
-            acc = ((y_pred_norm >= threshold_norm) == (y_true_norm >= threshold_norm)).float().mean().item()
+            if y_transform == 'log':
+                from pmssm.data import transform_y
+                threshold_transformed_acc = transform_y(torch.tensor([threshold_phys]), target="DMRD").item()
+            else:  # zscore
+                threshold_transformed_acc = (threshold_phys - mean_Y) / std_Y
+            acc = ((y_pred_norm >= threshold_transformed_acc) == (y_true_norm >= threshold_transformed_acc)).float().mean().item()
 
             metrics = {
                 "iteration": iteration,
@@ -570,9 +580,16 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
         logger.info(f"Generating {n_candidates} candidate points using {candidate_generation} sampling...")
         candidates = generate_candidate_pool(n_candidates, method=candidate_generation, seed=iteration)
 
-        # Convert target value to normalized space for threshold
+        # Convert target value to transformed space for threshold
         mean_X, std_X, mean_Y, std_Y = stats
-        threshold_norm = (target_value - mean_Y) / std_Y if proximity_sampling > 0 else 0.0
+        if proximity_sampling > 0:
+            if y_transform == 'log':
+                from pmssm.data import transform_y
+                threshold_transformed = transform_y(torch.tensor([target_value]), target="DMRD").item()
+            else:  # zscore
+                threshold_transformed = (target_value - mean_Y) / std_Y
+        else:
+            threshold_transformed = 0.0
 
         if selection_strategy == 'entropy_batch':
             pred_mean, pred_var, predictions = compute_uncertainty_mc_dropout(
@@ -582,7 +599,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
                 candidates, predictions, pred_mean, pred_var,
                 n_select, blur=entropy_blur, beta=entropy_beta,
                 n_pool=entropy_pool_size,
-                threshold=threshold_norm, proximity_sampling=proximity_sampling,
+                threshold=threshold_transformed, proximity_sampling=proximity_sampling,
                 device=device, logger=logger
             )
         else:
@@ -591,7 +608,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
             )
             if proximity_sampling > 0:
                 # Apply proximity weighting to variance for top_k selection
-                proximity = torch.exp(-((pred_mean.squeeze() - threshold_norm) ** 2) / proximity_sampling)
+                proximity = torch.exp(-((pred_mean.squeeze() - threshold_transformed) ** 2) / proximity_sampling)
                 weighted_var = proximity.unsqueeze(1) * pred_var
                 top_indices = select_top_uncertain(candidates, weighted_var, n_select)
                 logger.info(f"Applied proximity weighting (σ={proximity_sampling:.3f}) around target={target_value:.3f}")
@@ -645,7 +662,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
                             attempt_candidates, attempt_preds, attempt_mean, attempt_pred_var,
                             n_select, blur=entropy_blur, beta=entropy_beta,
                             n_pool=entropy_pool_size,
-                            threshold=threshold_norm, proximity_sampling=proximity_sampling,
+                            threshold=threshold_transformed, proximity_sampling=proximity_sampling,
                             device=device, logger=logger
                         )
                     else:
@@ -653,7 +670,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
                             model, attempt_candidates, stats, mc_samples, device, logger
                         )
                         if proximity_sampling > 0:
-                            proximity = torch.exp(-((attempt_mean.squeeze() - threshold_norm) ** 2) / proximity_sampling)
+                            proximity = torch.exp(-((attempt_mean.squeeze() - threshold_transformed) ** 2) / proximity_sampling)
                             weighted_var = proximity.unsqueeze(1) * attempt_pred_var
                             attempt_indices = select_top_uncertain(attempt_candidates, weighted_var, n_select)
                         else:

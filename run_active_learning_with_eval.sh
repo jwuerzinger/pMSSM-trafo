@@ -31,6 +31,7 @@ echo "Eval dataset: $EVAL_DATASET_PATH"
 echo ""
 
 python active_learning.py \
+    --y-transform log \
     --testing \
     --n-iterations 5 \
     --epochs 1000 \
