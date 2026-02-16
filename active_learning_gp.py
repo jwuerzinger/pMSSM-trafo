@@ -742,7 +742,7 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples,
             x_eval_norm = normalize_x(X_eval_full, data_min, data_max)
             y_eval_t = transform_y(Y_eval_full, target=target).view(-1)
             eval_r2 = compute_gp_r2(al_model, x_eval_norm, y_eval_t, model_type,
-                                    jitter=jitter, num_samples=gp_num_samples)
+                                    jitter=jitter, num_samples=gp_num_samples, target=target)
             logger.info(f"Full eval R²: {eval_r2:.4f}")
             eval_r2_scores.append(eval_r2)
 

@@ -6,7 +6,7 @@
     --patience 100 \
     --learning-rate 1e-3 \
     --generate-data \
-    --n-samples 10000 \
+    --n-samples 50000 \
     --n-iterations 40 \
     --n-select 200 \
     --n-candidates 50000 \

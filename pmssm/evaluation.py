@@ -14,6 +14,7 @@ import torch.nn as nn
 import gpytorch
 
 from .config import PARAM_ORDER, TARGET_CONFIG
+from .data import inverse_transform_y
 
 
 # ===== Transformer Model Utilities =====
@@ -97,9 +98,12 @@ def compare_random_predictions(model, stats, subset, mode='validation', device="
 
 # ===== GP Model Evaluation =====
 
-def compute_gp_r2(model, x_val, y_val, model_type, jitter=1e-3, num_samples=8):
+def compute_gp_r2(model, x_val, y_val, model_type, jitter=1e-3, num_samples=8, target="DMRD"):
     """
     Compute R² score on validation set using GP model predictions.
+
+    R² is computed in physical space (after inverse transformation) to be
+    comparable with transformer pipeline metrics.
 
     Args:
         model: Trained GP or MLP model
@@ -108,16 +112,17 @@ def compute_gp_r2(model, x_val, y_val, model_type, jitter=1e-3, num_samples=8):
         model_type: One of "exact_gp", "deep_gp", "sparse_gp", "mlp"
         jitter: Cholesky jitter for GP inference
         num_samples: Number of likelihood samples for DeepGP
+        target: Target name for inverse transformation (default: "DMRD")
 
     Returns:
-        r2: R² score (float)
+        r2: R² score (float) computed in physical space
     """
     device = next(model.parameters()).device
     model.eval()
 
     if model_type == "mlp":
         with torch.no_grad():
-            y_pred = model(x_val.to(device)).squeeze()
+            y_pred_transformed = model(x_val.to(device)).squeeze()
     elif model_type == "deep_gp":
         model.likelihood.eval()
         with torch.no_grad(), \
@@ -125,7 +130,7 @@ def compute_gp_r2(model, x_val, y_val, model_type, jitter=1e-3, num_samples=8):
              gpytorch.settings.cholesky_jitter(jitter), \
              gpytorch.settings.num_likelihood_samples(num_samples):
             preds = model.likelihood(model(x_val.to(device)))
-            y_pred = preds.mean.detach().mean(dim=0).squeeze()
+            y_pred_transformed = preds.mean.detach().mean(dim=0).squeeze()
     else:
         # exact_gp, sparse_gp
         model.likelihood.eval()
@@ -133,12 +138,17 @@ def compute_gp_r2(model, x_val, y_val, model_type, jitter=1e-3, num_samples=8):
              gpytorch.settings.fast_pred_var(), \
              gpytorch.settings.cholesky_jitter(jitter):
             preds = model.likelihood(model(x_val.to(device)))
-            y_pred = preds.mean.detach()
+            y_pred_transformed = preds.mean.detach()
 
-    y_true = y_val.view(-1).to(device)
-    y_pred = y_pred.view(-1)
-    ss_res = ((y_true - y_pred) ** 2).sum()
-    ss_tot = ((y_true - y_true.mean()) ** 2).sum()
+    # Convert to physical space for R² calculation
+    y_true_transformed = y_val.view(-1).to(device)
+    y_pred_transformed = y_pred_transformed.view(-1)
+
+    y_true_physical = inverse_transform_y(y_true_transformed.cpu(), target=target).to(device)
+    y_pred_physical = inverse_transform_y(y_pred_transformed.cpu(), target=target).to(device)
+
+    ss_res = ((y_true_physical - y_pred_physical) ** 2).sum()
+    ss_tot = ((y_true_physical - y_true_physical.mean()) ** 2).sum()
     r2 = (1 - ss_res / ss_tot).item()
     return r2
 

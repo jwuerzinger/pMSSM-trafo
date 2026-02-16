@@ -623,7 +623,7 @@ def train_gp_worker(gpu_id, X, Y, X_val, Y_val, data_min, data_max,
     best_train_loss = min(train_losses)
     best_val_loss = min(val_losses)
     r2 = compute_gp_r2(model, x_val_norm, y_val_t, model_type, jitter=jitter,
-                       num_samples=num_samples)
+                       num_samples=num_samples, target=target)
 
     logger.info(f"Best train loss: {best_train_loss:.6f}")
     logger.info(f"Best val loss: {best_val_loss:.6f}")
