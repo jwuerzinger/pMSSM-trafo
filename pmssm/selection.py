@@ -127,7 +127,21 @@ def select_entropy_batch_mc(X_candidates, predictions, pred_mean, pred_var,
 
     N = X_candidates.shape[0]
     n_pool = min(n_pool, N)
-    n_select = min(n_select, n_pool)
+    n_select = min(n_select, N)
+
+    # Failsafe: prevent duplicates by ensuring pool size >= selection size
+    if n_select > n_pool:
+        if logger:
+            logger.warning(
+                f"Failsafe triggered: n_select ({n_select}) > entropy_pool_size ({n_pool}). "
+                f"This would cause duplicate points to be selected. "
+                f"Automatically increasing pool size to {n_select}."
+            )
+            logger.warning(
+                f"Note: Larger pool size may increase memory usage. "
+                f"If OOM errors occur, reduce --n-select or increase --entropy-pool-size explicitly."
+            )
+        n_pool = n_select
 
     # Apply proximity weighting if enabled
     if proximity_sampling > 0.0:
@@ -184,6 +198,7 @@ def select_entropy_batch_mc(X_candidates, predictions, pred_mean, pred_var,
     # Subtract threshold from mean (entropy is relative to threshold)
     selected_in_pool = strategy.iterative_batch_selector(
         score_function, choice_function, pool_mean_dev - threshold, sample_cov_dev, n_select, device
+        # candidate_batch_size=100  # Process 100 candidates at a time to reduce memory usage
     )
 
     # Map back to original candidate indices

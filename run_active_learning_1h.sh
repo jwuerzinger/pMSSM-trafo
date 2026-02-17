@@ -17,6 +17,7 @@
     --n-iterations 2 \
     --n-select 20000 \
     --n-candidates 50000 \
+    --entropy-pool-size 2000 \
     --epochs 10000 \
     --dropout 0.1 \
     --mc-samples 30 \

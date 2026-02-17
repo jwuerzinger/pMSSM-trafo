@@ -20,8 +20,9 @@
     --generate-data \
     --n-samples 50_000 \
     --n-iterations 40 \
-    --n-select 20_000 \
+    --n-select 200 \
     --n-candidates 50_000 \
+    --entropy-pool-size 2_000 \
     --gen-workers 20 \
     --warm-starting \
     --early-stopping

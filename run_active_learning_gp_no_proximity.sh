@@ -41,4 +41,5 @@
     --use-ard \
     --proximity-sampling 0.0 \
     --tolerance-sampling 0.0 \
-    --warm-starting
+    --warm-starting \
+    --output-dir active_learning_gp_output_no_proximity

@@ -27,7 +27,9 @@
     --n-iterations 40 \
     --n-select 20_000 \
     --n-candidates 50_000 \
+    --entropy-pool-size 2000 \
     --gen-workers 20 \
     --proximity-sampling 0.0 \
     --warm-starting \
-    --early-stopping
+    --early-stopping \
+    --output-dir active_learning_output_no_proximity

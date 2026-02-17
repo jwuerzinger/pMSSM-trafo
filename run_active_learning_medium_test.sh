@@ -19,6 +19,7 @@
     --dropout 0.1 \
     --mc-samples 30 \
     --n-candidates 20000 \
+    --entropy-pool-size 1500 \
     --n-select 10 \
     --gen-workers 2 \
     --output-dir active_learning_output_medium_test
