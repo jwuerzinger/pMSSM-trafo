@@ -232,6 +232,92 @@ Proximity weighting was originally implemented in the `al_pmssmwithgp` submodule
 
 **Note**: Both pipelines now use `entropy_batch` by default for better diversity and space coverage.
 
+### Pre-filtering Strategies
+
+Both pipelines use pre-filtering to reduce the candidate pool before expensive entropy-based batch selection. However, they use **fundamentally different strategies** optimized for their computational profiles.
+
+#### Uncertainty Estimation Methods
+
+The key difference stems from how each model computes uncertainty:
+
+**GP (Gaussian Process):**
+- Analytical posterior variance directly from the model
+- **Single forward pass** returns both mean AND variance
+- Cost per candidate: **1 evaluation**
+- Example: 1M candidates = 1M forward passes
+
+**Transformer (MC Dropout):**
+- Estimates uncertainty via **Monte Carlo sampling**
+- Requires **multiple forward passes** with random dropout masks
+- Default: 30 samples (`--mc-samples 30`)
+- Cost per candidate: **30 evaluations**
+- Example: 1M candidates = 30M forward passes (30× more expensive!)
+
+#### Computational Cost Comparison
+
+| Scenario | GP Cost | Transformer Cost | Speedup |
+|----------|---------|------------------|---------|
+| **50k candidates** | 50k passes | 1.5M passes | GP is 30× faster |
+| **1M candidates** | 1M passes | 30M passes | GP is 30× faster |
+
+This 30× difference comes from MC Dropout's sampling requirement.
+
+#### Why Different Pre-filtering Strategies
+
+**GP uses `--tolerance-sampling` (value-based filter):**
+```python
+# GP can afford to evaluate 1M candidates cheaply
+1. Generate 1M LHS candidates
+2. Evaluate all with GP (1M passes - fast!)
+3. Filter by predicted value: |mean - 0.12| < tolerance
+4. Keep ~50k candidates near cosmological target
+5. Apply entropy batch selection
+```
+
+**Transformer uses `--entropy-pool-size` (uncertainty-based filter):**
+```python
+# Transformer limits candidates due to MC Dropout cost
+1. Generate 50k LHS candidates (user-specified)
+2. Evaluate with MC Dropout (1.5M passes - expensive!)
+3. Filter by uncertainty: top 2k most uncertain
+4. Apply entropy batch selection
+```
+
+#### Strategy Comparison
+
+| Aspect | GP (`tolerance_sampling`) | Transformer (`entropy_pool_size`) |
+|--------|---------------------------|-----------------------------------|
+| **Filter criterion** | Predicted mean value | Uncertainty (variance) |
+| **Filter type** | Hard cutoff: \|μ - 0.12\| < tolerance | Top-K by variance |
+| **Typical values** | 1M → 50k candidates | 50k → 2k candidates |
+| **When applied** | Before uncertainty evaluation | After uncertainty evaluation |
+| **Computational cost** | Free (GP inference is fast) | Free (variance already computed) |
+| **Purpose** | Geographic focusing (cosmologically relevant region) | Memory reduction (covariance matrix size) |
+
+#### Why Not Harmonize?
+
+**Could Transformer use tolerance_sampling?**
+
+Evaluating 1M candidates with MC Dropout would require 30M forward passes - **20-40× slower than current approach**. This is computationally prohibitive.
+
+**Alternative: proximity_sampling**
+
+Both pipelines support `--proximity-sampling` which provides similar value-based focusing as a **soft weight** rather than hard filter:
+
+```python
+proximity = exp(-((mean - threshold)² / proximity_sampling))
+weighted_var = proximity × variance
+```
+
+This achieves similar goals to tolerance_sampling without requiring additional candidate evaluations.
+
+#### Recommendations
+
+- **GP**: Use `--tolerance-sampling 1.0` (default) for geographic focusing
+- **Transformer**: Use `--entropy-pool-size 2000` and `--proximity-sampling 0.1` (defaults)
+- **Both approaches are optimal** for their respective model types
+- The difference is **by necessity, not oversight** - each optimized for its computational profile
+
 ### Learning Rate & Optimizer
 
 | Pipeline | Optimizer | Learning Rate | Configurable? |

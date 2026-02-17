@@ -251,6 +251,19 @@ bash run_active_learning_gp.sh
 8. **Parallel Training**: AL and baseline models on separate GPUs
 9. **YAML Config + SLURM Sweeps**: `--config-file sweep.yaml --sweep-index $SLURM_ARRAY_TASK_ID`
 
+### ⚠️ Pipeline Comparison: Pre-filtering Strategies
+
+GP and Transformer pipelines use **different pre-filtering strategies** due to computational constraints:
+
+| Pipeline | Strategy | Reason |
+|----------|----------|--------|
+| **GP** | `--tolerance-sampling` (value-based) | Can evaluate 1M candidates cheaply (single forward pass per point) |
+| **Transformer** | `--entropy-pool-size` (uncertainty-based) | MC Dropout requires 30× forward passes - limits candidate pool to ~50k |
+
+**Key insight**: GP gets mean + variance from a single forward pass (analytical), while Transformer needs 30 MC Dropout samples to estimate uncertainty. This makes evaluating 1M candidates 30× more expensive for Transformer.
+
+Both approaches achieve similar goals but are optimized for their computational profiles. See [IMPLEMENTATION_DETAILS.md](doc/IMPLEMENTATION_DETAILS.md#pre-filtering-strategies) for detailed explanation.
+
 ### Training Configuration
 
 | Setting | Default | CLI Option |
