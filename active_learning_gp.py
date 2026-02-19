@@ -514,7 +514,23 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples,
         Y = Y[:n_samples]
         logger.info(f"Using first {n_samples} samples for initial AL training")
 
-    logger.info(f"AL dataset shape: X={X.shape}, Y={Y.shape}")
+    # Create FIXED train/val split from the initial data (once, before the loop).
+    # The validation set is held out permanently and never enters any training pool.
+    n_total_init = len(X)
+    n_val_fixed = min(int(0.2 * n_total_init), 5000)  # 20% for validation, capped at 5000
+    n_train_init = n_total_init - n_val_fixed
+    g = torch.Generator().manual_seed(42)
+    perm_init = torch.randperm(n_total_init, generator=g)
+    idx_train_init = perm_init[:n_train_init]
+    idx_val_fixed = perm_init[n_train_init:]
+
+    X_val_fixed = X[idx_val_fixed].clone()
+    Y_val_fixed = Y[idx_val_fixed].clone()
+    X = X[idx_train_init].clone()  # X is now training-only; grows via torch.cat
+    Y = Y[idx_train_init].clone()
+
+    logger.info(f"Fixed validation set: {len(X_val_fixed)} samples (held out, never changes)")
+    logger.info(f"Initial AL training pool: X={X.shape}, Y={Y.shape}")
     logger.info(f"Baseline pool shape: X_full={X_full.shape}, Y_full={Y_full.shape}")
 
     # Determine if we can train AL and Baseline in parallel (2+ GPUs)
@@ -557,20 +573,21 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples,
         iter_plots_dir = iter_dir / "plots"
         iter_plots_dir.mkdir(parents=True, exist_ok=True)
 
-        # ---- Build baseline dataset ----
+        # ---- Build baseline training pool (validation is always X_val_fixed) ----
         if iteration == 1:
             X_baseline = X.clone()
             Y_baseline = Y.clone()
-            logger.info(f"Iteration 1: Both models use identical dataset "
+            logger.info(f"Iteration 1: Both models use identical training pool "
                        f"({len(X_baseline)} samples)")
         else:
-            n_current = len(X)
+            # Baseline grows by sampling from X_full excluding ALL initial n_samples
+            # (both training and validation portions, to prevent leakage)
+            n_additional = len(X) - len(idx_train_init)  # Number of generated points AL has added
             all_indices = torch.arange(len(X_full))
             mask = torch.ones(len(X_full), dtype=torch.bool)
-            mask[initial_al_indices] = False
+            mask[initial_al_indices] = False  # Exclude ALL initial n_samples (train + val)
             available_indices = all_indices[mask]
 
-            n_additional = n_current - len(initial_al_indices)
             if n_additional <= len(available_indices):
                 additional_indices = available_indices[
                     torch.randperm(len(available_indices))[:n_additional]
@@ -582,44 +599,45 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples,
                     torch.randint(0, len(available_indices), (n_additional,))
                 ]
 
-            baseline_indices = torch.cat([initial_al_indices, additional_indices])
+            # Baseline training pool = initial training data + random additional
+            # idx_train_init indexes into X_full[:n_samples], so it works as X_full indices
+            baseline_indices = torch.cat([idx_train_init, additional_indices])
             X_baseline = X_full[baseline_indices]
             Y_baseline = Y_full[baseline_indices]
-            logger.info(f"Baseline dataset: {len(initial_al_indices)} initial "
+            logger.info(f"Baseline dataset: {len(idx_train_init)} initial "
                        f"+ {n_additional} random = {len(baseline_indices)} samples")
 
-        # ---- Train/val split ----
-        n_total = len(X)
-        n_val = min(int(0.2 * n_total), 5000)  # 20% for validation, capped at 5000
-        n_train = n_total - n_val
-        perm = torch.randperm(n_total)
-        idx_train = perm[:n_train]
-        idx_val = perm[n_train:]
+        # ---- Use fixed validation set (no per-iteration reshuffling) ----
+        X_train_al = X       # X is training-only, grows each iteration
+        Y_train_al = Y
+        X_val_al = X_val_fixed
+        Y_val_al = Y_val_fixed
 
-        X_train_al = X[idx_train]
-        Y_train_al = Y[idx_train]
-        X_val_al = X[idx_val]
-        Y_val_al = Y[idx_val]
+        X_train_base = X_baseline
+        Y_train_base = Y_baseline
+        X_val_base = X_val_fixed
+        Y_val_base = Y_val_fixed
 
-        # Same split indices for baseline (ensures same sizes)
-        n_total_base = len(X_baseline)
-        n_val_base = min(int(0.2 * n_total_base), 5000)
-        n_train_base = n_total_base - n_val_base
-        perm_base = torch.randperm(n_total_base)
-        X_train_base = X_baseline[perm_base[:n_train_base]]
-        Y_train_base = Y_baseline[perm_base[:n_train_base]]
-        X_val_base = X_baseline[perm_base[n_train_base:]]
-        Y_val_base = Y_baseline[perm_base[n_train_base:]]
+        logger.info(f"AL: n_train={len(X_train_al)}, n_val={len(X_val_al)} (fixed)")
+        logger.info(f"Baseline: n_train={len(X_train_base)}, n_val={len(X_val_base)} (fixed)")
 
         # Plot data distribution histograms for AL
         al_hist_dir = iter_plots_dir / "al"
         al_hist_dir.mkdir(parents=True, exist_ok=True)
-        plot_data_histograms(X, Y, idx_train, idx_val, al_hist_dir, "AL", iteration, logger)
+        X_al_combined = torch.cat([X, X_val_fixed], dim=0)
+        Y_al_combined = torch.cat([Y, Y_val_fixed], dim=0)
+        idx_train_plot = torch.arange(len(X))
+        idx_val_plot = torch.arange(len(X), len(X_al_combined))
+        plot_data_histograms(X_al_combined, Y_al_combined, idx_train_plot, idx_val_plot, al_hist_dir, "AL", iteration, logger)
 
         # Plot data distribution histograms for Baseline
         baseline_hist_dir = iter_plots_dir / "baseline"
         baseline_hist_dir.mkdir(parents=True, exist_ok=True)
-        plot_data_histograms(X_baseline, Y_baseline, perm_base[:n_train_base], perm_base[n_train_base:],
+        X_base_combined = torch.cat([X_baseline, X_val_fixed], dim=0)
+        Y_base_combined = torch.cat([Y_baseline, Y_val_fixed], dim=0)
+        idx_train_base_plot = torch.arange(len(X_baseline))
+        idx_val_base_plot = torch.arange(len(X_baseline), len(X_base_combined))
+        plot_data_histograms(X_base_combined, Y_base_combined, idx_train_base_plot, idx_val_base_plot,
                              baseline_hist_dir, "Baseline", iteration, logger)
 
         al_checkpoint_path = iter_dir / "al_model_checkpoint.pt"
@@ -663,7 +681,7 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples,
             # ---- Train AL and Baseline sequentially ----
             al_warm_start = prev_al_checkpoint if warm_starting else None
             baseline_warm_start = prev_baseline_checkpoint if warm_starting else None
-            logger.info(f"Training AL {model_type} model ({n_train} train, {n_val} val)...")
+            logger.info(f"Training AL {model_type} model ({len(X_train_al)} train, {len(X_val_al)} val)...")
             al_queue = mp.Queue()
             train_gp_worker(
                 device, X_train_al, Y_train_al, X_val_al, Y_val_al,
@@ -675,7 +693,7 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples,
             )
             al_results = al_queue.get()
 
-            logger.info(f"Training Baseline {model_type} model ({n_train_base} train, {n_val_base} val)...")
+            logger.info(f"Training Baseline {model_type} model ({len(X_train_base)} train, {len(X_val_base)} val)...")
             baseline_queue = mp.Queue()
             train_gp_worker(
                 device, X_train_base, Y_train_base, X_val_base, Y_val_base,
@@ -701,13 +719,13 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples,
         al_train_losses.append(al_results['best_train_loss'])
         al_val_losses.append(al_results['best_val_loss'])
         al_r2_scores.append(al_results['r2_score'])
-        al_n_train.append(n_train)
-        al_n_val.append(n_val)
+        al_n_train.append(len(X_train_al))
+        al_n_val.append(len(X_val_al))
         baseline_train_losses.append(baseline_results['best_train_loss'])
         baseline_val_losses.append(baseline_results['best_val_loss'])
         baseline_r2_scores.append(baseline_results['r2_score'])
-        baseline_n_train.append(n_train_base)
-        baseline_n_val.append(n_val_base)
+        baseline_n_train.append(len(X_train_base))
+        baseline_n_val.append(len(X_val_base))
 
         # ---- Track lengthscales ----
         if track_lengthscales and al_results.get("lengthscales"):

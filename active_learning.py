@@ -303,7 +303,16 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
         Y = Y[:n_samples]
         logger.info(f"Using first {n_samples} samples for initial AL training")
 
-    logger.info(f"AL dataset shape: X={X.shape}, Y={Y.shape}")
+    # Create FIXED train/val split from the initial data (once, before the loop).
+    # The validation set is held out permanently and never enters any training pool.
+    idx_train_init, idx_val_fixed = make_split(X, logger=logger)
+    X_val_fixed = X[idx_val_fixed].clone()
+    Y_val_fixed = Y[idx_val_fixed].clone()
+    X = X[idx_train_init].clone()  # X is now training-only; grows via torch.cat
+    Y = Y[idx_train_init].clone()
+
+    logger.info(f"Fixed validation set: {len(X_val_fixed)} samples (held out, never changes)")
+    logger.info(f"Initial AL training pool: X={X.shape}, Y={Y.shape}")
     logger.info(f"Baseline pool shape: X_full={X_full.shape}, Y_full={Y_full.shape}")
     logger.info(f"Initial AL indices from X_full: [0, ..., {initial_al_size-1}] (will be excluded from baseline sampling)")
 
@@ -355,27 +364,24 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
         iter_plots_dir.mkdir(parents=True, exist_ok=True)
         logger.info(f"Iteration directory: {iter_dir}")
 
-        # Create baseline dataset
+        # Create baseline dataset (training-only; validation is always X_val_fixed)
         if iteration == 1:
-            # First iteration: Baseline is an exact copy of the AL dataset.
-            # Use a direct clone to guarantee byte-for-byte identity without relying
-            # on index construction logic.
+            # First iteration: Baseline training pool is an exact copy of the AL training pool.
             X_baseline = X.clone()
             Y_baseline = Y.clone()
             assert X.shape == X_baseline.shape and torch.allclose(X, X_baseline), \
-                "BUG: AL and Baseline datasets must be identical at iteration 1!"
-            logger.info(f"Iteration 1: Both models use identical dataset ({len(X_baseline)} samples) — verified by allclose check")
+                "BUG: AL and Baseline training pools must be identical at iteration 1!"
+            logger.info(f"Iteration 1: Both models use identical training pool ({len(X_baseline)} samples) — verified by allclose check")
         else:
-            # Iteration 2+: Baseline grows by sampling from X_full excluding initial AL indices
-            n_current = len(X)
+            # Iteration 2+: Baseline grows by sampling from X_full excluding ALL initial n_samples
+            # (both the training and validation portions, to prevent leakage)
+            n_additional = len(X) - len(idx_train_init)  # Number of generated points AL has added
             all_indices = torch.arange(len(X_full))
             mask = torch.ones(len(X_full), dtype=torch.bool)
-            mask[initial_al_indices] = False
+            mask[initial_al_indices] = False  # Exclude ALL initial n_samples (train + val)
             available_indices = all_indices[mask]
 
             logger.info(f"Baseline sampling: {len(available_indices)} indices available from X_full (excluding initial {len(initial_al_indices)} AL indices)")
-
-            n_additional = n_current - len(initial_al_indices)
 
             if n_additional <= len(available_indices):
                 additional_indices = available_indices[torch.randperm(len(available_indices))[:n_additional]]
@@ -383,28 +389,37 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
                 logger.info(f"Baseline needs {n_additional} samples but only {len(available_indices)} available - sampling with replacement")
                 additional_indices = available_indices[torch.randint(0, len(available_indices), (n_additional,))]
 
-            baseline_indices = torch.cat([initial_al_indices, additional_indices])
+            # Baseline training pool = initial training data + random additional
+            # idx_train_init indexes into X_full[:n_samples], so it works as X_full indices
+            baseline_indices = torch.cat([idx_train_init, additional_indices])
             X_baseline = X_full[baseline_indices]
             Y_baseline = Y_full[baseline_indices]
-            logger.info(f"Baseline dataset: {len(initial_al_indices)} initial + {n_additional} random = {len(baseline_indices)} samples")
+            logger.info(f"Baseline dataset: {len(idx_train_init)} initial + {n_additional} random = {len(baseline_indices)} samples")
 
-        # Create train/val split indices based on AL dataset size
-        # Use the same indices for both AL and Baseline to ensure identical dataset sizes
-        idx_train, idx_val = make_split(X, logger=logger)
-        idx_train_al = idx_train
-        idx_val_al = idx_val
-        idx_train_base = idx_train
-        idx_val_base = idx_val
+        # Combine training pool + fixed validation into single tensors for workers.
+        # The validation set is FIXED across all iterations (no leakage).
+        X_combined = torch.cat([X, X_val_fixed], dim=0)
+        Y_combined = torch.cat([Y, Y_val_fixed], dim=0)
+        idx_train_al = torch.arange(len(X))
+        idx_val_al = torch.arange(len(X), len(X_combined))
+
+        X_baseline_combined = torch.cat([X_baseline, X_val_fixed], dim=0)
+        Y_baseline_combined = torch.cat([Y_baseline, Y_val_fixed], dim=0)
+        idx_train_base = torch.arange(len(X_baseline))
+        idx_val_base = torch.arange(len(X_baseline), len(X_baseline_combined))
+
+        logger.info(f"AL: n_train={len(idx_train_al)}, n_val={len(idx_val_al)} (fixed)")
+        logger.info(f"Baseline: n_train={len(idx_train_base)}, n_val={len(idx_val_base)} (fixed)")
 
         # Plot data distribution histograms for AL
         al_hist_dir = iter_plots_dir / "al"
         al_hist_dir.mkdir(parents=True, exist_ok=True)
-        plot_data_histograms(X, Y, idx_train_al, idx_val_al, al_hist_dir, "AL", iteration, logger)
+        plot_data_histograms(X_combined, Y_combined, idx_train_al, idx_val_al, al_hist_dir, "AL", iteration, logger)
 
         # Plot data distribution histograms for Baseline
         baseline_hist_dir = iter_plots_dir / "baseline"
         baseline_hist_dir.mkdir(parents=True, exist_ok=True)
-        plot_data_histograms(X_baseline, Y_baseline, idx_train_base, idx_val_base, baseline_hist_dir, "Baseline", iteration, logger)
+        plot_data_histograms(X_baseline_combined, Y_baseline_combined, idx_train_base, idx_val_base, baseline_hist_dir, "Baseline", iteration, logger)
 
         al_checkpoint_path = iter_dir / "al_model_checkpoint.pt"
         baseline_checkpoint_path = iter_dir / "baseline_model_checkpoint.pt"
@@ -420,13 +435,13 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
 
             al_process = mp.Process(
                 target=train_model_worker,
-                args=(AL_GPU_ID, X, Y, idx_train_al, idx_val_al, epochs, dropout, al_queue, "AL",
+                args=(AL_GPU_ID, X_combined, Y_combined, idx_train_al, idx_val_al, epochs, dropout, al_queue, "AL",
                       iter_dir, iter_plots_dir, al_checkpoint_path, al_warm_start,
                       early_stopping, patience, y_transform, "DMRD")
             )
             baseline_process = mp.Process(
                 target=train_model_worker,
-                args=(BASELINE_GPU_ID, X_baseline, Y_baseline, idx_train_base, idx_val_base, epochs,
+                args=(BASELINE_GPU_ID, X_baseline_combined, Y_baseline_combined, idx_train_base, idx_val_base, epochs,
                       dropout, baseline_queue, "Baseline", iter_dir, iter_plots_dir,
                       baseline_checkpoint_path, baseline_warm_start, early_stopping, patience,
                       y_transform, "DMRD")
@@ -444,14 +459,14 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
             # Sequential training
             logger.info("Training Active Learning model...")
             al_queue = mp.Queue()
-            train_model_worker(device, X, Y, idx_train_al, idx_val_al, epochs, dropout,
+            train_model_worker(device, X_combined, Y_combined, idx_train_al, idx_val_al, epochs, dropout,
                              al_queue, "AL", iter_dir, iter_plots_dir, al_checkpoint_path,
                              al_warm_start, early_stopping, patience, y_transform, "DMRD")
             al_results = al_queue.get()
 
             logger.info("Training Baseline model (random samples)...")
             baseline_queue = mp.Queue()
-            train_model_worker(device, X_baseline, Y_baseline, idx_train_base, idx_val_base,
+            train_model_worker(device, X_baseline_combined, Y_baseline_combined, idx_train_base, idx_val_base,
                              epochs, dropout, baseline_queue, "Baseline", iter_dir,
                              iter_plots_dir, baseline_checkpoint_path, baseline_warm_start,
                              early_stopping, patience, y_transform, "DMRD")
@@ -476,7 +491,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
 
         # Load the AL model checkpoint saved by the worker for MC Dropout uncertainty estimation.
         # This avoids training the AL model a second time.
-        stats = compute_stats(X, Y, idx_train_al)
+        stats = compute_stats(X_combined, Y_combined, idx_train_al)
         model = PMSSMTransformerTabular(
             d_model=128, nhead=4, num_layers=3, dim_feedforward=512, dropout=dropout
         )
@@ -518,7 +533,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
             # Get validation predictions
             model.eval()
             model.to(device)
-            val_dataset = PMSSMDataset(X, Y, idx_val_al, stats)
+            val_dataset = PMSSMDataset(X_combined, Y_combined, idx_val_al, stats)
             val_loader = DataLoader(val_dataset, batch_size=256, shuffle=False)
 
             all_preds = []
