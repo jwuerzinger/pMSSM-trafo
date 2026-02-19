@@ -1,5 +1,7 @@
 # Active Learning Performance Analysis
 
+# WARNING: OUTDATED!
+
 ## Context
 
 This document summarizes the results of all active learning (AL) runs performed to date for pMSSM relic density prediction. The central finding is that the **random sampling baseline consistently matches or outperforms active learning** in R2 score across most configurations and model types. This analysis investigates why, and proposes a plan to improve AL performance.
