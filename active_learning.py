@@ -121,6 +121,7 @@ def load_config_with_sweep(config_file, sweep_index=None):
 @click.option('--dropout', default=0.1, type=float, help="Dropout rate for MC dropout.")
 @click.option('--n-datasets', default=None, type=int, help="Number of ROOT datasets to load.")
 @click.option('--n-samples', default=None, type=int, help="Number of samples to use from data.")
+@click.option('--n-valid', default=10000, type=int, help="Number of samples reserved for fixed validation set (default: 10000).")
 @click.option('--output-dir', default='active_learning_output', type=str, help="Output directory.")
 @click.option('--generate-data/--no-generate-data', default=False, help="Generate new models using Run3ModelGen.")
 @click.option('--min-gen-fraction', default=0.6, type=float, help="Minimum fraction of n-select that must be generated successfully before stopping retries (default: 0.6).")
@@ -152,7 +153,7 @@ def load_config_with_sweep(config_file, sweep_index=None):
               help="Compute comprehensive evaluation metrics (accuracy, MSE, RMSE).")
 @click.option('--y-transform', default='log', type=click.Choice(['zscore', 'log']),
               help="Y transformation: 'log' (default, recommended) or 'zscore' (legacy).")
-def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, dropout, n_datasets, n_samples, output_dir, generate_data, min_gen_fraction, max_gen_attempts, gen_workers, selection_strategy, entropy_blur, entropy_beta, entropy_pool_size, candidate_generation, proximity_sampling, target_value, config_file, sweep_index, early_stopping, patience, warm_starting, eval_data_path, compute_full_metrics, y_transform):
+def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, dropout, n_datasets, n_samples, n_valid, output_dir, generate_data, min_gen_fraction, max_gen_attempts, gen_workers, selection_strategy, entropy_blur, entropy_beta, entropy_pool_size, candidate_generation, proximity_sampling, target_value, config_file, sweep_index, early_stopping, patience, warm_starting, eval_data_path, compute_full_metrics, y_transform):
     """
     Active learning pipeline for pMSSM relic density prediction.
 
@@ -243,6 +244,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
     if testing:
         n_datasets = n_datasets if n_datasets is not None else 3
         n_samples = n_samples if n_samples is not None else 30
+        n_valid = min(n_valid, 10)  # Small validation set for testing
         epochs = 50  # Aligned with GP script (was 10)
         n_candidates = 100
         mc_samples = 10
@@ -260,6 +262,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
     logger.info(f"  dropout: {dropout}")
     logger.info(f"  n_datasets: {n_datasets}")
     logger.info(f"  n_samples: {n_samples if n_samples else 'all'}")
+    logger.info(f"  n_valid: {n_valid}")
     logger.info(f"  selection_strategy: {selection_strategy}")
     if selection_strategy == 'entropy_batch':
         logger.info(f"  entropy_blur: {entropy_blur}")
@@ -294,27 +297,37 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
     # Store full dataset for baseline random sampling (before any truncation)
     X_full, Y_full = X.clone(), Y.clone()
 
-    # Track which indices from X_full are used for initial AL dataset
-    initial_al_size = n_samples if n_samples is not None else len(X)
-    initial_al_indices = torch.arange(initial_al_size)  # Indices [0, 1, ..., n_samples-1]
+    # Reserve n_valid samples for fixed validation, then n_samples for initial training.
+    # Layout in X_full: [0, n_valid) = validation | [n_valid, n_valid+n_samples) = training
+    # Both regions are excluded from baseline random sampling.
+    if n_valid > len(X):
+        raise ValueError(f"n_valid={n_valid} exceeds available data ({len(X)})")
+    X_val_fixed = X[:n_valid].clone()
+    Y_val_fixed = Y[:n_valid].clone()
+    logger.info(f"Fixed validation set: {n_valid} samples (held out, never changes)")
 
+    remaining = X[n_valid:]
+    remaining_Y = Y[n_valid:]
     if n_samples is not None:
-        X = X[:n_samples]
-        Y = Y[:n_samples]
-        logger.info(f"Using first {n_samples} samples for initial AL training")
+        if n_samples > len(remaining):
+            raise ValueError(f"n_samples={n_samples} exceeds remaining data after reserving n_valid={n_valid} ({len(remaining)} available)")
+        X = remaining[:n_samples].clone()
+        Y = remaining_Y[:n_samples].clone()
+        logger.info(f"Using {n_samples} samples for initial AL training (after {n_valid} reserved for validation)")
+    else:
+        X = remaining.clone()
+        Y = remaining_Y.clone()
 
-    # Create FIXED train/val split from the initial data (once, before the loop).
-    # The validation set is held out permanently and never enters any training pool.
-    idx_train_init, idx_val_fixed = make_split(X, logger=logger)
-    X_val_fixed = X[idx_val_fixed].clone()
-    Y_val_fixed = Y[idx_val_fixed].clone()
-    X = X[idx_train_init].clone()  # X is now training-only; grows via torch.cat
-    Y = Y[idx_train_init].clone()
+    # Track which indices from X_full are reserved (validation + initial training).
+    # Baseline random sampling will exclude all of these.
+    initial_al_size = n_valid + len(X)
+    initial_al_indices = torch.arange(initial_al_size)
+    # idx_train_init stores the training portion indices within X_full (for baseline construction)
+    idx_train_init = torch.arange(n_valid, initial_al_size)
 
-    logger.info(f"Fixed validation set: {len(X_val_fixed)} samples (held out, never changes)")
     logger.info(f"Initial AL training pool: X={X.shape}, Y={Y.shape}")
     logger.info(f"Baseline pool shape: X_full={X_full.shape}, Y_full={Y_full.shape}")
-    logger.info(f"Initial AL indices from X_full: [0, ..., {initial_al_size-1}] (will be excluded from baseline sampling)")
+    logger.info(f"Reserved indices from X_full: [0, ..., {initial_al_size-1}] ({n_valid} val + {len(X)} train, excluded from baseline sampling)")
 
     # Determine if we can use parallel training (2+ GPUs for AL + baseline)
     AL_GPU_ID = 2

@@ -293,6 +293,7 @@ def load_config_with_sweep(config_file, sweep_index=None):
 @click.option('--n-select', default=10, type=int, help="Number of points to select per iteration.")
 @click.option('--n-datasets', default=None, type=int, help="Number of ROOT datasets to load.")
 @click.option('--n-samples', default=None, type=int, help="Number of samples to use from data.")
+@click.option('--n-valid', default=10000, type=int, help="Number of samples reserved for fixed validation set (default: 10000).")
 @click.option('--output-dir', default='active_learning_gp_output', type=str, help="Output directory.")
 @click.option('--generate-data/--no-generate-data', default=False, help="Generate new models using Run3ModelGen.")
 @click.option('--min-gen-fraction', default=0.6, type=float, help="Minimum fraction of n-select that must be generated successfully.")
@@ -343,7 +344,7 @@ def load_config_with_sweep(config_file, sweep_index=None):
 # Config file / sweep options
 @click.option('--config-file', default=None, type=str, help="YAML config file (overrides CLI args).")
 @click.option('--sweep-index', default=None, type=int, help="Sweep combination index (requires --config-file).")
-def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples,
+def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, n_valid,
          output_dir, generate_data, min_gen_fraction, max_gen_attempts, gen_workers,
          target, model_type, kernel, lengthscale, noise, jitter, learning_rate,
          epochs, early_stopping, patience,
@@ -428,6 +429,7 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples,
     if testing:
         n_datasets = n_datasets if n_datasets is not None else 3
         n_samples = n_samples if n_samples is not None else 30
+        n_valid = min(n_valid, 10)  # Small validation set for testing
         epochs = 50
         n_candidates = 100
         logger.info("Testing mode enabled")
@@ -441,6 +443,7 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples,
     logger.info(f"  n_iterations: {n_iterations}")
     logger.info(f"  n_candidates: {n_candidates}")
     logger.info(f"  n_select: {n_select}")
+    logger.info(f"  n_valid: {n_valid}")
     logger.info(f"  selection_strategy: {selection_strategy}")
     logger.info(f"  epochs: {epochs}")
     logger.info(f"  early_stopping: {early_stopping} (patience={patience})")
@@ -506,32 +509,37 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples,
     # Store full dataset for baseline random sampling
     X_full, Y_full = X.clone(), Y.clone()
 
-    initial_al_size = n_samples if n_samples is not None else len(X)
-    initial_al_indices = torch.arange(initial_al_size)
+    # Reserve n_valid samples for fixed validation, then n_samples for initial training.
+    # Layout in X_full: [0, n_valid) = validation | [n_valid, n_valid+n_samples) = training
+    # Both regions are excluded from baseline random sampling.
+    if n_valid > len(X):
+        raise ValueError(f"n_valid={n_valid} exceeds available data ({len(X)})")
+    X_val_fixed = X[:n_valid].clone()
+    Y_val_fixed = Y[:n_valid].clone()
+    logger.info(f"Fixed validation set: {n_valid} samples (held out, never changes)")
 
+    remaining = X[n_valid:]
+    remaining_Y = Y[n_valid:]
     if n_samples is not None:
-        X = X[:n_samples]
-        Y = Y[:n_samples]
-        logger.info(f"Using first {n_samples} samples for initial AL training")
+        if n_samples > len(remaining):
+            raise ValueError(f"n_samples={n_samples} exceeds remaining data after reserving n_valid={n_valid} ({len(remaining)} available)")
+        X = remaining[:n_samples].clone()
+        Y = remaining_Y[:n_samples].clone()
+        logger.info(f"Using {n_samples} samples for initial AL training (after {n_valid} reserved for validation)")
+    else:
+        X = remaining.clone()
+        Y = remaining_Y.clone()
 
-    # Create FIXED train/val split from the initial data (once, before the loop).
-    # The validation set is held out permanently and never enters any training pool.
-    n_total_init = len(X)
-    n_val_fixed = min(int(0.2 * n_total_init), 5000)  # 20% for validation, capped at 5000
-    n_train_init = n_total_init - n_val_fixed
-    g = torch.Generator().manual_seed(42)
-    perm_init = torch.randperm(n_total_init, generator=g)
-    idx_train_init = perm_init[:n_train_init]
-    idx_val_fixed = perm_init[n_train_init:]
+    # Track which indices from X_full are reserved (validation + initial training).
+    # Baseline random sampling will exclude all of these.
+    initial_al_size = n_valid + len(X)
+    initial_al_indices = torch.arange(initial_al_size)
+    # idx_train_init stores the training portion indices within X_full (for baseline construction)
+    idx_train_init = torch.arange(n_valid, initial_al_size)
 
-    X_val_fixed = X[idx_val_fixed].clone()
-    Y_val_fixed = Y[idx_val_fixed].clone()
-    X = X[idx_train_init].clone()  # X is now training-only; grows via torch.cat
-    Y = Y[idx_train_init].clone()
-
-    logger.info(f"Fixed validation set: {len(X_val_fixed)} samples (held out, never changes)")
     logger.info(f"Initial AL training pool: X={X.shape}, Y={Y.shape}")
     logger.info(f"Baseline pool shape: X_full={X_full.shape}, Y_full={Y_full.shape}")
+    logger.info(f"Reserved indices from X_full: [0, ..., {initial_al_size-1}] ({n_valid} val + {len(X)} train, excluded from baseline sampling)")
 
     # Determine if we can train AL and Baseline in parallel (2+ GPUs)
     AL_GPU_ID = 0
