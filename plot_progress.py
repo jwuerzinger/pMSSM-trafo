@@ -19,21 +19,23 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 
 
-def _read_worker_log_sizes(log_dir, iteration):
-    """Read n_train, n_val from the per-iteration AL worker log (GP pipeline).
+_SIZE_RE = re.compile(
+    r"Training set size:\s*(\d+),\s*Validation set size:\s*(\d+)"
+)
 
-    The GP pipeline logs 'Training set size: N, Validation set size: M'
-    in each iteration's al_training.log.
+
+def _read_worker_log_sizes(log_dir, iteration, worker="al"):
+    """Read n_train, n_val from a per-iteration worker log.
+
+    Both pipelines log 'Training set size: N, Validation set size: M'
+    in each iteration's {worker}_training.log.
     """
-    worker_log = log_dir / f"iteration_{iteration:03d}" / "al_training.log"
+    worker_log = log_dir / f"iteration_{iteration:03d}" / f"{worker}_training.log"
     if not worker_log.exists():
         return None, None
-    size_re = re.compile(
-        r"Training set size:\s*(\d+),\s*Validation set size:\s*(\d+)"
-    )
     with open(worker_log) as f:
         for line in f:
-            m = size_re.search(line)
+            m = _SIZE_RE.search(line)
             if m:
                 return int(m.group(1)), int(m.group(2))
     return None, None
@@ -43,25 +45,22 @@ def parse_log(log_path):
     """Parse iteration metrics from an active learning log file.
 
     Auto-detects transformer vs GP pipeline from the iteration header format.
+    Dataset sizes are always read from per-iteration worker logs
+    (al_training.log / baseline_training.log).
     """
     iterations = []
     al_train_losses, al_val_losses, al_r2_scores = [], [], []
     baseline_train_losses, baseline_val_losses, baseline_r2_scores = [], [], []
-    n_trains, n_vals = [], []
+    al_n_trains, al_n_vals = [], []
+    baseline_n_trains, baseline_n_vals = [], []
 
     current_iteration = None
-    current_n_train = None
-    current_n_val = None
     pipeline = None  # auto-detected: "transformer" or "gp"
 
     # Iteration headers — accept both formats
     iter_re = re.compile(
         r"=== (?:Global|GP Active Learning) Iteration (\d+) ==="
     )
-    # Dataset size — transformer main log
-    split_re = re.compile(r"Split: n_train=(\d+), n_val=(\d+)")
-    # Dataset size — GP sequential mode
-    gp_seq_re = re.compile(r"Training AL \S+ model \((\d+) train, (\d+) val\)")
     # Metric lines (same format for both pipelines)
     al_re = re.compile(
         r"AL metrics: train_loss=([\d.]+), val_loss=([\d.]+), "
@@ -87,22 +86,6 @@ def parse_log(log_path):
                 if pipeline is None:
                     pipeline = "transformer"
                 current_iteration = int(m.group(1))
-                current_n_train = None
-                current_n_val = None
-                continue
-
-            # Transformer: "Have n_train=N, n_val=N"
-            m = split_re.search(line)
-            if m and current_iteration is not None:
-                current_n_train = int(m.group(1))
-                current_n_val = int(m.group(2))
-                continue
-
-            # GP sequential: "Training AL exact_gp model (N train, M val)..."
-            m = gp_seq_re.search(line)
-            if m and current_iteration is not None and current_n_train is None:
-                current_n_train = int(m.group(1))
-                current_n_val = int(m.group(2))
                 continue
 
             m = al_re.search(line)
@@ -118,15 +101,19 @@ def parse_log(log_path):
                 baseline_val_losses.append(float(m.group(2)))
                 baseline_r2_scores.append(float(m.group(3)))
 
-                # GP parallel mode: sizes aren't in main log, read worker log
-                if current_n_train is None and pipeline == "gp":
-                    current_n_train, current_n_val = _read_worker_log_sizes(
-                        log_dir, current_iteration
-                    )
+                # Read dataset sizes from worker logs (authoritative source)
+                al_nt, al_nv = _read_worker_log_sizes(
+                    log_dir, current_iteration, "al"
+                )
+                base_nt, base_nv = _read_worker_log_sizes(
+                    log_dir, current_iteration, "baseline"
+                )
 
                 iterations.append(current_iteration)
-                n_trains.append(current_n_train)
-                n_vals.append(current_n_val)
+                al_n_trains.append(al_nt)
+                al_n_vals.append(al_nv)
+                baseline_n_trains.append(base_nt)
+                baseline_n_vals.append(base_nv)
                 current_iteration = None
 
     return dict(
@@ -137,8 +124,10 @@ def parse_log(log_path):
         baseline_train_losses=baseline_train_losses,
         baseline_val_losses=baseline_val_losses,
         baseline_r2_scores=baseline_r2_scores,
-        n_trains=n_trains,
-        n_vals=n_vals,
+        al_n_trains=al_n_trains,
+        al_n_vals=al_n_vals,
+        baseline_n_trains=baseline_n_trains,
+        baseline_n_vals=baseline_n_vals,
         pipeline=pipeline or "transformer",
     )
 
@@ -192,15 +181,20 @@ def plot(data, output_path):
         ax2.set_ylim(min(0, min(finite_r2) - 0.1), 1.05)
     ax2.legend(fontsize=10)
 
-    # --- Dataset sizes ---
-    has_sizes = all(v is not None for v in data["n_trains"])
-    if has_sizes:
-        ax3.plot(iters, data["n_trains"], "b-",  lw=2, marker="o", ms=6, label="Train")
-        ax3.plot(iters, data["n_vals"],   "b--", lw=2, marker="s", ms=6, label="Val")
+    # --- Dataset sizes (AL and Baseline separately) ---
+    has_al_sizes = all(v is not None for v in data["al_n_trains"])
+    has_base_sizes = all(v is not None for v in data["baseline_n_trains"])
+    if has_al_sizes or has_base_sizes:
+        if has_al_sizes:
+            ax3.plot(iters, data["al_n_trains"], "b-",  lw=2, marker="o", ms=6, label="AL Train")
+            ax3.plot(iters, data["al_n_vals"],   "b--", lw=2, marker="s", ms=6, label="AL Val")
+        if has_base_sizes:
+            ax3.plot(iters, data["baseline_n_trains"], "r-",  lw=2, marker="o", ms=6, label="Baseline Train")
+            ax3.plot(iters, data["baseline_n_vals"],   "r--", lw=2, marker="s", ms=6, label="Baseline Val")
         ax3.set_ylabel("Number of Samples", fontsize=12)
         ax3.legend(fontsize=9)
     else:
-        ax3.text(0.5, 0.5, "Dataset sizes\nnot available\nin main log",
+        ax3.text(0.5, 0.5, "Dataset sizes\nnot available\nin worker logs",
                  ha="center", va="center", fontsize=12, color="gray",
                  transform=ax3.transAxes)
     ax3.set_xlabel("Iteration", fontsize=12)
