@@ -88,6 +88,34 @@ from gp_pipeline.utils.evaluation import (
 # functions are now imported from the unified pmssm package above
 
 
+def cross_evaluate_gp(model, X_other, Y_other, data_min, data_max, model_type,
+                      jitter=1e-3, num_samples=8, target='DMRD'):
+    """Evaluate a trained GP model on an arbitrary dataset.
+
+    Returns (mse_loss, r2) where mse_loss is in transformed space
+    and r2 is in physical space (matching the regular metric computations).
+    """
+    from pmssm.visualization import gp_predict
+    from pmssm.data import inverse_transform_y
+
+    x_norm = normalize_x(X_other, data_min, data_max)
+    y_t = transform_y(Y_other, target=target).view(-1)
+
+    y_pred_t = gp_predict(model, x_norm, model_type, jitter=jitter, num_samples=num_samples)
+
+    # MSE in transformed space (same space as training loss)
+    mse = ((y_t - y_pred_t.cpu()) ** 2).mean().item()
+
+    # R² in physical space (same as regular R² computation)
+    y_true_phys = inverse_transform_y(y_t.cpu(), target=target)
+    y_pred_phys = inverse_transform_y(y_pred_t.cpu(), target=target)
+
+    ss_res = ((y_true_phys - y_pred_phys) ** 2).sum()
+    ss_tot = ((y_true_phys - y_true_phys.mean()) ** 2).sum()
+    r2 = (1 - (ss_res / ss_tot)).item()
+    return mse, r2
+
+
 # ---------------------------------------------------------------------------
 # Entropy-based batch active learning selection (Phase 6)
 # ---------------------------------------------------------------------------
@@ -293,7 +321,7 @@ def load_config_with_sweep(config_file, sweep_index=None):
 @click.option('--n-select', default=10, type=int, help="Number of points to select per iteration.")
 @click.option('--n-datasets', default=None, type=int, help="Number of ROOT datasets to load.")
 @click.option('--n-samples', default=None, type=int, help="Number of samples to use from data.")
-@click.option('--n-valid', default=10000, type=int, help="Number of samples reserved for fixed validation set (default: 10000).")
+@click.option('--val-fraction', default=0.2, type=float, help="Fraction of data reserved for validation (default: 0.2). Applied to initial data and each batch of new points.")
 @click.option('--output-dir', default='active_learning_gp_output', type=str, help="Output directory.")
 @click.option('--generate-data/--no-generate-data', default=False, help="Generate new models using Run3ModelGen.")
 @click.option('--min-gen-fraction', default=0.6, type=float, help="Minimum fraction of n-select that must be generated successfully.")
@@ -344,7 +372,7 @@ def load_config_with_sweep(config_file, sweep_index=None):
 # Config file / sweep options
 @click.option('--config-file', default=None, type=str, help="YAML config file (overrides CLI args).")
 @click.option('--sweep-index', default=None, type=int, help="Sweep combination index (requires --config-file).")
-def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, n_valid,
+def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, val_fraction,
          output_dir, generate_data, min_gen_fraction, max_gen_attempts, gen_workers,
          target, model_type, kernel, lengthscale, noise, jitter, learning_rate,
          epochs, early_stopping, patience,
@@ -429,7 +457,6 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, n
     if testing:
         n_datasets = n_datasets if n_datasets is not None else 3
         n_samples = n_samples if n_samples is not None else 30
-        n_valid = min(n_valid, 10)  # Small validation set for testing
         epochs = 50
         n_candidates = 100
         logger.info("Testing mode enabled")
@@ -443,7 +470,7 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, n
     logger.info(f"  n_iterations: {n_iterations}")
     logger.info(f"  n_candidates: {n_candidates}")
     logger.info(f"  n_select: {n_select}")
-    logger.info(f"  n_valid: {n_valid}")
+    logger.info(f"  val_fraction: {val_fraction}")
     logger.info(f"  selection_strategy: {selection_strategy}")
     logger.info(f"  epochs: {epochs}")
     logger.info(f"  early_stopping: {early_stopping} (patience={patience})")
@@ -509,37 +536,40 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, n
     # Store full dataset for baseline random sampling
     X_full, Y_full = X.clone(), Y.clone()
 
-    # Reserve n_valid samples for fixed validation, then n_samples for initial training.
-    # Layout in X_full: [0, n_valid) = validation | [n_valid, n_valid+n_samples) = training
-    # Both regions are excluded from baseline random sampling.
-    if n_valid > len(X):
-        raise ValueError(f"n_valid={n_valid} exceeds available data ({len(X)})")
-    X_val_fixed = X[:n_valid].clone()
-    Y_val_fixed = Y[:n_valid].clone()
-    logger.info(f"Fixed validation set: {n_valid} samples (held out, never changes)")
-
-    remaining = X[n_valid:]
-    remaining_Y = Y[n_valid:]
+    # Select n_samples from loaded data (or use all), then split 80/20 into train/val.
     if n_samples is not None:
-        if n_samples > len(remaining):
-            raise ValueError(f"n_samples={n_samples} exceeds remaining data after reserving n_valid={n_valid} ({len(remaining)} available)")
-        X = remaining[:n_samples].clone()
-        Y = remaining_Y[:n_samples].clone()
-        logger.info(f"Using {n_samples} samples for initial AL training (after {n_valid} reserved for validation)")
+        if n_samples > len(X):
+            raise ValueError(f"n_samples={n_samples} exceeds available data ({len(X)})")
+        X = X[:n_samples].clone()
+        Y = Y[:n_samples].clone()
     else:
-        X = remaining.clone()
-        Y = remaining_Y.clone()
+        X = X.clone()
+        Y = Y.clone()
 
-    # Track which indices from X_full are reserved (validation + initial training).
+    # Split initial data into train/val using val_fraction
+    n_total_init = len(X)
+    n_val_init = max(1, int(n_total_init * val_fraction))
+    n_train_init = n_total_init - n_val_init
+
+    # Use a fixed permutation so the split is reproducible
+    perm = torch.randperm(n_total_init, generator=torch.Generator().manual_seed(42))
+    idx_train_perm = perm[:n_train_init]
+    idx_val_perm = perm[n_train_init:]
+
+    X_val = X[idx_val_perm].clone()
+    Y_val = Y[idx_val_perm].clone()
+    X = X[idx_train_perm].clone()
+    Y = Y[idx_train_perm].clone()
+
+    logger.info(f"Initial split ({1-val_fraction:.0%} train / {val_fraction:.0%} val): "
+                f"{len(X)} train + {len(X_val)} val = {n_total_init} total")
+
+    # Track which indices from X_full are reserved (train + val).
     # Baseline random sampling will exclude all of these.
-    initial_al_size = n_valid + len(X)
-    initial_al_indices = torch.arange(initial_al_size)
-    # idx_train_init stores the training portion indices within X_full (for baseline construction)
-    idx_train_init = torch.arange(n_valid, initial_al_size)
+    initial_reserved = n_samples if n_samples is not None else len(X_full)
+    initial_al_indices = torch.arange(initial_reserved)
 
-    logger.info(f"Initial AL training pool: X={X.shape}, Y={Y.shape}")
-    logger.info(f"Baseline pool shape: X_full={X_full.shape}, Y_full={Y_full.shape}")
-    logger.info(f"Reserved indices from X_full: [0, ..., {initial_al_size-1}] ({n_valid} val + {len(X)} train, excluded from baseline sampling)")
+    logger.info(f"Baseline pool: X_full={X_full.shape}, reserved [0..{initial_reserved-1}] excluded from sampling")
 
     # Determine if we can train AL and Baseline in parallel (2+ GPUs)
     AL_GPU_ID = 0
@@ -557,10 +587,16 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, n
     all_selected_points = []
     iteration_numbers = []
 
-    al_train_losses, al_val_losses, al_r2_scores = [], [], []
+    al_train_losses, al_val_losses, al_r2_scores, al_train_r2_scores = [], [], [], []
     al_n_train, al_n_val = [], []
-    baseline_train_losses, baseline_val_losses, baseline_r2_scores = [], [], []
+    baseline_train_losses, baseline_val_losses, baseline_r2_scores, baseline_train_r2_scores = [], [], [], []
     baseline_n_train, baseline_n_val = [], []
+
+    # Cross-evaluation metrics (each model on the other's validation set)
+    al_on_base_val_losses = []
+    al_on_base_val_r2 = []
+    base_on_al_val_losses = []
+    base_on_al_val_r2 = []
 
     # Lengthscale tracking
     lengthscale_rows = []
@@ -581,59 +617,68 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, n
         iter_plots_dir = iter_dir / "plots"
         iter_plots_dir.mkdir(parents=True, exist_ok=True)
 
-        # ---- Build baseline training pool (validation is always X_val_fixed) ----
+        # ---- Build baseline dataset (train + val) ----
         if iteration == 1:
-            X_baseline = X.clone()
-            Y_baseline = Y.clone()
-            logger.info(f"Iteration 1: Both models use identical training pool "
-                       f"({len(X_baseline)} samples)")
+            X_baseline_train = X.clone()
+            Y_baseline_train = Y.clone()
+            X_baseline_val = X_val.clone()
+            Y_baseline_val = Y_val.clone()
+            logger.info(f"Iteration 1: Both models use identical data "
+                       f"({len(X_baseline_train)} train + {len(X_baseline_val)} val)")
         else:
-            # Baseline grows by sampling from X_full excluding ALL initial n_samples
-            # (both training and validation portions, to prevent leakage)
-            n_additional = len(X) - len(idx_train_init)  # Number of generated points AL has added
+            # Baseline grows by sampling from X_full (excluding reserved indices),
+            # matching the exact train/val counts that AL has accumulated.
+            n_add_train = len(X) - n_train_init
+            n_add_val = len(X_val) - n_val_init
+            n_al_new_total = n_add_train + n_add_val
             all_indices = torch.arange(len(X_full))
             mask = torch.ones(len(X_full), dtype=torch.bool)
-            mask[initial_al_indices] = False  # Exclude ALL initial n_samples (train + val)
+            mask[initial_al_indices] = False
             available_indices = all_indices[mask]
 
-            if n_additional <= len(available_indices):
-                additional_indices = available_indices[
-                    torch.randperm(len(available_indices))[:n_additional]
+            logger.info(f"Baseline sampling: need {n_al_new_total} additional "
+                       f"({n_add_train} train + {n_add_val} val), "
+                       f"{len(available_indices)} available from X_full")
+
+            if n_al_new_total <= len(available_indices):
+                add_idx = available_indices[
+                    torch.randperm(len(available_indices))[:n_al_new_total]
                 ]
             else:
                 logger.info(f"Baseline: sampling with replacement "
-                           f"({n_additional} needed, {len(available_indices)} available)")
-                additional_indices = available_indices[
-                    torch.randint(0, len(available_indices), (n_additional,))
+                           f"({n_al_new_total} needed, {len(available_indices)} available)")
+                add_idx = available_indices[
+                    torch.randint(0, len(available_indices), (n_al_new_total,))
                 ]
+            X_add = X_full[add_idx]
+            Y_add = Y_full[add_idx]
 
-            # Baseline training pool = initial training data + random additional
-            # idx_train_init indexes into X_full[:n_samples], so it works as X_full indices
-            baseline_indices = torch.cat([idx_train_init, additional_indices])
-            X_baseline = X_full[baseline_indices]
-            Y_baseline = Y_full[baseline_indices]
-            logger.info(f"Baseline dataset: {len(idx_train_init)} initial "
-                       f"+ {n_additional} random = {len(baseline_indices)} samples")
+            X_baseline_train = torch.cat([X[:n_train_init], X_add[:n_add_train]])
+            Y_baseline_train = torch.cat([Y[:n_train_init], Y_add[:n_add_train]])
+            X_baseline_val = torch.cat([X_val[:n_val_init], X_add[n_add_train:]])
+            Y_baseline_val = torch.cat([Y_val[:n_val_init], Y_add[n_add_train:]])
+            logger.info(f"Baseline dataset: {n_train_init}+{n_add_train}={len(X_baseline_train)} train, "
+                       f"{n_val_init}+{n_add_val}={len(X_baseline_val)} val")
 
-        # ---- Use fixed validation set (no per-iteration reshuffling) ----
-        X_train_al = X       # X is training-only, grows each iteration
+        # ---- Assign train/val tensors for this iteration ----
+        X_train_al = X
         Y_train_al = Y
-        X_val_al = X_val_fixed
-        Y_val_al = Y_val_fixed
+        X_val_al = X_val
+        Y_val_al = Y_val
 
-        X_train_base = X_baseline
-        Y_train_base = Y_baseline
-        X_val_base = X_val_fixed
-        Y_val_base = Y_val_fixed
+        X_train_base = X_baseline_train
+        Y_train_base = Y_baseline_train
+        X_val_base = X_baseline_val
+        Y_val_base = Y_baseline_val
 
-        logger.info(f"AL: n_train={len(X_train_al)}, n_val={len(X_val_al)} (fixed)")
-        logger.info(f"Baseline: n_train={len(X_train_base)}, n_val={len(X_val_base)} (fixed)")
+        logger.info(f"AL: n_train={len(X_train_al)}, n_val={len(X_val_al)}")
+        logger.info(f"Baseline: n_train={len(X_train_base)}, n_val={len(X_val_base)}")
 
         # Plot data distribution histograms for AL
         al_hist_dir = iter_plots_dir / "al"
         al_hist_dir.mkdir(parents=True, exist_ok=True)
-        X_al_combined = torch.cat([X, X_val_fixed], dim=0)
-        Y_al_combined = torch.cat([Y, Y_val_fixed], dim=0)
+        X_al_combined = torch.cat([X, X_val], dim=0)
+        Y_al_combined = torch.cat([Y, Y_val], dim=0)
         idx_train_plot = torch.arange(len(X))
         idx_val_plot = torch.arange(len(X), len(X_al_combined))
         plot_data_histograms(X_al_combined, Y_al_combined, idx_train_plot, idx_val_plot, al_hist_dir, "AL", iteration, logger)
@@ -641,10 +686,10 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, n
         # Plot data distribution histograms for Baseline
         baseline_hist_dir = iter_plots_dir / "baseline"
         baseline_hist_dir.mkdir(parents=True, exist_ok=True)
-        X_base_combined = torch.cat([X_baseline, X_val_fixed], dim=0)
-        Y_base_combined = torch.cat([Y_baseline, Y_val_fixed], dim=0)
-        idx_train_base_plot = torch.arange(len(X_baseline))
-        idx_val_base_plot = torch.arange(len(X_baseline), len(X_base_combined))
+        X_base_combined = torch.cat([X_baseline_train, X_baseline_val], dim=0)
+        Y_base_combined = torch.cat([Y_baseline_train, Y_baseline_val], dim=0)
+        idx_train_base_plot = torch.arange(len(X_baseline_train))
+        idx_val_base_plot = torch.arange(len(X_baseline_train), len(X_base_combined))
         plot_data_histograms(X_base_combined, Y_base_combined, idx_train_base_plot, idx_val_base_plot,
                              baseline_hist_dir, "Baseline", iteration, logger)
 
@@ -717,21 +762,25 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, n
         # ---- Log results ----
         logger.info(f"AL metrics: train_loss={al_results['best_train_loss']:.6f}, "
                    f"val_loss={al_results['best_val_loss']:.6f}, "
-                   f"R²={al_results['r2_score']:.4f}")
+                   f"R²={al_results['r2_score']:.4f}, "
+                   f"train_R²={al_results['train_r2_score']:.4f}")
         logger.info(f"Baseline metrics: train_loss={baseline_results['best_train_loss']:.6f}, "
                    f"val_loss={baseline_results['best_val_loss']:.6f}, "
-                   f"R²={baseline_results['r2_score']:.4f}")
+                   f"R²={baseline_results['r2_score']:.4f}, "
+                   f"train_R²={baseline_results['train_r2_score']:.4f}")
 
         # Track metrics
         iteration_numbers.append(iteration)
         al_train_losses.append(al_results['best_train_loss'])
         al_val_losses.append(al_results['best_val_loss'])
         al_r2_scores.append(al_results['r2_score'])
+        al_train_r2_scores.append(al_results['train_r2_score'])
         al_n_train.append(len(X_train_al))
         al_n_val.append(len(X_val_al))
         baseline_train_losses.append(baseline_results['best_train_loss'])
         baseline_val_losses.append(baseline_results['best_val_loss'])
         baseline_r2_scores.append(baseline_results['r2_score'])
+        baseline_train_r2_scores.append(baseline_results['train_r2_score'])
         baseline_n_train.append(len(X_train_base))
         baseline_n_val.append(len(X_val_base))
 
@@ -758,6 +807,38 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, n
         if model_has_likelihood(model_type):
             al_model.likelihood.load_state_dict(checkpoint['likelihood_state_dict'])
         logger.info("AL model reloaded for uncertainty estimation")
+
+        # ---- Cross-evaluation: each model on the other's validation set ----
+        al_cross_loss, al_cross_r2 = cross_evaluate_gp(
+            al_model, X_baseline_val, Y_baseline_val, data_min, data_max,
+            model_type, jitter=jitter, num_samples=gp_num_samples, target=target)
+
+        # Load baseline model for cross-eval
+        x_train_base_norm = normalize_x(X_train_base, data_min, data_max)
+        x_val_base_norm = normalize_x(X_val_base, data_min, data_max)
+        y_train_base_t = transform_y(Y_train_base, target=target).view(-1)
+        y_val_base_t = transform_y(Y_val_base, target=target).view(-1)
+
+        baseline_model = create_gp_model(
+            model_type, x_train_base_norm, y_train_base_t,
+            x_val_base_norm, y_val_base_t,
+            n_dim=len(PARAM_ORDER), num_samples=gp_num_samples,
+            target=target, **gp_kwargs
+        )
+        base_ckpt = torch.load(baseline_checkpoint_path, map_location=device)
+        baseline_model.load_state_dict(base_ckpt['model_state_dict'])
+        if model_has_likelihood(model_type):
+            baseline_model.likelihood.load_state_dict(base_ckpt['likelihood_state_dict'])
+
+        base_cross_loss, base_cross_r2 = cross_evaluate_gp(
+            baseline_model, X_val_al, Y_val_al, data_min, data_max,
+            model_type, jitter=jitter, num_samples=gp_num_samples, target=target)
+
+        logger.info(f"Cross-eval: AL_on_base_val_loss={al_cross_loss:.6f}, AL_on_base_val_R²={al_cross_r2:.4f}, base_on_al_val_loss={base_cross_loss:.6f}, base_on_al_val_R²={base_cross_r2:.4f}")
+        al_on_base_val_losses.append(al_cross_loss)
+        al_on_base_val_r2.append(al_cross_r2)
+        base_on_al_val_losses.append(base_cross_loss)
+        base_on_al_val_r2.append(base_cross_r2)
 
         # ---- Full true dataset evaluation ----
         if eval_data_path is not None:
@@ -926,16 +1007,25 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, n
             else:
                 logger.warning("No valid models generated after all attempts")
 
-        # ---- Augment training data ----
+        # ---- Augment AL data with newly generated points, split 80/20 into train/val ----
         if new_X is not None and new_Y is not None and len(new_X) > 0:
             # Filter new data too (Y > 0)
             new_valid = (new_Y.squeeze(-1) > 0)
             new_X = new_X[new_valid]
             new_Y = new_Y[new_valid]
-            logger.info(f"Augmenting: {len(X)} + {len(new_X)} = "
-                       f"{len(X) + len(new_X)} samples")
-            X = torch.cat([X, new_X], dim=0)
-            Y = torch.cat([Y, new_Y], dim=0)
+            # Shuffle before splitting to avoid ordering bias from generation attempts
+            perm_new = torch.randperm(len(new_X))
+            new_X = new_X[perm_new]
+            new_Y = new_Y[perm_new]
+            n_new_val = max(1, int(len(new_X) * val_fraction))
+            n_new_train = len(new_X) - n_new_val
+            logger.info(f"Augmenting AL: +{n_new_train} train, +{n_new_val} val "
+                       f"(train: {len(X)}->{len(X)+n_new_train}, "
+                       f"val: {len(X_val)}->{len(X_val)+n_new_val})")
+            X = torch.cat([X, new_X[:n_new_train]], dim=0)
+            Y = torch.cat([Y, new_Y[:n_new_train]], dim=0)
+            X_val = torch.cat([X_val, new_X[n_new_train:]], dim=0)
+            Y_val = torch.cat([Y_val, new_Y[n_new_train:]], dim=0)
 
         prev_al_checkpoint = al_checkpoint_path
         prev_baseline_checkpoint = baseline_checkpoint_path
@@ -945,6 +1035,9 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, n
         'train_losses': al_train_losses,
         'val_losses': al_val_losses,
         'r2_scores': al_r2_scores,
+        'train_r2_scores': al_train_r2_scores,
+        'cross_val_losses': al_on_base_val_losses,
+        'cross_val_r2': al_on_base_val_r2,
         'n_train': al_n_train,
         'n_val': al_n_val,
     }
@@ -952,6 +1045,9 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, n
         'train_losses': baseline_train_losses,
         'val_losses': baseline_val_losses,
         'r2_scores': baseline_r2_scores,
+        'train_r2_scores': baseline_train_r2_scores,
+        'cross_val_losses': base_on_al_val_losses,
+        'cross_val_r2': base_on_al_val_r2,
         'n_train': baseline_n_train,
         'n_val': baseline_n_val,
     }

@@ -49,8 +49,10 @@ def parse_log(log_path):
     (al_training.log / baseline_training.log).
     """
     iterations = []
-    al_train_losses, al_val_losses, al_r2_scores = [], [], []
-    baseline_train_losses, baseline_val_losses, baseline_r2_scores = [], [], []
+    al_train_losses, al_val_losses, al_r2_scores, al_train_r2_scores = [], [], [], []
+    baseline_train_losses, baseline_val_losses, baseline_r2_scores, baseline_train_r2_scores = [], [], [], []
+    al_on_base_val_losses, al_on_base_val_r2 = [], []
+    base_on_al_val_losses, base_on_al_val_r2 = [], []
     al_n_trains, al_n_vals = [], []
     baseline_n_trains, baseline_n_vals = [], []
 
@@ -62,13 +64,19 @@ def parse_log(log_path):
         r"=== (?:Global|GP Active Learning) Iteration (\d+) ==="
     )
     # Metric lines (same format for both pipelines)
+    # train_R² is optional for backward compatibility with older logs
     al_re = re.compile(
         r"AL metrics: train_loss=([\d.]+), val_loss=([\d.]+), "
-        r"R²=([-\d.]+)"
+        r"R²=([-\d.]+)(?:, train_R²=([-\d.]+))?"
     )
     base_re = re.compile(
         r"Baseline metrics: train_loss=([\d.]+), val_loss=([\d.]+), "
-        r"R²=([-\d.]+)"
+        r"R²=([-\d.]+)(?:, train_R²=([-\d.]+))?"
+    )
+    # Cross-evaluation line (optional, for newer logs)
+    cross_re = re.compile(
+        r"Cross-eval: AL_on_base_val_loss=([\d.]+), AL_on_base_val_R²=([-\d.]+), "
+        r"base_on_al_val_loss=([\d.]+), base_on_al_val_R²=([-\d.]+)"
     )
     # Auto-detect pipeline type
     gp_header_re = re.compile(r"GP Active Learning")
@@ -93,6 +101,7 @@ def parse_log(log_path):
                 al_train_losses.append(float(m.group(1)))
                 al_val_losses.append(float(m.group(2)))
                 al_r2_scores.append(float(m.group(3)))
+                al_train_r2_scores.append(float(m.group(4)) if m.group(4) else None)
                 continue
 
             m = base_re.search(line)
@@ -100,6 +109,7 @@ def parse_log(log_path):
                 baseline_train_losses.append(float(m.group(1)))
                 baseline_val_losses.append(float(m.group(2)))
                 baseline_r2_scores.append(float(m.group(3)))
+                baseline_train_r2_scores.append(float(m.group(4)) if m.group(4) else None)
 
                 # Read dataset sizes from worker logs (authoritative source)
                 al_nt, al_nv = _read_worker_log_sizes(
@@ -115,15 +125,30 @@ def parse_log(log_path):
                 baseline_n_trains.append(base_nt)
                 baseline_n_vals.append(base_nv)
                 current_iteration = None
+                continue
+
+            # Cross-eval line (optional, appears after baseline metrics)
+            m = cross_re.search(line)
+            if m:
+                al_on_base_val_losses.append(float(m.group(1)))
+                al_on_base_val_r2.append(float(m.group(2)))
+                base_on_al_val_losses.append(float(m.group(3)))
+                base_on_al_val_r2.append(float(m.group(4)))
 
     return dict(
         iterations=iterations,
         al_train_losses=al_train_losses,
         al_val_losses=al_val_losses,
         al_r2_scores=al_r2_scores,
+        al_train_r2_scores=al_train_r2_scores,
         baseline_train_losses=baseline_train_losses,
         baseline_val_losses=baseline_val_losses,
         baseline_r2_scores=baseline_r2_scores,
+        baseline_train_r2_scores=baseline_train_r2_scores,
+        al_on_base_val_losses=al_on_base_val_losses,
+        al_on_base_val_r2=al_on_base_val_r2,
+        base_on_al_val_losses=base_on_al_val_losses,
+        base_on_al_val_r2=base_on_al_val_r2,
         al_n_trains=al_n_trains,
         al_n_vals=al_n_vals,
         baseline_n_trains=baseline_n_trains,
@@ -155,6 +180,10 @@ def plot(data, output_path):
     ax1.plot(iters, data["al_val_losses"],         "b--", lw=2, marker="s", ms=6, label="AL Validation")
     ax1.plot(iters, data["baseline_train_losses"], "r-",  lw=2, marker="o", ms=6, label="Baseline Train")
     ax1.plot(iters, data["baseline_val_losses"],   "r--", lw=2, marker="s", ms=6, label="Baseline Validation")
+    has_cross = len(data["al_on_base_val_losses"]) == len(iters)
+    if has_cross:
+        ax1.plot(iters, data["al_on_base_val_losses"],   "g:", lw=2, marker="^", ms=6, label="AL on Base Val")
+        ax1.plot(iters, data["base_on_al_val_losses"],   "g--", lw=2, marker="v", ms=6, label="Base on AL Val")
     ax1.set_xlabel("Iteration", fontsize=12)
     ax1.set_ylabel("Best Loss (MSE)", fontsize=12)
     ax1.set_title("Train/Validation Loss vs Iteration", fontsize=14)
@@ -165,9 +194,18 @@ def plot(data, output_path):
     ax1.grid(True, which="minor", alpha=0.15)
     ax1.legend(fontsize=9)
 
-    # --- R² ---
-    ax2.plot(iters, data["al_r2_scores"],       "b-", lw=2, marker="o", ms=6, label="Active Learning")
-    ax2.plot(iters, data["baseline_r2_scores"], "r-", lw=2, marker="o", ms=6, label="Baseline (Random)")
+    # --- R² (training, validation, and cross-validation) ---
+    has_al_train_r2 = all(v is not None for v in data["al_train_r2_scores"])
+    has_base_train_r2 = all(v is not None for v in data["baseline_train_r2_scores"])
+    if has_al_train_r2:
+        ax2.plot(iters, data["al_train_r2_scores"],       "b-",  lw=2, marker="o", ms=6, label="AL Train")
+    ax2.plot(iters, data["al_r2_scores"],                  "b--", lw=2, marker="s", ms=6, label="AL Validation")
+    if has_base_train_r2:
+        ax2.plot(iters, data["baseline_train_r2_scores"], "r-",  lw=2, marker="o", ms=6, label="Baseline Train")
+    ax2.plot(iters, data["baseline_r2_scores"],            "r--", lw=2, marker="s", ms=6, label="Baseline Validation")
+    if has_cross:
+        ax2.plot(iters, data["al_on_base_val_r2"],        "g:", lw=2, marker="^", ms=6, label="AL on Base Val")
+        ax2.plot(iters, data["base_on_al_val_r2"],        "g--", lw=2, marker="v", ms=6, label="Base on AL Val")
     ax2.set_xlabel("Iteration", fontsize=12)
     ax2.set_ylabel("R² Score", fontsize=12)
     ax2.set_title("R² Score vs Iteration", fontsize=14)
@@ -176,10 +214,16 @@ def plot(data, output_path):
     ax2.grid(True, which="major", alpha=0.3)
     ax2.grid(True, which="minor", alpha=0.15)
     all_r2 = data["al_r2_scores"] + data["baseline_r2_scores"]
-    finite_r2 = [v for v in all_r2 if v == v and abs(v) != float("inf")]
+    if has_al_train_r2:
+        all_r2 += data["al_train_r2_scores"]
+    if has_base_train_r2:
+        all_r2 += data["baseline_train_r2_scores"]
+    if has_cross:
+        all_r2 += data["al_on_base_val_r2"] + data["base_on_al_val_r2"]
+    finite_r2 = [v for v in all_r2 if v is not None and v == v and abs(v) != float("inf")]
     if finite_r2:
         ax2.set_ylim(min(0, min(finite_r2) - 0.1), 1.05)
-    ax2.legend(fontsize=10)
+    ax2.legend(fontsize=9)
 
     # --- Dataset sizes (AL and Baseline separately) ---
     has_al_sizes = all(v is not None for v in data["al_n_trains"])
@@ -187,10 +231,10 @@ def plot(data, output_path):
     if has_al_sizes or has_base_sizes:
         if has_al_sizes:
             ax3.plot(iters, data["al_n_trains"], "b-",  lw=2, marker="o", ms=6, label="AL Train")
-            ax3.plot(iters, data["al_n_vals"],   "b--", lw=2, marker="s", ms=6, label="AL Val")
+            ax3.plot(iters, data["al_n_vals"],   "b--", lw=2, marker="s", ms=6, label="AL Validation")
         if has_base_sizes:
             ax3.plot(iters, data["baseline_n_trains"], "r-",  lw=2, marker="o", ms=6, label="Baseline Train")
-            ax3.plot(iters, data["baseline_n_vals"],   "r--", lw=2, marker="s", ms=6, label="Baseline Val")
+            ax3.plot(iters, data["baseline_n_vals"],   "r--", lw=2, marker="s", ms=6, label="Baseline Validation")
         ax3.set_ylabel("Number of Samples", fontsize=12)
         ax3.legend(fontsize=9)
     else:

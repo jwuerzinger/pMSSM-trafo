@@ -18,12 +18,14 @@
     --y-transform log \
     --epochs 10_000 \
     --generate-data \
-    --n-samples 50_000 \
+    --n-samples 2000 \
     --n-iterations 40 \
-    --n-select 200 \
+    --n-select 500 \
     --n-candidates 50_000 \
     --entropy-pool-size 2_000 \
     --gen-workers 20 \
     --warm-starting \
-    --early-stopping
+    --early-stopping \
+    --output-dir active_learning_output_no_proximity_weighting \
+    --proximity-sampling 0.0
     

@@ -330,6 +330,10 @@ def plot_iteration_metrics(iterations, al_metrics, baseline_metrics, output_dir,
     ax1.plot(iterations, al_metrics['val_losses'], 'b--', linewidth=2, marker='s', markersize=6, label='AL Validation')
     ax1.plot(iterations, baseline_metrics['train_losses'], 'r-', linewidth=2, marker='o', markersize=6, label='Baseline Train')
     ax1.plot(iterations, baseline_metrics['val_losses'], 'r--', linewidth=2, marker='s', markersize=6, label='Baseline Validation')
+    if al_metrics.get('cross_val_losses'):
+        ax1.plot(iterations, al_metrics['cross_val_losses'], 'g:', linewidth=2, marker='^', markersize=6, label='AL on Base Val')
+    if baseline_metrics.get('cross_val_losses'):
+        ax1.plot(iterations, baseline_metrics['cross_val_losses'], 'g--', linewidth=2, marker='v', markersize=6, label='Base on AL Val')
     ax1.set_xlabel('Iteration', fontsize=12)
     ax1.set_ylabel('Best Loss (MSE)', fontsize=12)
     ax1.set_title('Train/Validation Loss vs Iteration', fontsize=14)
@@ -340,9 +344,17 @@ def plot_iteration_metrics(iterations, al_metrics, baseline_metrics, output_dir,
     ax1.set_yscale('log')
     ax1.legend(fontsize=9)
 
-    # Plot 2: R² Score
-    ax2.plot(iterations, al_metrics['r2_scores'], 'b-', linewidth=2, marker='o', markersize=6, label='Active Learning')
-    ax2.plot(iterations, baseline_metrics['r2_scores'], 'r-', linewidth=2, marker='o', markersize=6, label='Baseline (Random)')
+    # Plot 2: R² Score (training, validation, and cross-validation)
+    if al_metrics.get('train_r2_scores'):
+        ax2.plot(iterations, al_metrics['train_r2_scores'], 'b-', linewidth=2, marker='o', markersize=6, label='AL Train')
+    ax2.plot(iterations, al_metrics['r2_scores'], 'b--', linewidth=2, marker='s', markersize=6, label='AL Validation')
+    if baseline_metrics.get('train_r2_scores'):
+        ax2.plot(iterations, baseline_metrics['train_r2_scores'], 'r-', linewidth=2, marker='o', markersize=6, label='Baseline Train')
+    ax2.plot(iterations, baseline_metrics['r2_scores'], 'r--', linewidth=2, marker='s', markersize=6, label='Baseline Validation')
+    if al_metrics.get('cross_val_r2'):
+        ax2.plot(iterations, al_metrics['cross_val_r2'], 'g:', linewidth=2, marker='^', markersize=6, label='AL on Base Val')
+    if baseline_metrics.get('cross_val_r2'):
+        ax2.plot(iterations, baseline_metrics['cross_val_r2'], 'g--', linewidth=2, marker='v', markersize=6, label='Base on AL Val')
     ax2.set_xlabel('Iteration', fontsize=12)
     ax2.set_ylabel('R² Score', fontsize=12)
     ax2.set_title('R² Score vs Iteration', fontsize=14)
@@ -351,16 +363,18 @@ def plot_iteration_metrics(iterations, al_metrics, baseline_metrics, output_dir,
     ax2.set_xticks(label_ticks)
     ax2.set_xticks(iterations, minor=True)
     all_r2 = al_metrics['r2_scores'] + baseline_metrics['r2_scores']
+    all_r2 += al_metrics.get('train_r2_scores', []) + baseline_metrics.get('train_r2_scores', [])
+    all_r2 += al_metrics.get('cross_val_r2', []) + baseline_metrics.get('cross_val_r2', [])
     finite_r2 = [v for v in all_r2 if v is not None and not (v != v) and abs(v) != float('inf')]
     if finite_r2:
         ax2.set_ylim(min(0, min(finite_r2) - 0.1), 1.05)
-    ax2.legend(fontsize=10)
+    ax2.legend(fontsize=9)
 
     # Plot 3: Dataset Sizes
     ax3.plot(iterations, al_metrics['n_train'], 'b-', linewidth=2, marker='o', markersize=6, label='AL Train')
-    ax3.plot(iterations, al_metrics['n_val'], 'b--', linewidth=2, marker='s', markersize=6, label='AL Val')
+    ax3.plot(iterations, al_metrics['n_val'], 'b--', linewidth=2, marker='s', markersize=6, label='AL Validation')
     ax3.plot(iterations, baseline_metrics['n_train'], 'r-', linewidth=2, marker='o', markersize=6, label='Baseline Train')
-    ax3.plot(iterations, baseline_metrics['n_val'], 'r--', linewidth=2, marker='s', markersize=6, label='Baseline Val')
+    ax3.plot(iterations, baseline_metrics['n_val'], 'r--', linewidth=2, marker='s', markersize=6, label='Baseline Validation')
     ax3.set_xlabel('Iteration', fontsize=12)
     ax3.set_ylabel('Number of Samples', fontsize=12)
     ax3.set_title('Dataset Size vs Iteration', fontsize=14)

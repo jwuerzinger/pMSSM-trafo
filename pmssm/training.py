@@ -135,7 +135,7 @@ def train_with_validation(
         if early_stopping:
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
-                best_model_state = model.state_dict()
+                best_model_state = {k: v.clone() for k, v in model.state_dict().items()}
                 counter = 0
             else:
                 counter += 1
@@ -275,21 +275,24 @@ def train_model_worker(gpu_id, X, Y, idx_train, idx_val, epochs, dropout,
         logger=logger,
     )
 
-    # Compute metrics
-    best_train_loss = min(train_losses)
-    best_val_loss = min(val_losses)
+    # Compute metrics — all correspond to the best-validation-loss epoch
+    best_val_epoch = min(range(len(val_losses)), key=lambda i: val_losses[i])
+    best_val_loss = val_losses[best_val_epoch]
+    best_train_loss = train_losses[best_val_epoch]
 
-    # Compute R² score
+    # Compute R² scores on both validation and training sets
+    # (model already has best-val-loss weights restored by train_with_validation)
     model.eval()
     model.to(device)
     _, _, mean_Y, std_Y = stats
+
+    # Validation R²
     loader = DataLoader(val_dataset, batch_size=len(val_dataset), shuffle=False)
     X_batch, Y_batch = next(iter(loader))
     X_batch = X_batch.to(device)
     with torch.no_grad():
         Y_pred_transformed = model(X_batch).cpu()
 
-    # Convert to physical space for R² calculation
     if y_transform == 'log':
         Y_true = inverse_transform_y(Y_batch, target=target)
         Y_pred = inverse_transform_y(Y_pred_transformed, target=target)
@@ -301,11 +304,31 @@ def train_model_worker(gpu_id, X, Y, idx_train, idx_val, epochs, dropout,
     ss_tot = ((Y_true - Y_true.mean()) ** 2).sum()
     r2 = (1 - (ss_res / ss_tot)).item()
 
+    # Training R²
+    train_loader_r2 = DataLoader(train_dataset, batch_size=len(train_dataset), shuffle=False)
+    X_train_r2, Y_train_r2 = next(iter(train_loader_r2))
+    X_train_r2 = X_train_r2.to(device)
+    with torch.no_grad():
+        Y_train_pred_transformed = model(X_train_r2).cpu()
+
+    if y_transform == 'log':
+        Y_train_true_r2 = inverse_transform_y(Y_train_r2, target=target)
+        Y_train_pred_r2 = inverse_transform_y(Y_train_pred_transformed, target=target)
+    else:  # zscore
+        Y_train_true_r2 = Y_train_r2 * std_Y + mean_Y
+        Y_train_pred_r2 = Y_train_pred_transformed * std_Y + mean_Y
+
+    ss_res_train = ((Y_train_true_r2 - Y_train_pred_r2) ** 2).sum()
+    ss_tot_train = ((Y_train_true_r2 - Y_train_true_r2.mean()) ** 2).sum()
+    train_r2 = (1 - (ss_res_train / ss_tot_train)).item()
+
     # Log final metrics
     logger.info(f"Training complete!")
+    logger.info(f"Best val epoch: {best_val_epoch}")
     logger.info(f"Best train loss: {best_train_loss:.6f}")
     logger.info(f"Best validation loss: {best_val_loss:.6f}")
     logger.info(f"R² score: {r2:.4f}")
+    logger.info(f"Train R² score: {train_r2:.4f}")
 
     # Generate diagnostic plots if plots_dir is provided
     if plots_dir is not None:
@@ -383,6 +406,7 @@ def train_model_worker(gpu_id, X, Y, idx_train, idx_val, epochs, dropout,
         "best_train_loss": best_train_loss,
         "best_val_loss": best_val_loss,
         "r2_score": r2,
+        "train_r2_score": train_r2,
         "train_losses": train_losses,
         "val_losses": val_losses,
     })
@@ -635,15 +659,26 @@ def train_gp_worker(gpu_id, X, Y, X_val, Y_val, data_min, data_max,
     )
     logger.info(f"GP training complete after {len(train_losses)} iterations.")
 
-    # Compute metrics
-    best_train_loss = min(train_losses)
-    best_val_loss = min(val_losses)
+    # Compute metrics using the best model (already restored by train_gp_model).
+    # Report MSE in transformed space (not MLL) so losses are comparable
+    # across models and with cross-evaluation.
+    best_val_iter = min(range(len(val_losses)), key=lambda i: val_losses[i])
+    y_pred_val = gp_predict(model, x_val_norm, model_type,
+                            jitter=jitter, num_samples=num_samples)
+    y_pred_train = gp_predict(model, x_train_norm, model_type,
+                              jitter=jitter, num_samples=num_samples)
+    best_val_loss = ((y_val_t - y_pred_val.cpu()) ** 2).mean().item()
+    best_train_loss = ((y_train_t - y_pred_train.cpu()) ** 2).mean().item()
     r2 = compute_gp_r2(model, x_val_norm, y_val_t, model_type, jitter=jitter,
                        num_samples=num_samples, target=target)
+    train_r2 = compute_gp_r2(model, x_train_norm, y_train_t, model_type, jitter=jitter,
+                             num_samples=num_samples, target=target)
 
-    logger.info(f"Best train loss: {best_train_loss:.6f}")
-    logger.info(f"Best val loss: {best_val_loss:.6f}")
+    logger.info(f"Best val epoch (by MLL): {best_val_iter}")
+    logger.info(f"Best train loss (MSE): {best_train_loss:.6f}")
+    logger.info(f"Best val loss (MSE): {best_val_loss:.6f}")
     logger.info(f"R² score: {r2:.4f}")
+    logger.info(f"Train R² score: {train_r2:.4f}")
 
     # Extract lengthscales
     lengthscales = extract_lengthscales(model, model_type)
@@ -655,13 +690,7 @@ def train_gp_worker(gpu_id, X, Y, X_val, Y_val, data_min, data_max,
         plots_dir = Path(plots_dir) / model_name.lower()
         plots_dir.mkdir(parents=True, exist_ok=True)
 
-        # Get predictions for both train and validation sets
-        y_pred_val = gp_predict(model, x_val_norm, model_type,
-                                jitter=jitter, num_samples=num_samples)
-        y_pred_train = gp_predict(model, x_train_norm, model_type,
-                                  jitter=jitter, num_samples=num_samples)
-
-        # Rolling average loss curve
+        # Rolling average loss curve (MLL, from training loop)
         plot_losses(train_losses, val_losses, model_type, str(plots_dir))
 
         # Convert to physical space for scatter/histogram plots
@@ -706,6 +735,7 @@ def train_gp_worker(gpu_id, X, Y, X_val, Y_val, data_min, data_max,
         "best_train_loss": best_train_loss,
         "best_val_loss": best_val_loss,
         "r2_score": r2,
+        "train_r2_score": train_r2,
         "train_losses": train_losses,
         "val_losses": val_losses,
         "lengthscales": lengthscales,
