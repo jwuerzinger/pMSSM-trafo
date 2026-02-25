@@ -53,6 +53,7 @@ from pmssm import (
     train_model_worker,
     # Visualization
     plot_data_histograms,
+    plot_parallel_coordinates,
     plot_iteration_metrics,
     # Logging
     setup_logging,
@@ -507,15 +508,17 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
         logger.info(f"AL: n_train={len(idx_train_al)}, n_val={len(idx_val_al)}")
         logger.info(f"Baseline: n_train={len(idx_train_base)}, n_val={len(idx_val_base)}")
 
-        # Plot data distribution histograms for AL
+        # Plot data distribution histograms and parallel coordinates for AL
         al_hist_dir = iter_plots_dir / "al"
         al_hist_dir.mkdir(parents=True, exist_ok=True)
         plot_data_histograms(X_combined, Y_combined, idx_train_al, idx_val_al, al_hist_dir, "AL", iteration, logger)
+        plot_parallel_coordinates(X_combined, idx_train_al, idx_val_al, al_hist_dir, "AL", iteration, logger)
 
-        # Plot data distribution histograms for Baseline
+        # Plot data distribution histograms and parallel coordinates for Baseline
         baseline_hist_dir = iter_plots_dir / "baseline"
         baseline_hist_dir.mkdir(parents=True, exist_ok=True)
         plot_data_histograms(X_baseline_combined, Y_baseline_combined, idx_train_base, idx_val_base, baseline_hist_dir, "Baseline", iteration, logger)
+        plot_parallel_coordinates(X_baseline_combined, idx_train_base, idx_val_base, baseline_hist_dir, "Baseline", iteration, logger)
 
         # Plot new-points-only histograms for baseline (iteration 2+)
         if iteration > 1 and len(new_idx) > 0:
@@ -846,32 +849,57 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
             if collected_X:
                 new_X = torch.cat(collected_X)
                 new_Y = torch.cat(collected_Y)
-                logger.info(f"Total generated: {len(new_X)} valid training points across {min(attempt + 1, max_gen_attempts)} attempt(s)")
+                # Deduplicate: identical X rows from SPheno rounding can leak across train/val
+                _, unique_idx = np.unique(new_X.numpy(), axis=0, return_index=True)
+                if len(unique_idx) < len(new_X):
+                    logger.info(f"Removing {len(new_X) - len(unique_idx)} duplicate generated points")
+                    unique_idx = torch.from_numpy(np.sort(unique_idx))
+                    new_X = new_X[unique_idx]
+                    new_Y = new_Y[unique_idx]
+                logger.info(f"Total generated: {len(new_X)} unique training points across {min(attempt + 1, max_gen_attempts)} attempt(s)")
                 all_selected_points[-1]["n_generated"] = len(new_X)
             else:
                 logger.warning("No valid models generated after all attempts")
 
         # Augment AL data with newly generated points, split 80/20 into train/val
         if new_X is not None and new_Y is not None and len(new_X) > 0:
-            # Shuffle before splitting to avoid ordering bias from generation attempts
-            perm_new = torch.randperm(len(new_X))
-            new_X = new_X[perm_new]
-            new_Y = new_Y[perm_new]
-            n_new_val = max(1, int(len(new_X) * val_fraction))
-            n_new_train = len(new_X) - n_new_val
-            logger.info(f"Augmenting AL: +{n_new_train} train, +{n_new_val} val "
-                        f"(train: {len(X)}->{len(X)+n_new_train}, val: {len(X_val)}->{len(X_val)+n_new_val})")
-            X = torch.cat([X, new_X[:n_new_train]], dim=0)
-            Y = torch.cat([Y, new_Y[:n_new_train]], dim=0)
-            X_val = torch.cat([X_val, new_X[n_new_train:]], dim=0)
-            Y_val = torch.cat([Y_val, new_Y[n_new_train:]], dim=0)
+            # Remove new points that duplicate existing train or val data
+            existing = torch.cat([X, X_val], dim=0).numpy()
+            new_np = new_X.numpy()
+            combined = np.concatenate([existing, new_np], axis=0)
+            _, first_idx = np.unique(combined, axis=0, return_index=True)
+            novel_mask = np.zeros(len(new_np), dtype=bool)
+            for idx in first_idx:
+                if idx >= len(existing):
+                    novel_mask[idx - len(existing)] = True
+            n_existing_dups = len(new_X) - novel_mask.sum()
+            if n_existing_dups > 0:
+                logger.info(f"Removing {n_existing_dups} generated points that duplicate existing data")
+                new_X = new_X[novel_mask]
+                new_Y = new_Y[novel_mask]
 
-            # Plot new-points-only histograms for AL
-            idx_train_al_new = torch.arange(n_new_train)
-            idx_val_al_new = torch.arange(n_new_train, len(new_X))
-            plot_data_histograms(new_X, new_Y, idx_train_al_new, idx_val_al_new,
-                                 al_hist_dir, "AL_new", iteration, logger,
-                                 fixed_axes=True)
+            if len(new_X) == 0:
+                logger.warning("All generated points were duplicates of existing data")
+            else:
+                # Shuffle before splitting to avoid ordering bias from generation attempts
+                perm_new = torch.randperm(len(new_X))
+                new_X = new_X[perm_new]
+                new_Y = new_Y[perm_new]
+                n_new_val = max(1, int(len(new_X) * val_fraction))
+                n_new_train = len(new_X) - n_new_val
+                logger.info(f"Augmenting AL: +{n_new_train} train, +{n_new_val} val "
+                            f"(train: {len(X)}->{len(X)+n_new_train}, val: {len(X_val)}->{len(X_val)+n_new_val})")
+                X = torch.cat([X, new_X[:n_new_train]], dim=0)
+                Y = torch.cat([Y, new_Y[:n_new_train]], dim=0)
+                X_val = torch.cat([X_val, new_X[n_new_train:]], dim=0)
+                Y_val = torch.cat([Y_val, new_Y[n_new_train:]], dim=0)
+
+                # Plot new-points-only histograms for AL
+                idx_train_al_new = torch.arange(n_new_train)
+                idx_val_al_new = torch.arange(n_new_train, len(new_X))
+                plot_data_histograms(new_X, new_Y, idx_train_al_new, idx_val_al_new,
+                                     al_hist_dir, "AL_new", iteration, logger,
+                                     fixed_axes=True)
 
         # Update previous checkpoints for warm-starting next iteration
         prev_al_checkpoint = al_checkpoint_path

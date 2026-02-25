@@ -324,6 +324,96 @@ def plot_data_histograms(X, Y, idx_train, idx_val, output_dir, model_name, itera
         logger.info(f"{model_name} histograms saved to {output_dir}")
 
 
+def plot_parallel_coordinates(X, idx_train, idx_val, output_dir, model_name, iteration, logger,
+                              max_lines=500):
+    """
+    Plot parallel coordinate chart for input parameters (train vs validation).
+
+    Only non-fixed parameters (where lo < hi in PARAM_RANGES) are shown.
+    Values are normalized to [0, 1] using PARAM_RANGES for comparability.
+
+    Args:
+        X: Full input tensor (N, 19) in physical units.
+        idx_train: Training indices.
+        idx_val: Validation indices.
+        output_dir: Directory to save the plot.
+        model_name: Name identifier (e.g., "AL", "Baseline").
+        iteration: Current iteration number.
+        logger: Logger instance.
+        max_lines: Maximum number of lines per set (train/val) to avoid clutter.
+    """
+    output_dir = Path(output_dir)
+
+    X_train = X[idx_train].numpy() if hasattr(X, 'numpy') else np.asarray(X[idx_train])
+    X_val = X[idx_val].numpy() if hasattr(X, 'numpy') else np.asarray(X[idx_val])
+
+    # Select only non-fixed parameters
+    var_indices = []
+    var_names = []
+    var_lo = []
+    var_hi = []
+    for i, key in enumerate(PARAM_ORDER):
+        lo, hi = PARAM_RANGES[key]
+        if lo < hi:
+            var_indices.append(i)
+            var_names.append(key.replace("IN_", ""))
+            var_lo.append(lo)
+            var_hi.append(hi)
+
+    if not var_indices:
+        return
+
+    var_lo = np.array(var_lo)
+    var_hi = np.array(var_hi)
+    n_axes = len(var_indices)
+
+    # Extract and normalize to [0, 1]
+    X_train_sel = X_train[:, var_indices]
+    X_val_sel = X_val[:, var_indices]
+    X_train_norm = (X_train_sel - var_lo) / (var_hi - var_lo)
+    X_val_norm = (X_val_sel - var_lo) / (var_hi - var_lo)
+
+    # Subsample if too many lines
+    if len(X_train_norm) > max_lines:
+        idx = np.random.choice(len(X_train_norm), max_lines, replace=False)
+        X_train_norm = X_train_norm[idx]
+    if len(X_val_norm) > max_lines:
+        idx = np.random.choice(len(X_val_norm), max_lines, replace=False)
+        X_val_norm = X_val_norm[idx]
+
+    fig, ax = plt.subplots(figsize=(max(14, n_axes * 1.2), 6))
+    xs = np.arange(n_axes)
+
+    for row in X_train_norm:
+        ax.plot(xs, row, color='blue', alpha=0.03, linewidth=0.5)
+    for row in X_val_norm:
+        ax.plot(xs, row, color='orange', alpha=0.06, linewidth=0.5)
+
+    # Dummy lines for the legend
+    ax.plot([], [], color='blue', alpha=0.6, linewidth=1.5, label='Train')
+    ax.plot([], [], color='orange', alpha=0.6, linewidth=1.5, label='Val')
+
+    ax.set_xticks(xs)
+    ax.set_xticklabels(var_names, rotation=45, ha='right', fontsize=9)
+    ax.set_ylabel('Normalized value [0, 1]', fontsize=11)
+    ax.set_ylim(-0.05, 1.05)
+    ax.set_title(f'{model_name} Parallel Coordinates — Iteration {iteration}', fontsize=14)
+    ax.legend(fontsize=11, loc='upper right')
+    ax.grid(True, alpha=0.3, axis='y')
+
+    # Draw vertical axis lines
+    for x in xs:
+        ax.axvline(x, color='grey', linewidth=0.5, alpha=0.5)
+
+    plt.tight_layout()
+    plot_path = output_dir / f'{model_name.lower()}_parallel_coords_iter{iteration:03d}.png'
+    plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+    plt.close()
+
+    if logger:
+        logger.info(f"{model_name} parallel coordinates saved to {output_dir}")
+
+
 def plot_iteration_metrics(iterations, al_metrics, baseline_metrics, output_dir, logger):
     """
     Plot validation loss, R² score, and dataset sizes across active learning iterations.

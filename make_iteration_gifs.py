@@ -163,6 +163,7 @@ def generate_gifs(run_dir, fps=2, logger=None):
     plot_types = [
         ("al_input_histograms_*.png", "baseline_input_histograms_*.png", "input_histograms"),
         ("al_target_histogram_*.png", "baseline_target_histogram_*.png", "target_histogram"),
+        ("al_parallel_coords_*.png", "baseline_parallel_coords_*.png", "parallel_coords"),
         ("al_new_input_histograms_*.png", "baseline_new_input_histograms_*.png", "new_input_histograms"),
         ("al_new_target_histogram_*.png", "baseline_new_target_histogram_*.png", "new_target_histogram"),
         ("*_true_vs_pred_train.png", "*_true_vs_pred_train.png", "true_vs_pred_train"),
