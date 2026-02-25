@@ -2,6 +2,21 @@
 
 Machine learning models for predicting pMSSM (phenomenological Minimal Supersymmetric Standard Model) observables, with active learning pipelines for efficient data collection.
 
+## Table of Contents
+
+- [Overview](#overview)
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [Models](#models)
+- [Active Learning Pipeline](#active-learning-pipeline)
+- [GP Active Learning Pipeline](#gp-active-learning-pipeline)
+- [Batch Acquisition Strategy](#batch-acquisition-strategy)
+- [Project Structure](#project-structure)
+- [Output](#output)
+- [Multi-GPU Training](#multi-gpu-training)
+- [Documentation](#documentation)
+- [License](#license)
+
 ## Overview
 
 This project trains and compares neural network and Gaussian Process architectures to predict dark matter relic density (Ωh²) and other observables from 19 pMSSM input parameters. Two active learning pipelines intelligently select the most informative parameter points for expensive physics simulations (SPheno + micromegas).
