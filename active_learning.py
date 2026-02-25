@@ -24,6 +24,8 @@ import yaml
 import torch
 from torch.utils.data import DataLoader
 
+from sklearn.metrics import mean_squared_error, r2_score
+
 # Import from unified pmssm package
 from pmssm import (
     # Configuration
@@ -657,8 +659,6 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
 
         # Compute comprehensive metrics if requested
         if compute_full_metrics:
-            from sklearn.metrics import mean_squared_error, r2_score
-            import numpy as np
 
             # Get validation predictions
             model.eval()
