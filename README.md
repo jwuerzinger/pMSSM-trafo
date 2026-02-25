@@ -146,12 +146,14 @@ pixi run python active_learning.py \
 for each iteration:
     1. Train AL model on current dataset
     2. Train baseline model on random samples (for comparison)
-    3. Generate candidate points in pMSSM parameter space
-    4. Compute uncertainty using MC Dropout
-    5. Select top-K most uncertain points
+    3. Generate candidate pool via Latin Hypercube Sampling
+    4. Score candidates using uncertainty + proximity weighting
+    5. Select batch via iterative entropy-based selection (see below)
     6. [Optional] Generate new models via Run3ModelGen
     7. Add generated data to AL training set
 ```
+
+See [Batch Acquisition Strategy](#batch-acquisition-strategy) for details on steps 3-5.
 
 ### Output
 
@@ -356,6 +358,78 @@ active_learning_gp_output/
 ### Documentation
 
 See [doc/gp_integration_plan.md](doc/gp_integration_plan.md) for progress tracking and [doc/gp_pipeline_comparison.md](doc/gp_pipeline_comparison.md) for full feature reference and CLI options.
+
+## Batch Acquisition Strategy
+
+Both pipelines use **entropy-based batch selection** (default) to choose informative, diverse batches of points for simulation. The strategy has three stages.
+
+### Stage 1: Uncertainty Estimation
+
+| Pipeline | Method | How It Works |
+|----------|--------|-------------|
+| **Transformer** | MC Dropout | Run T stochastic forward passes (default T=30) with dropout active; uncertainty = variance across passes |
+| **GP** | Posterior variance | Single forward pass through the GP likelihood gives analytical mean and variance |
+
+### Stage 2: Candidate Scoring and Pool Pre-filtering
+
+1. **Candidate generation**: A pool of `n_candidates` points (default 20,000) is generated via Latin Hypercube Sampling across the 19D parameter space for uniform coverage.
+
+2. **Proximity weighting** (optional, enabled by default): Candidates are weighted by proximity to the decision boundary (observed relic density threshold, 0.12):
+
+   ```
+   proximity = exp(-((pred_mean - threshold)^2) / sigma)
+   weighted_variance = proximity * variance
+   ```
+
+   This focuses acquisition on the physically relevant region rather than uninformative high-variance areas far from the target.
+
+3. **Pool pre-filtering**: The top candidates by weighted variance are retained to reduce the covariance computation:
+
+   | Pipeline | Strategy | Default Pool Size | Reason |
+   |----------|----------|-------------------|--------|
+   | **GP** | Value-based (`--tolerance-sampling`) | 1M candidates evaluated, filtered near threshold | Single forward pass per point (cheap) |
+   | **Transformer** | Variance-based (`--entropy-pool-size`) | 1,500 | MC Dropout requires T forward passes (expensive) |
+
+### Stage 3: Iterative Entropy-Based Batch Selection
+
+The core algorithm selects `n_select` points that are jointly informative — not just individually uncertain, but diverse relative to each other.
+
+**Building the covariance matrix** over the focused pool:
+- *Transformer*: Sample covariance from T MC Dropout predictions: `C = (X - X̄)^T (X - X̄) / (T - 1)`
+- *GP*: Full posterior covariance from the GP likelihood
+
+**Iterative selection** (implemented in `EntropySelectionStrategy`):
+
+1. Compute the smoothed entropy for each candidate individually. Select the candidate with the highest entropy as the first point.
+
+2. For each remaining slot in the batch:
+   - For every unselected candidate, compute the **conditional batch entropy** — the information gain from adding that candidate *given the already-selected set*. This uses block matrix conditioning on the joint covariance:
+     ```
+     Cov = [[C_selected,  C_cross ],
+            [C_cross^T,   C_new   ]]
+     ```
+   - The batch entropy formula is: `log|Sigma + I| - log|Sigma + 2I| + n * log(2)`
+   - Select the next point via **Gibbs sampling** with temperature beta (default 50, quasi-deterministic).
+
+3. Repeat until `n_select` points are chosen.
+
+**Why this ensures diversity**: After selecting a point, its contribution to the joint uncertainty is "used up" — nearby candidates with correlated predictions see their conditional entropy reduced. The algorithm naturally spreads selections across the uncertainty landscape rather than clustering them in a single high-variance region.
+
+### Acquisition Hyperparameters
+
+| Parameter | Default | CLI Flag | Description |
+|-----------|---------|----------|-------------|
+| Selection strategy | `entropy_batch` | `--selection-strategy` | `entropy_batch` (diverse) or `top_k` (greedy) |
+| MC samples | 30 | `--mc-samples` | Forward passes for MC Dropout uncertainty |
+| Candidates | 20,000 | `--n-candidates` | LHS candidate pool size |
+| Points per iteration | 10 | `--n-select` | Batch size to select |
+| Entropy pool size | 1,500 | `--entropy-pool-size` | Pre-filtered pool for covariance (Transformer) |
+| Proximity sampling | 0.1 | `--proximity-sampling` | Gaussian width for threshold focus (0 = disabled) |
+| Entropy blur | 0.15 | `--entropy-blur` | Smoothing for numerical stability |
+| Entropy beta | 50.0 | `--entropy-beta` | Gibbs temperature (higher = more deterministic) |
+| Tolerance sampling | 1.0 | `--tolerance-sampling` | Value-based pre-filter width (GP only) |
+
+See [Implementation Details](doc/IMPLEMENTATION_DETAILS.md) for proximity weighting analysis and pre-filtering strategy comparison.
 
 ## Project Structure
 
