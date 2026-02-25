@@ -25,7 +25,5 @@
     --entropy-pool-size 2_000 \
     --gen-workers 20 \
     --warm-starting \
-    --early-stopping \
-    --output-dir active_learning_output_no_proximity_weighting \
-    --proximity-sampling 0.0
+    --early-stopping
     

@@ -622,6 +622,11 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, v
     prev_al_checkpoint = None
     prev_baseline_checkpoint = None
 
+    # Persistent baseline augmentation indices (grows each iteration)
+    baseline_add_indices = torch.tensor([], dtype=torch.long)
+    prev_n_add_train = 0
+    prev_n_add_val = 0
+
     for iteration in range(1, n_iterations + 1):
         logger.info(f"=== GP Active Learning Iteration {iteration} ===")
 
@@ -639,32 +644,49 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, v
             logger.info(f"Iteration 1: Both models use identical data "
                        f"({len(X_baseline_train)} train + {len(X_baseline_val)} val)")
         else:
-            # Baseline grows by sampling from X_full (excluding reserved indices),
-            # matching the exact train/val counts that AL has accumulated.
+            # Iteration 2+: Baseline grows incrementally by sampling NEW random
+            # points from X_full, keeping all previously sampled points.
             n_add_train = len(X) - n_train_init
             n_add_val = len(X_val) - n_val_init
-            n_al_new_total = n_add_train + n_add_val
+            n_new_train = n_add_train - prev_n_add_train
+            n_new_val = n_add_val - prev_n_add_val
+            n_new_total = n_new_train + n_new_val
+
             all_indices = torch.arange(len(X_full))
             mask = torch.ones(len(X_full), dtype=torch.bool)
             mask[initial_al_indices] = False
+            if len(baseline_add_indices) > 0:
+                mask[baseline_add_indices] = False
             available_indices = all_indices[mask]
 
-            logger.info(f"Baseline sampling: need {n_al_new_total} additional "
-                       f"({n_add_train} train + {n_add_val} val), "
+            logger.info(f"Baseline sampling: need {n_new_total} new points "
+                       f"({n_new_train} train + {n_new_val} val), "
                        f"{len(available_indices)} available from X_full")
 
-            if n_al_new_total <= len(available_indices):
-                add_idx = available_indices[
-                    torch.randperm(len(available_indices))[:n_al_new_total]
+            if n_new_total <= len(available_indices):
+                new_idx = available_indices[
+                    torch.randperm(len(available_indices))[:n_new_total]
                 ]
             else:
                 logger.info(f"Baseline: sampling with replacement "
-                           f"({n_al_new_total} needed, {len(available_indices)} available)")
-                add_idx = available_indices[
-                    torch.randint(0, len(available_indices), (n_al_new_total,))
+                           f"({n_new_total} needed, {len(available_indices)} available)")
+                new_idx = available_indices[
+                    torch.randint(0, len(available_indices), (n_new_total,))
                 ]
-            X_add = X_full[add_idx]
-            Y_add = Y_full[add_idx]
+
+            # Append new indices to persistent baseline indices
+            # Layout: [train_indices... | val_indices...]
+            baseline_add_indices = torch.cat([
+                baseline_add_indices[:prev_n_add_train],
+                new_idx[:n_new_train],
+                baseline_add_indices[prev_n_add_train:],
+                new_idx[n_new_train:],
+            ])
+            prev_n_add_train = n_add_train
+            prev_n_add_val = n_add_val
+
+            X_add = X_full[baseline_add_indices]
+            Y_add = Y_full[baseline_add_indices]
 
             X_baseline_train = torch.cat([X[:n_train_init], X_add[:n_add_train]])
             Y_baseline_train = torch.cat([Y[:n_train_init], Y_add[:n_add_train]])
@@ -705,6 +727,16 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, v
         idx_val_base_plot = torch.arange(len(X_baseline_train), len(X_base_combined))
         plot_data_histograms(X_base_combined, Y_base_combined, idx_train_base_plot, idx_val_base_plot,
                              baseline_hist_dir, "Baseline", iteration, logger)
+
+        # Plot new-points-only histograms for baseline (iteration 2+)
+        if iteration > 1 and len(new_idx) > 0:
+            X_base_new = X_full[new_idx]
+            Y_base_new = Y_full[new_idx]
+            idx_train_base_new = torch.arange(n_new_train)
+            idx_val_base_new = torch.arange(n_new_train, len(new_idx))
+            plot_data_histograms(X_base_new, Y_base_new, idx_train_base_new, idx_val_base_new,
+                                 baseline_hist_dir, "Baseline_new", iteration, logger,
+                                 fixed_axes=True)
 
         al_checkpoint_path = iter_dir / "al_model_checkpoint.pt"
         baseline_checkpoint_path = iter_dir / "baseline_model_checkpoint.pt"
@@ -1048,6 +1080,13 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, v
             X_val = torch.cat([X_val, new_X[n_new_train:]], dim=0)
             Y_val = torch.cat([Y_val, new_Y[n_new_train:]], dim=0)
 
+            # Plot new-points-only histograms for AL
+            idx_train_al_new = torch.arange(n_new_train)
+            idx_val_al_new = torch.arange(n_new_train, len(new_X))
+            plot_data_histograms(new_X, new_Y, idx_train_al_new, idx_val_al_new,
+                                 al_hist_dir, "AL_new", iteration, logger,
+                                 fixed_axes=True)
+
         prev_al_checkpoint = al_checkpoint_path
         prev_baseline_checkpoint = baseline_checkpoint_path
 
@@ -1076,6 +1115,9 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, v
     if n_iterations > 1:
         plot_iteration_metrics(iteration_numbers, al_metrics, baseline_metrics,
                               output_dir, logger)
+
+        from make_iteration_gifs import generate_gifs
+        generate_gifs(output_dir, logger=logger)
     else:
         logger.info(f"Single iteration - AL: val_loss={al_val_losses[0]:.6f}, "
                    f"R²={al_r2_scores[0]:.4f}")

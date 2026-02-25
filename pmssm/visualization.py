@@ -16,7 +16,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
 
-from .config import PARAM_ORDER
+from .config import PARAM_ORDER, PARAM_RANGES, TARGET_CONFIG
 
 
 # ===== Utilities =====
@@ -227,7 +227,8 @@ def compare_random_predictions(y_true, y_pred, mode, model_name, n_points=3, log
 
 # ===== Data Distribution Plots =====
 
-def plot_data_histograms(X, Y, idx_train, idx_val, output_dir, model_name, iteration, logger):
+def plot_data_histograms(X, Y, idx_train, idx_val, output_dir, model_name, iteration, logger,
+                         fixed_axes=False):
     """
     Plot histograms of all input parameters and target for training and validation sets.
 
@@ -242,6 +243,8 @@ def plot_data_histograms(X, Y, idx_train, idx_val, output_dir, model_name, itera
         model_name: Name identifier (e.g., "AL", "Baseline")
         iteration: Current iteration number
         logger: Logger instance
+        fixed_axes: If True, fix x-axis ranges (from PARAM_RANGES / [0,1] for target)
+                    and use fixed bin edges so plots are comparable across iterations.
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -249,8 +252,8 @@ def plot_data_histograms(X, Y, idx_train, idx_val, output_dir, model_name, itera
     # Convert to numpy
     X_train = X[idx_train].numpy() if hasattr(X, 'numpy') else X[idx_train]
     X_val = X[idx_val].numpy() if hasattr(X, 'numpy') else X[idx_val]
-    Y_train = Y[idx_train].squeeze().numpy() if hasattr(Y, 'numpy') else Y[idx_train].squeeze()
-    Y_val = Y[idx_val].squeeze().numpy() if hasattr(Y, 'numpy') else Y[idx_val].squeeze()
+    Y_train = Y[idx_train].reshape(-1).numpy() if hasattr(Y, 'numpy') else np.asarray(Y[idx_train]).reshape(-1)
+    Y_val = Y[idx_val].reshape(-1).numpy() if hasattr(Y, 'numpy') else np.asarray(Y[idx_val]).reshape(-1)
 
     # Plot input parameters
     param_names = [p.replace("IN_", "") for p in PARAM_ORDER]
@@ -266,9 +269,20 @@ def plot_data_histograms(X, Y, idx_train, idx_val, output_dir, model_name, itera
     for i, param_name in enumerate(param_names):
         ax = axes[i]
 
+        # Determine bins and x-limits
+        full_key = PARAM_ORDER[i]  # e.g. "IN_meL"
+        lo, hi = PARAM_RANGES[full_key]
+        if fixed_axes and lo < hi:
+            bins = np.linspace(lo, hi, 31)
+        else:
+            bins = 30
+
         # Plot histograms
-        ax.hist(X_train[:, i], bins=30, alpha=0.5, label='Train', color='blue', density=True)
-        ax.hist(X_val[:, i], bins=30, alpha=0.5, label='Val', color='orange', density=True)
+        ax.hist(X_train[:, i], bins=bins, alpha=0.5, label='Train', color='blue', density=True)
+        ax.hist(X_val[:, i], bins=bins, alpha=0.5, label='Val', color='orange', density=True)
+
+        if fixed_axes and lo < hi:
+            ax.set_xlim(lo, hi)
 
         ax.set_xlabel(param_name, fontsize=10)
         ax.set_ylabel('Density', fontsize=10)
@@ -287,8 +301,13 @@ def plot_data_histograms(X, Y, idx_train, idx_val, output_dir, model_name, itera
 
     # Plot target (MO_Omega) with log Y-axis
     fig, ax = plt.subplots(1, 1, figsize=(8, 6))
-    ax.hist(Y_train, bins=50, alpha=0.5, label='Train', color='blue', density=True)
-    ax.hist(Y_val, bins=50, alpha=0.5, label='Val', color='orange', density=True)
+    target_bins = np.linspace(0, 1, 31) if fixed_axes else 30
+    ax.hist(Y_train, bins=target_bins, alpha=0.5, label='Train', color='blue', density=True)
+    ax.hist(Y_val, bins=target_bins, alpha=0.5, label='Val', color='orange', density=True)
+    ax.axvline(TARGET_CONFIG["DMRD"]["true_value"], color='red', linestyle='--',
+               linewidth=1.5, label=f'Ωh² = {TARGET_CONFIG["DMRD"]["true_value"]}')
+    if fixed_axes:
+        ax.set_xlim(0, 1)
     ax.set_xlabel('MO_Omega (Ωh²)', fontsize=12)
     ax.set_ylabel('Density (log scale)', fontsize=12)
     ax.set_yscale('log')
