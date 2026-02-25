@@ -22,7 +22,7 @@
     --n-iterations 40 \
     --n-select 500 \
     --n-candidates 50_000 \
-    --entropy-pool-size 2_000 \
+    --entropy-pool-size 5_000 \
     --gen-workers 20 \
     --warm-starting \
     --early-stopping
