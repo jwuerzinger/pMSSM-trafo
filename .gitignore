@@ -5,6 +5,7 @@ pixi.lock
 data/
 __pycache__/
 pmssm/__pycache__/
+.vscode/
 plots/
 logs/
 active_learning_output*
