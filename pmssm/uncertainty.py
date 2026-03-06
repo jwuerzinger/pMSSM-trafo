@@ -44,9 +44,15 @@ def compute_uncertainty_mc_dropout(model, X_candidates, stats, n_samples, device
     if logger:
         logger.info(f"Running {n_samples} MC Dropout forward passes...")
 
+    # Batch size limit: PyTorch efficient attention fails above 65535
+    batch_size = 8192
     with torch.no_grad():
         for _ in range(n_samples):
-            y_pred = model(X_norm)
+            if len(X_norm) <= batch_size:
+                y_pred = model(X_norm)
+            else:
+                y_pred = torch.cat([model(X_norm[i:i+batch_size])
+                                    for i in range(0, len(X_norm), batch_size)], dim=0)
             predictions.append(y_pred.cpu())
 
     predictions = torch.stack(predictions, dim=0)  # (T, N, 1)
