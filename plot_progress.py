@@ -53,6 +53,10 @@ def parse_log(log_path):
     baseline_train_losses, baseline_val_losses, baseline_r2_scores, baseline_train_r2_scores = [], [], [], []
     al_on_base_val_losses, al_on_base_val_r2 = [], []
     base_on_al_val_losses, base_on_al_val_r2 = [], []
+    al_on_mcmc_losses, al_on_mcmc_r2 = [], []
+    base_on_mcmc_losses, base_on_mcmc_r2 = [], []
+    al_on_static_losses, al_on_static_r2 = [], []
+    base_on_static_losses, base_on_static_r2 = [], []
     al_n_trains, al_n_vals = [], []
     baseline_n_trains, baseline_n_vals = [], []
 
@@ -77,6 +81,15 @@ def parse_log(log_path):
     cross_re = re.compile(
         r"Cross-eval: AL_on_base_val_loss=([\d.]+), AL_on_base_val_R²=([-\d.]+), "
         r"base_on_al_val_loss=([\d.]+), base_on_al_val_R²=([-\d.]+)"
+    )
+    # Static evaluation lines (optional)
+    mcmc_re = re.compile(
+        r"MCMC eval: AL_loss=([\d.]+), AL_R²=([-\d.]+), "
+        r"Base_loss=([\d.]+), Base_R²=([-\d.]+)"
+    )
+    static_re = re.compile(
+        r"Static random eval: AL_loss=([\d.]+), AL_R²=([-\d.]+), "
+        r"Base_loss=([\d.]+), Base_R²=([-\d.]+)"
     )
     # Auto-detect pipeline type
     gp_header_re = re.compile(r"GP Active Learning")
@@ -134,6 +147,22 @@ def parse_log(log_path):
                 al_on_base_val_r2.append(float(m.group(2)))
                 base_on_al_val_losses.append(float(m.group(3)))
                 base_on_al_val_r2.append(float(m.group(4)))
+                continue
+
+            m = mcmc_re.search(line)
+            if m:
+                al_on_mcmc_losses.append(float(m.group(1)))
+                al_on_mcmc_r2.append(float(m.group(2)))
+                base_on_mcmc_losses.append(float(m.group(3)))
+                base_on_mcmc_r2.append(float(m.group(4)))
+                continue
+
+            m = static_re.search(line)
+            if m:
+                al_on_static_losses.append(float(m.group(1)))
+                al_on_static_r2.append(float(m.group(2)))
+                base_on_static_losses.append(float(m.group(3)))
+                base_on_static_r2.append(float(m.group(4)))
 
     return dict(
         iterations=iterations,
@@ -149,6 +178,14 @@ def parse_log(log_path):
         al_on_base_val_r2=al_on_base_val_r2,
         base_on_al_val_losses=base_on_al_val_losses,
         base_on_al_val_r2=base_on_al_val_r2,
+        al_on_mcmc_losses=al_on_mcmc_losses,
+        al_on_mcmc_r2=al_on_mcmc_r2,
+        base_on_mcmc_losses=base_on_mcmc_losses,
+        base_on_mcmc_r2=base_on_mcmc_r2,
+        al_on_static_losses=al_on_static_losses,
+        al_on_static_r2=al_on_static_r2,
+        base_on_static_losses=base_on_static_losses,
+        base_on_static_r2=base_on_static_r2,
         al_n_trains=al_n_trains,
         al_n_vals=al_n_vals,
         baseline_n_trains=baseline_n_trains,
@@ -184,6 +221,14 @@ def plot(data, output_path):
     if has_cross:
         ax1.plot(iters, data["al_on_base_val_losses"],   "g:", lw=2, marker="^", ms=6, label="AL on Base Val")
         ax1.plot(iters, data["base_on_al_val_losses"],   "g--", lw=2, marker="v", ms=6, label="Base on AL Val")
+    has_mcmc = len(data["al_on_mcmc_losses"]) == len(iters)
+    if has_mcmc:
+        ax1.plot(iters, data["al_on_mcmc_losses"],   "m-",  lw=2, marker="^", ms=5, label="AL on MCMC")
+        ax1.plot(iters, data["base_on_mcmc_losses"], "m--", lw=2, marker="v", ms=5, label="Base on MCMC")
+    has_static = len(data["al_on_static_losses"]) == len(iters)
+    if has_static:
+        ax1.plot(iters, data["al_on_static_losses"],   "c-",  lw=2, marker="^", ms=5, label="AL on Static Rnd")
+        ax1.plot(iters, data["base_on_static_losses"], "c--", lw=2, marker="v", ms=5, label="Base on Static Rnd")
     ax1.set_xlabel("Iteration", fontsize=12)
     ax1.set_ylabel("Best Loss (MSE)", fontsize=12)
     ax1.set_title("Train/Validation Loss vs Iteration", fontsize=14)
@@ -206,6 +251,12 @@ def plot(data, output_path):
     if has_cross:
         ax2.plot(iters, data["al_on_base_val_r2"],        "g:", lw=2, marker="^", ms=6, label="AL on Base Val")
         ax2.plot(iters, data["base_on_al_val_r2"],        "g--", lw=2, marker="v", ms=6, label="Base on AL Val")
+    if has_mcmc:
+        ax2.plot(iters, data["al_on_mcmc_r2"],   "m-",  lw=2, marker="^", ms=5, label="AL on MCMC")
+        ax2.plot(iters, data["base_on_mcmc_r2"], "m--", lw=2, marker="v", ms=5, label="Base on MCMC")
+    if has_static:
+        ax2.plot(iters, data["al_on_static_r2"],   "c-",  lw=2, marker="^", ms=5, label="AL on Static Rnd")
+        ax2.plot(iters, data["base_on_static_r2"], "c--", lw=2, marker="v", ms=5, label="Base on Static Rnd")
     ax2.set_xlabel("Iteration", fontsize=12)
     ax2.set_ylabel("R² Score", fontsize=12)
     ax2.set_title("R² Score vs Iteration", fontsize=14)
@@ -220,6 +271,10 @@ def plot(data, output_path):
         all_r2 += data["baseline_train_r2_scores"]
     if has_cross:
         all_r2 += data["al_on_base_val_r2"] + data["base_on_al_val_r2"]
+    if has_mcmc:
+        all_r2 += data["al_on_mcmc_r2"] + data["base_on_mcmc_r2"]
+    if has_static:
+        all_r2 += data["al_on_static_r2"] + data["base_on_static_r2"]
     finite_r2 = [v for v in all_r2 if v is not None and v == v and abs(v) != float("inf")]
     if finite_r2:
         ax2.set_ylim(min(0, min(finite_r2) - 0.1), 1.05)

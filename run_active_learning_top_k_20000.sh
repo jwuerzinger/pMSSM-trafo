@@ -20,13 +20,15 @@
     --generate-data \
     --n-samples 2000 \
     --n-iterations 40 \
-    --n-select 500 \
-    --n-candidates 50_000 \
+    --n-candidates 100_000 \
     --entropy-pool-size 5_000 \
     --gen-workers 20 \
     --mcmc-data-dir data/19250082 \
     --static-eval-size 100_000 \
     --warm-starting \
     --early-stopping \
-    --gpu-ids 2,3
+    --selection-strategy top_k \
+    --n-select 20_000 \
+    --output-dir active_learning_output_top_k_n_select_20k \
+    --gpu-ids 0,1
     

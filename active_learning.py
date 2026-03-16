@@ -35,6 +35,7 @@ from pmssm import (
     TARGET_CONFIG,
     # Data operations
     load_pmssm_data,
+    load_mcmc_data,
     make_split,
     compute_stats,
     PMSSMDataset,
@@ -198,7 +199,13 @@ def load_config_with_sweep(config_file, sweep_index=None):
               help="Compute comprehensive evaluation metrics (accuracy, MSE, RMSE).")
 @click.option('--y-transform', default='log', type=click.Choice(['zscore', 'log']),
               help="Y transformation: 'log' (default, recommended) or 'zscore' (legacy).")
-def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, dropout, n_datasets, n_samples, val_fraction, output_dir, generate_data, min_gen_fraction, max_gen_attempts, gen_workers, selection_strategy, entropy_blur, entropy_beta, entropy_pool_size, candidate_generation, proximity_sampling, target_value, config_file, sweep_index, early_stopping, patience, warm_starting, eval_data_path, compute_full_metrics, y_transform):
+@click.option('--mcmc-data-dir', default=None, type=str,
+              help="Directory containing MCMC ROOT files for static evaluation (e.g., data/19250082).")
+@click.option('--static-eval-size', default=100_000, type=int,
+              help="Number of models to reserve from the random pool as a static evaluation set (default: 100000).")
+@click.option('--gpu-ids', default='2,3', type=str,
+              help="Comma-separated GPU IDs for AL and baseline models (default: 2,3).")
+def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, dropout, n_datasets, n_samples, val_fraction, output_dir, generate_data, min_gen_fraction, max_gen_attempts, gen_workers, selection_strategy, entropy_blur, entropy_beta, entropy_pool_size, candidate_generation, proximity_sampling, target_value, config_file, sweep_index, early_stopping, patience, warm_starting, eval_data_path, compute_full_metrics, y_transform, mcmc_data_dir, static_eval_size, gpu_ids):
     """
     Active learning pipeline for pMSSM relic density prediction.
 
@@ -327,16 +334,25 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
         logger.info(f"  max_gen_attempts: {max_gen_attempts}")
         logger.info(f"  gen_workers: {gen_workers}")
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    gpu_id_list = [int(x.strip()) for x in gpu_ids.split(',')]
+    AL_GPU_ID = gpu_id_list[0]
+    BASELINE_GPU_ID = gpu_id_list[1] if len(gpu_id_list) > 1 else gpu_id_list[0]
+    device = f"cuda:{AL_GPU_ID}" if torch.cuda.is_available() else "cpu"
     logger.info(f"Device: {device}")
     if torch.cuda.is_available():
-        logger.info(f"GPU: {torch.cuda.get_device_name(0)}")
+        logger.info(f"GPU: {torch.cuda.get_device_name(AL_GPU_ID)}")
 
     # Load initial data
     logger.info("Loading data...")
     plots_dir = output_dir / "plots"
     plots_dir.mkdir(parents=True, exist_ok=True)
     X, Y = load_pmssm_data(n_datasets=n_datasets, logger=logger, plot_dir=str(plots_dir))
+
+    # Load MCMC evaluation dataset if provided
+    X_mcmc, Y_mcmc = None, None
+    if mcmc_data_dir is not None:
+        X_mcmc, Y_mcmc = load_mcmc_data(data_dir=mcmc_data_dir, logger=logger)
+        logger.info(f"MCMC evaluation dataset: {len(X_mcmc)} samples from {mcmc_data_dir}")
 
     # Store full dataset for baseline random sampling (before any truncation)
     X_full, Y_full = X.clone(), Y.clone()
@@ -376,9 +392,30 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
 
     logger.info(f"Baseline pool: X_full={X_full.shape}, reserved [0..{initial_reserved-1}] excluded from sampling")
 
+    # Carve out static random evaluation set from X_full (after initial reserved block)
+    X_static_random, Y_static_random = None, None
+    static_random_indices = torch.tensor([], dtype=torch.long)
+    if static_eval_size > 0:
+        available_for_static = len(X_full) - initial_reserved
+        actual_static_size = min(static_eval_size, available_for_static)
+        if actual_static_size < static_eval_size:
+            logger.warning(
+                f"Requested static_eval_size={static_eval_size} but only "
+                f"{available_for_static} available after reserving {initial_reserved} "
+                f"for initial AL data. Using {actual_static_size}."
+            )
+        if actual_static_size > 0:
+            g_static = torch.Generator().manual_seed(123)
+            perm_static = torch.randperm(available_for_static, generator=g_static)
+            static_random_indices = perm_static[:actual_static_size] + initial_reserved
+            X_static_random = X_full[static_random_indices].clone()
+            Y_static_random = Y_full[static_random_indices].clone()
+            logger.info(
+                f"Static random evaluation set: {len(X_static_random)} samples "
+                f"(carved from indices {initial_reserved}..{len(X_full)-1})"
+            )
+
     # Determine if we can use parallel training (2+ GPUs for AL + baseline)
-    AL_GPU_ID = 2
-    BASELINE_GPU_ID = 3
     use_parallel = torch.cuda.is_available() and torch.cuda.device_count() >= 2
     if use_parallel:
         logger.info(f"Parallel training enabled: {torch.cuda.device_count()} GPUs available")
@@ -427,6 +464,12 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
     X_eval_full, Y_eval_full = None, None
     eval_r2_scores = []
 
+    # Static evaluation metrics
+    al_on_mcmc_losses, al_on_mcmc_r2 = [], []
+    baseline_on_mcmc_losses, baseline_on_mcmc_r2 = [], []
+    al_on_static_random_losses, al_on_static_random_r2 = [], []
+    baseline_on_static_random_losses, baseline_on_static_random_r2 = [], []
+
     for iteration in range(1, n_iterations + 1):
         logger.info(f"=== Global Iteration {iteration} ===")
 
@@ -459,6 +502,8 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
             all_indices = torch.arange(len(X_full))
             mask = torch.ones(len(X_full), dtype=torch.bool)
             mask[initial_al_indices] = False  # Exclude initial reserved data
+            if len(static_random_indices) > 0:
+                mask[static_random_indices] = False  # Exclude static eval set
             if len(baseline_add_indices) > 0:
                 mask[baseline_add_indices] = False  # Exclude already-sampled baseline points
             available_indices = all_indices[mask]
@@ -513,13 +558,15 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
         # Plot data distribution histograms and parallel coordinates for AL
         al_hist_dir = iter_plots_dir / "al"
         al_hist_dir.mkdir(parents=True, exist_ok=True)
-        plot_data_histograms(X_combined, Y_combined, idx_train_al, idx_val_al, al_hist_dir, "AL", iteration, logger)
+        plot_data_histograms(X_combined, Y_combined, idx_train_al, idx_val_al, al_hist_dir, "AL", iteration, logger,
+                             reference_X=X_mcmc, reference_Y=Y_mcmc, reference_label="MCMC")
         plot_parallel_coordinates(X_combined, idx_train_al, idx_val_al, al_hist_dir, "AL", iteration, logger)
 
         # Plot data distribution histograms and parallel coordinates for Baseline
         baseline_hist_dir = iter_plots_dir / "baseline"
         baseline_hist_dir.mkdir(parents=True, exist_ok=True)
-        plot_data_histograms(X_baseline_combined, Y_baseline_combined, idx_train_base, idx_val_base, baseline_hist_dir, "Baseline", iteration, logger)
+        plot_data_histograms(X_baseline_combined, Y_baseline_combined, idx_train_base, idx_val_base, baseline_hist_dir, "Baseline", iteration, logger,
+                             reference_X=X_static_random, reference_Y=Y_static_random, reference_label="Static Random")
         plot_parallel_coordinates(X_baseline_combined, idx_train_base, idx_val_base, baseline_hist_dir, "Baseline", iteration, logger)
 
         # Plot new-points-only histograms for baseline (iteration 2+)
@@ -629,6 +676,36 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
         al_on_base_val_r2.append(al_cross_r2)
         base_on_al_val_losses.append(base_cross_loss)
         base_on_al_val_r2.append(base_cross_r2)
+
+        # Evaluate on MCMC static dataset
+        if X_mcmc is not None:
+            mcmc_loss_al, mcmc_r2_al = cross_evaluate_transformer(
+                model, stats, X_mcmc, Y_mcmc,
+                y_transform=y_transform, target='DMRD', device=device)
+            mcmc_loss_base, mcmc_r2_base = cross_evaluate_transformer(
+                baseline_model, baseline_stats, X_mcmc, Y_mcmc,
+                y_transform=y_transform, target='DMRD', device=device)
+            al_on_mcmc_losses.append(mcmc_loss_al)
+            al_on_mcmc_r2.append(mcmc_r2_al)
+            baseline_on_mcmc_losses.append(mcmc_loss_base)
+            baseline_on_mcmc_r2.append(mcmc_r2_base)
+            logger.info(f"MCMC eval: AL_loss={mcmc_loss_al:.6f}, AL_R²={mcmc_r2_al:.4f}, "
+                        f"Base_loss={mcmc_loss_base:.6f}, Base_R²={mcmc_r2_base:.4f}")
+
+        # Evaluate on static random dataset
+        if X_static_random is not None:
+            static_loss_al, static_r2_al = cross_evaluate_transformer(
+                model, stats, X_static_random, Y_static_random,
+                y_transform=y_transform, target='DMRD', device=device)
+            static_loss_base, static_r2_base = cross_evaluate_transformer(
+                baseline_model, baseline_stats, X_static_random, Y_static_random,
+                y_transform=y_transform, target='DMRD', device=device)
+            al_on_static_random_losses.append(static_loss_al)
+            al_on_static_random_r2.append(static_r2_al)
+            baseline_on_static_random_losses.append(static_loss_base)
+            baseline_on_static_random_r2.append(static_r2_base)
+            logger.info(f"Static random eval: AL_loss={static_loss_al:.6f}, AL_R²={static_r2_al:.4f}, "
+                        f"Base_loss={static_loss_base:.6f}, Base_R²={static_r2_base:.4f}")
 
         # Evaluate on external dataset if provided
         if eval_data_path is not None:
@@ -915,6 +992,10 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
         'cross_val_r2': al_on_base_val_r2,
         'n_train': al_n_train,
         'n_val': al_n_val,
+        'mcmc_eval_losses': al_on_mcmc_losses,
+        'mcmc_eval_r2': al_on_mcmc_r2,
+        'static_random_eval_losses': al_on_static_random_losses,
+        'static_random_eval_r2': al_on_static_random_r2,
     }
     baseline_metrics = {
         'train_losses': baseline_train_losses,
@@ -925,6 +1006,10 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
         'cross_val_r2': base_on_al_val_r2,
         'n_train': baseline_n_train,
         'n_val': baseline_n_val,
+        'mcmc_eval_losses': baseline_on_mcmc_losses,
+        'mcmc_eval_r2': baseline_on_mcmc_r2,
+        'static_random_eval_losses': baseline_on_static_random_losses,
+        'static_random_eval_r2': baseline_on_static_random_r2,
     }
 
     if n_iterations > 1:
@@ -955,6 +1040,8 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
         },
         "iterations": all_selected_points,
         "final_dataset_size": len(X),
+        "al_metrics": al_metrics,
+        "baseline_metrics": baseline_metrics,
     }
 
     if eval_r2_scores:

@@ -4,46 +4,31 @@ Plot input parameter and target histograms for the MCMC dataset,
 matching the format of the AL iteration plots.
 """
 
-import glob
+import logging
 from pathlib import Path
 
 import numpy as np
-import uproot
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from pmssm.config import PARAM_ORDER, TARGET_CONFIG
+from pmssm.data import load_mcmc_data
 
-
-def load_mcmc_data(data_dir="data/18732958", target="DMRD"):
-    """Load MCMC ROOT data with the same filters as load_pmssm_data."""
-    files = sorted(glob.glob(f"{data_dir}/*.root"))
-    print(f"Found {len(files)} ROOT files in {data_dir}")
-
-    trees = [uproot.open(f)["susy"] for f in files]
-
-    X_raw = np.column_stack([
-        np.concatenate([t[b].array(library="np") for t in trees])
-        for b in PARAM_ORDER
-    ])
-
-    target_branch = TARGET_CONFIG[target]["branch"]
-    Y_raw = np.concatenate([t[target_branch].array(library="np") for t in trees])
-    sp_mh = np.concatenate([t["SP_m_h"].array(library="np") for t in trees])
-
-    mask = (Y_raw > 0) & (Y_raw < 1.0) & (sp_mh != -1)
-    print(f"Filter ({target_branch} > 0 & < 1 & SP_m_h != -1): "
-          f"{mask.sum()} / {len(Y_raw)} samples kept")
-
-    return X_raw[mask], Y_raw[mask]
+logger = logging.getLogger(__name__)
 
 
 def main():
-    output_dir = Path("plots/mcmc_histograms_18732958")
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)-8s] %(message)s")
+
+    output_dir = Path("plots/mcmc_histograms_19250082")
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    X, Y = load_mcmc_data()
+    logger.info("Loading MCMC data...")
+    X_t, Y_t = load_mcmc_data(logger=logger)
+    # Convert tensors to numpy for plotting
+    X, Y = X_t.numpy(), Y_t.squeeze(-1).numpy()
+    logger.info(f"Loaded {len(X)} MCMC samples with {X.shape[1]} parameters")
 
     # --- Input parameter histograms ---
     param_names = [p.replace("IN_", "") for p in PARAM_ORDER]
@@ -70,7 +55,7 @@ def main():
     plot_path = output_dir / "mcmc_input_histograms.png"
     plt.savefig(plot_path, dpi=150, bbox_inches="tight")
     plt.close()
-    print(f"Saved {plot_path}")
+    logger.info(f"Saved {plot_path}")
 
     # --- Target histogram ---
     fig, ax = plt.subplots(1, 1, figsize=(8, 6))
@@ -88,7 +73,7 @@ def main():
     plot_path = output_dir / "mcmc_target_histogram.png"
     plt.savefig(plot_path, dpi=150, bbox_inches="tight")
     plt.close()
-    print(f"Saved {plot_path}")
+    logger.info(f"Saved {plot_path}")
 
 
 if __name__ == "__main__":

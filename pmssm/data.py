@@ -100,6 +100,73 @@ def load_pmssm_data(n_datasets=-1, logger=None, plot_dir="plots", target="DMRD")
     return X, Y
 
 
+def load_mcmc_data(data_dir="data/19250082", target="DMRD", logger=None):
+    """
+    Load MCMC ROOT data with the same filters as load_pmssm_data.
+
+    Args:
+        data_dir: Directory containing MCMC ROOT files
+        target: Target variable name (default: "DMRD")
+        logger: Logger instance for output
+
+    Returns:
+        X: Input tensor (N, 19) in physical units
+        Y: Target tensor (N, 1) in physical units
+    """
+    import uproot
+
+    files = sorted(glob.glob(f"{data_dir}/*.root"))
+    if logger:
+        logger.info(f"Found {len(files)} MCMC ROOT files in {data_dir}")
+
+    target_branch = TARGET_CONFIG[target]["branch"]
+    true_value = TARGET_CONFIG[target]["true_value"]
+
+    # Keep only files whose Omega values straddle the true value
+    # and don't contain any values below omega_min
+    omega_min = 0.04
+    trees = []
+    n_no_straddle = 0
+    n_below_min = 0
+    for f in files:
+        t = uproot.open(f)["susy"]
+        y = t[target_branch].array(library="np")
+        if not (np.any(y < true_value) and np.any(y > true_value)):
+            n_no_straddle += 1
+            continue
+        if np.any(y < omega_min):
+            n_below_min += 1
+            continue
+        trees.append(t)
+
+    if n_no_straddle > 0 or n_below_min > 0:
+        msg = (f"Excluded {n_no_straddle + n_below_min}/{len(files)} MCMC ROOT files: "
+               f"{n_no_straddle} don't straddle {target_branch}={true_value}, "
+               f"{n_below_min} contain values below {omega_min}")
+        if logger:
+            logger.warning(msg)
+
+    X_raw = np.column_stack([
+        np.concatenate([t[b].array(library="np") for t in trees])
+        for b in PARAM_ORDER
+    ])
+
+    Y_raw = np.concatenate([t[target_branch].array(library="np") for t in trees])
+    sp_mh = np.concatenate([t["SP_m_h"].array(library="np") for t in trees])
+
+    mask = (Y_raw > 0) & (Y_raw < 1.0) & (sp_mh != -1)
+    if logger:
+        logger.info(
+            f"MCMC filter ({target_branch} > 0 & < 1 & SP_m_h != -1): "
+            f"{mask.sum()} / {len(Y_raw)} samples kept"
+        )
+
+    X = torch.from_numpy(X_raw[mask]).float()
+    Y = torch.from_numpy(Y_raw[mask]).float().unsqueeze(1)
+
+    return X, Y
+
+
 # ===== Train/Val Splitting =====
 
 def make_split(X, train_split=0.9, seed=42, logger=None):

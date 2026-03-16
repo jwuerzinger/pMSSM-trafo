@@ -228,7 +228,8 @@ def compare_random_predictions(y_true, y_pred, mode, model_name, n_points=3, log
 # ===== Data Distribution Plots =====
 
 def plot_data_histograms(X, Y, idx_train, idx_val, output_dir, model_name, iteration, logger,
-                         fixed_axes=False):
+                         fixed_axes=False,
+                         reference_X=None, reference_Y=None, reference_label="Reference"):
     """
     Plot histograms of all input parameters and target for training and validation sets.
 
@@ -245,6 +246,9 @@ def plot_data_histograms(X, Y, idx_train, idx_val, output_dir, model_name, itera
         logger: Logger instance
         fixed_axes: If True, fix x-axis ranges (from PARAM_RANGES / [0,1] for target)
                     and use fixed bin edges so plots are comparable across iterations.
+        reference_X: Optional reference input data (M, 19) for overlay (e.g., MCMC dataset)
+        reference_Y: Optional reference target data (M, 1) or (M,) for overlay
+        reference_label: Label for the reference data in legends
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -254,6 +258,14 @@ def plot_data_histograms(X, Y, idx_train, idx_val, output_dir, model_name, itera
     X_val = X[idx_val].numpy() if hasattr(X, 'numpy') else X[idx_val]
     Y_train = Y[idx_train].reshape(-1).numpy() if hasattr(Y, 'numpy') else np.asarray(Y[idx_train]).reshape(-1)
     Y_val = Y[idx_val].reshape(-1).numpy() if hasattr(Y, 'numpy') else np.asarray(Y[idx_val]).reshape(-1)
+
+    # Convert reference data if provided
+    X_ref = None
+    Y_ref = None
+    if reference_X is not None:
+        X_ref = reference_X.numpy() if hasattr(reference_X, 'numpy') else np.asarray(reference_X)
+    if reference_Y is not None:
+        Y_ref = reference_Y.reshape(-1).numpy() if hasattr(reference_Y, 'numpy') else np.asarray(reference_Y).reshape(-1)
 
     # Plot input parameters
     param_names = [p.replace("IN_", "") for p in PARAM_ORDER]
@@ -280,6 +292,9 @@ def plot_data_histograms(X, Y, idx_train, idx_val, output_dir, model_name, itera
         # Plot histograms
         ax.hist(X_train[:, i], bins=bins, alpha=0.5, label='Train', color='blue', density=True)
         ax.hist(X_val[:, i], bins=bins, alpha=0.5, label='Val', color='orange', density=True)
+        if X_ref is not None:
+            ax.hist(X_ref[:, i], bins=bins, alpha=0.35, label=reference_label, color='green',
+                    density=True, histtype='step', linewidth=2)
 
         if fixed_axes and lo < hi:
             ax.set_xlim(lo, hi)
@@ -304,6 +319,9 @@ def plot_data_histograms(X, Y, idx_train, idx_val, output_dir, model_name, itera
     target_bins = np.linspace(0, 1, 31) if fixed_axes else 30
     ax.hist(Y_train, bins=target_bins, alpha=0.5, label='Train', color='blue', density=True)
     ax.hist(Y_val, bins=target_bins, alpha=0.5, label='Val', color='orange', density=True)
+    if Y_ref is not None:
+        ax.hist(Y_ref, bins=target_bins, alpha=0.35, label=reference_label, color='green',
+                density=True, histtype='step', linewidth=2)
     ax.axvline(TARGET_CONFIG["DMRD"]["true_value"], color='red', linestyle='--',
                linewidth=1.5, label=f'Ωh² = {TARGET_CONFIG["DMRD"]["true_value"]}')
     if fixed_axes:
@@ -443,6 +461,15 @@ def plot_iteration_metrics(iterations, al_metrics, baseline_metrics, output_dir,
         ax1.plot(iterations, al_metrics['cross_val_losses'], 'g:', linewidth=2, marker='^', markersize=6, label='AL on Base Val')
     if baseline_metrics.get('cross_val_losses'):
         ax1.plot(iterations, baseline_metrics['cross_val_losses'], 'g--', linewidth=2, marker='v', markersize=6, label='Base on AL Val')
+    # Static evaluation datasets
+    if al_metrics.get('mcmc_eval_losses'):
+        ax1.plot(iterations, al_metrics['mcmc_eval_losses'], 'm-', linewidth=1.5, marker='D', markersize=5, label='AL on MCMC')
+    if baseline_metrics.get('mcmc_eval_losses'):
+        ax1.plot(iterations, baseline_metrics['mcmc_eval_losses'], 'm--', linewidth=1.5, marker='d', markersize=5, label='Base on MCMC')
+    if al_metrics.get('static_random_eval_losses'):
+        ax1.plot(iterations, al_metrics['static_random_eval_losses'], 'c-', linewidth=1.5, marker='P', markersize=5, label='AL on Static Rnd')
+    if baseline_metrics.get('static_random_eval_losses'):
+        ax1.plot(iterations, baseline_metrics['static_random_eval_losses'], 'c--', linewidth=1.5, marker='p', markersize=5, label='Base on Static Rnd')
     ax1.set_xlabel('Iteration', fontsize=12)
     ax1.set_ylabel('Best Loss (MSE)', fontsize=12)
     ax1.set_title('Train/Validation Loss vs Iteration', fontsize=14)
@@ -464,6 +491,15 @@ def plot_iteration_metrics(iterations, al_metrics, baseline_metrics, output_dir,
         ax2.plot(iterations, al_metrics['cross_val_r2'], 'g:', linewidth=2, marker='^', markersize=6, label='AL on Base Val')
     if baseline_metrics.get('cross_val_r2'):
         ax2.plot(iterations, baseline_metrics['cross_val_r2'], 'g--', linewidth=2, marker='v', markersize=6, label='Base on AL Val')
+    # Static evaluation datasets
+    if al_metrics.get('mcmc_eval_r2'):
+        ax2.plot(iterations, al_metrics['mcmc_eval_r2'], 'm-', linewidth=1.5, marker='D', markersize=5, label='AL on MCMC')
+    if baseline_metrics.get('mcmc_eval_r2'):
+        ax2.plot(iterations, baseline_metrics['mcmc_eval_r2'], 'm--', linewidth=1.5, marker='d', markersize=5, label='Base on MCMC')
+    if al_metrics.get('static_random_eval_r2'):
+        ax2.plot(iterations, al_metrics['static_random_eval_r2'], 'c-', linewidth=1.5, marker='P', markersize=5, label='AL on Static Rnd')
+    if baseline_metrics.get('static_random_eval_r2'):
+        ax2.plot(iterations, baseline_metrics['static_random_eval_r2'], 'c--', linewidth=1.5, marker='p', markersize=5, label='Base on Static Rnd')
     ax2.set_xlabel('Iteration', fontsize=12)
     ax2.set_ylabel('R² Score', fontsize=12)
     ax2.set_title('R² Score vs Iteration', fontsize=14)
@@ -474,6 +510,8 @@ def plot_iteration_metrics(iterations, al_metrics, baseline_metrics, output_dir,
     all_r2 = al_metrics['r2_scores'] + baseline_metrics['r2_scores']
     all_r2 += al_metrics.get('train_r2_scores', []) + baseline_metrics.get('train_r2_scores', [])
     all_r2 += al_metrics.get('cross_val_r2', []) + baseline_metrics.get('cross_val_r2', [])
+    all_r2 += al_metrics.get('mcmc_eval_r2', []) + baseline_metrics.get('mcmc_eval_r2', [])
+    all_r2 += al_metrics.get('static_random_eval_r2', []) + baseline_metrics.get('static_random_eval_r2', [])
     finite_r2 = [v for v in all_r2 if v is not None and not (v != v) and abs(v) != float('inf')]
     if finite_r2:
         ax2.set_ylim(min(0, min(finite_r2) - 0.1), 1.05)

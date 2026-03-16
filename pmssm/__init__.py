@@ -58,6 +58,7 @@ from .config import (
 
 from .data import (
     load_pmssm_data,
+    load_mcmc_data,
     make_split,
     compute_stats,
     build_norm_tensors,
@@ -156,6 +157,7 @@ __all__ = [
 
     # Data functions
     'load_pmssm_data',
+    'load_mcmc_data',
     'make_split',
     'compute_stats',
     'build_norm_tensors',

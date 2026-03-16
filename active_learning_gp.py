@@ -386,6 +386,8 @@ def load_config_with_sweep(config_file, sweep_index=None):
 # Config file / sweep options
 @click.option('--config-file', default=None, type=str, help="YAML config file (overrides CLI args).")
 @click.option('--sweep-index', default=None, type=int, help="Sweep combination index (requires --config-file).")
+@click.option('--gpu-ids', default='0,1', type=str,
+              help="Comma-separated GPU IDs for AL and baseline models (default: 0,1).")
 def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, val_fraction,
          output_dir, generate_data, min_gen_fraction, max_gen_attempts, gen_workers,
          target, model_type, kernel, lengthscale, noise, jitter, learning_rate,
@@ -396,7 +398,7 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, v
          selection_strategy, entropy_blur, entropy_beta,
          tolerance_sampling, proximity_sampling,
          compute_full_metrics, eval_data_path, track_lengthscales, advanced_plots,
-         config_file, sweep_index):
+         config_file, sweep_index, gpu_ids):
     """
     Active learning pipeline for pMSSM relic density prediction using GP models.
 
@@ -522,10 +524,13 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, v
     if eval_data_path:
         logger.info(f"  eval_data_path: {eval_data_path}")
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    gpu_id_list = [int(x.strip()) for x in gpu_ids.split(',')]
+    AL_GPU_ID = gpu_id_list[0]
+    BASELINE_GPU_ID = gpu_id_list[1] if len(gpu_id_list) > 1 else gpu_id_list[0]
+    device = f"cuda:{AL_GPU_ID}" if torch.cuda.is_available() else "cpu"
     logger.info(f"Device: {device}")
     if torch.cuda.is_available():
-        logger.info(f"GPU: {torch.cuda.get_device_name(0)}")
+        logger.info(f"GPU: {torch.cuda.get_device_name(AL_GPU_ID)}")
 
     # Build normalization tensors
     data_min, data_max = build_norm_tensors()
@@ -586,8 +591,6 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, v
     logger.info(f"Baseline pool: X_full={X_full.shape}, reserved [0..{initial_reserved-1}] excluded from sampling")
 
     # Determine if we can train AL and Baseline in parallel (2+ GPUs)
-    AL_GPU_ID = 0
-    BASELINE_GPU_ID = 1
     use_parallel = torch.cuda.is_available() and torch.cuda.device_count() >= 2
     if use_parallel:
         logger.info(f"Parallel training enabled: {torch.cuda.device_count()} GPUs available")
