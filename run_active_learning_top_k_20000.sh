@@ -20,7 +20,7 @@
     --generate-data \
     --n-samples 2000 \
     --n-iterations 40 \
-    --n-candidates 100_000 \
+    --n-candidates 1_000_000 \
     --entropy-pool-size 5_000 \
     --gen-workers 20 \
     --mcmc-data-dir data/19250082 \

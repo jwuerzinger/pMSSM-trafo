@@ -75,12 +75,14 @@ from pmssm.data import inverse_transform_y
 
 
 def cross_evaluate_transformer(model, stats, X_other, Y_other,
-                                y_transform='log', target='DMRD', device='cpu'):
+                                y_transform='log', target='DMRD', device='cpu',
+                                return_predictions=False):
     """Evaluate a trained transformer on an arbitrary dataset.
 
     Uses the model's own training stats for normalization.
     Returns (mse_loss, r2) where mse_loss is in transformed space
     (matching the regular training/validation loss) and r2 is in physical space.
+    If return_predictions=True, returns (mse_loss, r2, Y_true_phys, Y_pred_phys).
     """
     model.eval()
     model.to(device)
@@ -112,7 +114,82 @@ def cross_evaluate_transformer(model, stats, X_other, Y_other,
     ss_res = ((Y_true_phys - Y_pred_phys) ** 2).sum()
     ss_tot = ((Y_true_phys - Y_true_phys.mean()) ** 2).sum()
     r2 = (1 - (ss_res / ss_tot)).item()
+    if return_predictions:
+        return mse, r2, Y_true_phys.squeeze(), Y_pred_phys.squeeze()
     return mse, r2
+
+
+def plot_eval_scatterplots(eval_results, iteration, plot_dir, logger, max_points=10_000):
+    """Plot a grid of true-vs-predicted scatterplots for all model/dataset combinations.
+
+    Args:
+        eval_results: list of dicts with keys:
+            'model_name', 'dataset_name', 'y_true', 'y_pred', 'loss', 'r2'
+        iteration: current iteration number
+        plot_dir: directory to save the plot
+        logger: logger instance
+        max_points: max points to plot per panel (subsampled for speed)
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    n = len(eval_results)
+    if n == 0:
+        return
+
+    # Layout: one row per model, one column per dataset
+    model_names = list(dict.fromkeys(r['model_name'] for r in eval_results))
+    dataset_names = list(dict.fromkeys(r['dataset_name'] for r in eval_results))
+    n_rows = len(model_names)
+    n_cols = len(dataset_names)
+
+    # Build lookup
+    lookup = {(r['model_name'], r['dataset_name']): r for r in eval_results}
+
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 5 * n_rows), squeeze=False)
+
+    for row, model_name in enumerate(model_names):
+        for col, dataset_name in enumerate(dataset_names):
+            ax = axes[row, col]
+            key = (model_name, dataset_name)
+            if key not in lookup:
+                ax.text(0.5, 0.5, "N/A", ha="center", va="center",
+                        fontsize=14, color="gray", transform=ax.transAxes)
+                ax.set_xlabel("True")
+                ax.set_ylabel("Predicted")
+                ax.set_title(f"{model_name} on {dataset_name}", fontsize=10)
+                continue
+
+            r = lookup[key]
+            y_true = r['y_true'].detach().numpy() if hasattr(r['y_true'], 'numpy') else r['y_true']
+            y_pred = r['y_pred'].detach().numpy() if hasattr(r['y_pred'], 'numpy') else r['y_pred']
+
+            # Subsample for plotting speed
+            if len(y_true) > max_points:
+                idx = np.random.default_rng(42).choice(len(y_true), max_points, replace=False)
+                y_true = y_true[idx]
+                y_pred = y_pred[idx]
+
+            ax.scatter(y_true, y_pred, alpha=0.3, s=4, rasterized=True)
+            vmin = min(y_true.min(), y_pred.min())
+            vmax = max(y_true.max(), y_pred.max())
+            ax.plot([vmin, vmax], [vmin, vmax], '--', color='grey', lw=1)
+            ax.set_xlabel("True Omega h^2", fontsize=9)
+            ax.set_ylabel("Predicted Omega h^2", fontsize=9)
+            ax.set_title(
+                f"{model_name} on {dataset_name}\n"
+                f"MSE={r['loss']:.4f}, R2={r['r2']:.4f}, n={r['n']}",
+                fontsize=10
+            )
+            ax.grid(True, alpha=0.2)
+
+    fig.suptitle(f"Iteration {iteration} — True vs Predicted", fontsize=14, y=1.01)
+    plt.tight_layout()
+    out_path = plot_dir / f"scatterplots_iter_{iteration:03d}.png"
+    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    logger.info(f"Saved evaluation scatterplots to {out_path}")
 
 
 def load_config_with_sweep(config_file, sweep_index=None):
@@ -608,11 +685,13 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
             al_process.start()
             baseline_process.start()
 
-            al_process.join()
-            baseline_process.join()
-
+            # Read from queues BEFORE joining — joining first can deadlock
+            # if the result object is large enough to fill the pipe buffer.
             al_results = al_queue.get()
             baseline_results = baseline_queue.get()
+
+            al_process.join()
+            baseline_process.join()
         else:
             # Sequential training
             logger.info("Training Active Learning model...")
@@ -659,17 +738,17 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
         logger.info(f"Loaded AL model from {al_checkpoint_path} for MC Dropout uncertainty estimation")
 
         # Cross-evaluation: each model on the other's validation set
-        al_cross_loss, al_cross_r2 = cross_evaluate_transformer(
+        al_cross_loss, al_cross_r2, al_cross_yt, al_cross_yp = cross_evaluate_transformer(
             model, stats, X_baseline_val, Y_baseline_val,
-            y_transform=y_transform, target='DMRD', device=device)
+            y_transform=y_transform, target='DMRD', device=device, return_predictions=True)
 
         baseline_stats = compute_stats(X_baseline_combined, Y_baseline_combined, idx_train_base)
         baseline_model = PMSSMTransformerTabular(
             d_model=128, nhead=4, num_layers=3, dim_feedforward=512, dropout=dropout)
         baseline_model.load_state_dict(torch.load(baseline_checkpoint_path, map_location=device))
-        base_cross_loss, base_cross_r2 = cross_evaluate_transformer(
+        base_cross_loss, base_cross_r2, base_cross_yt, base_cross_yp = cross_evaluate_transformer(
             baseline_model, baseline_stats, X_val, Y_val,
-            y_transform=y_transform, target='DMRD', device=device)
+            y_transform=y_transform, target='DMRD', device=device, return_predictions=True)
 
         logger.info(f"Cross-eval: AL_on_base_val_loss={al_cross_loss:.6f}, AL_on_base_val_R²={al_cross_r2:.4f}, base_on_al_val_loss={base_cross_loss:.6f}, base_on_al_val_R²={base_cross_r2:.4f}")
         al_on_base_val_losses.append(al_cross_loss)
@@ -677,35 +756,65 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
         base_on_al_val_losses.append(base_cross_loss)
         base_on_al_val_r2.append(base_cross_r2)
 
+        # Collect scatterplot data: AL model on AL val, Baseline model on Base val
+        # (own-val predictions via cross_evaluate for consistency)
+        al_own_loss, al_own_r2, al_own_yt, al_own_yp = cross_evaluate_transformer(
+            model, stats, X_val, Y_val,
+            y_transform=y_transform, target='DMRD', device=device, return_predictions=True)
+        base_own_loss, base_own_r2, base_own_yt, base_own_yp = cross_evaluate_transformer(
+            baseline_model, baseline_stats, X_baseline_val, Y_baseline_val,
+            y_transform=y_transform, target='DMRD', device=device, return_predictions=True)
+
+        scatter_results = [
+            dict(model_name="AL", dataset_name="AL Val", y_true=al_own_yt, y_pred=al_own_yp,
+                 loss=al_own_loss, r2=al_own_r2, n=len(X_val)),
+            dict(model_name="AL", dataset_name="Base Val", y_true=al_cross_yt, y_pred=al_cross_yp,
+                 loss=al_cross_loss, r2=al_cross_r2, n=len(X_baseline_val)),
+            dict(model_name="Baseline", dataset_name="AL Val", y_true=base_cross_yt, y_pred=base_cross_yp,
+                 loss=base_cross_loss, r2=base_cross_r2, n=len(X_val)),
+            dict(model_name="Baseline", dataset_name="Base Val", y_true=base_own_yt, y_pred=base_own_yp,
+                 loss=base_own_loss, r2=base_own_r2, n=len(X_baseline_val)),
+        ]
+
         # Evaluate on MCMC static dataset
         if X_mcmc is not None:
-            mcmc_loss_al, mcmc_r2_al = cross_evaluate_transformer(
+            mcmc_loss_al, mcmc_r2_al, mcmc_yt_al, mcmc_yp_al = cross_evaluate_transformer(
                 model, stats, X_mcmc, Y_mcmc,
-                y_transform=y_transform, target='DMRD', device=device)
-            mcmc_loss_base, mcmc_r2_base = cross_evaluate_transformer(
+                y_transform=y_transform, target='DMRD', device=device, return_predictions=True)
+            mcmc_loss_base, mcmc_r2_base, mcmc_yt_base, mcmc_yp_base = cross_evaluate_transformer(
                 baseline_model, baseline_stats, X_mcmc, Y_mcmc,
-                y_transform=y_transform, target='DMRD', device=device)
+                y_transform=y_transform, target='DMRD', device=device, return_predictions=True)
             al_on_mcmc_losses.append(mcmc_loss_al)
             al_on_mcmc_r2.append(mcmc_r2_al)
             baseline_on_mcmc_losses.append(mcmc_loss_base)
             baseline_on_mcmc_r2.append(mcmc_r2_base)
             logger.info(f"MCMC eval: AL_loss={mcmc_loss_al:.6f}, AL_R²={mcmc_r2_al:.4f}, "
                         f"Base_loss={mcmc_loss_base:.6f}, Base_R²={mcmc_r2_base:.4f}")
+            scatter_results.append(dict(model_name="AL", dataset_name="MCMC",
+                y_true=mcmc_yt_al, y_pred=mcmc_yp_al, loss=mcmc_loss_al, r2=mcmc_r2_al, n=len(X_mcmc)))
+            scatter_results.append(dict(model_name="Baseline", dataset_name="MCMC",
+                y_true=mcmc_yt_base, y_pred=mcmc_yp_base, loss=mcmc_loss_base, r2=mcmc_r2_base, n=len(X_mcmc)))
 
         # Evaluate on static random dataset
         if X_static_random is not None:
-            static_loss_al, static_r2_al = cross_evaluate_transformer(
+            static_loss_al, static_r2_al, static_yt_al, static_yp_al = cross_evaluate_transformer(
                 model, stats, X_static_random, Y_static_random,
-                y_transform=y_transform, target='DMRD', device=device)
-            static_loss_base, static_r2_base = cross_evaluate_transformer(
+                y_transform=y_transform, target='DMRD', device=device, return_predictions=True)
+            static_loss_base, static_r2_base, static_yt_base, static_yp_base = cross_evaluate_transformer(
                 baseline_model, baseline_stats, X_static_random, Y_static_random,
-                y_transform=y_transform, target='DMRD', device=device)
+                y_transform=y_transform, target='DMRD', device=device, return_predictions=True)
             al_on_static_random_losses.append(static_loss_al)
             al_on_static_random_r2.append(static_r2_al)
             baseline_on_static_random_losses.append(static_loss_base)
             baseline_on_static_random_r2.append(static_r2_base)
             logger.info(f"Static random eval: AL_loss={static_loss_al:.6f}, AL_R²={static_r2_al:.4f}, "
                         f"Base_loss={static_loss_base:.6f}, Base_R²={static_r2_base:.4f}")
+            scatter_results.append(dict(model_name="AL", dataset_name="Static Rnd",
+                y_true=static_yt_al, y_pred=static_yp_al, loss=static_loss_al, r2=static_r2_al, n=len(X_static_random)))
+            scatter_results.append(dict(model_name="Baseline", dataset_name="Static Rnd",
+                y_true=static_yt_base, y_pred=static_yp_base, loss=static_loss_base, r2=static_r2_base, n=len(X_static_random)))
+
+        plot_eval_scatterplots(scatter_results, iteration, iter_plots_dir, logger)
 
         # Evaluate on external dataset if provided
         if eval_data_path is not None:

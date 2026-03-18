@@ -1,15 +1,16 @@
 #!/bin/bash
 .pixi/envs/default/bin/python active_learning_gp.py \
     --model-type deep_gp \
-    --epochs 10000 \
+    --epochs 10 \
     --early-stopping \
     --patience 100 \
     --learning-rate 1e-3 \
     --generate-data \
     --n-samples 2000 \
     --n-iterations 40 \
-    --n-select 250 \
-    --n-candidates 5000 \
+    --n-select 500 \
+    --n-candidates 1_000_000 \
+    --entropy-pool-size 5_000 \
     --gen-workers 20 \
     --kernel RBF \
     --lengthscale 1.0 \
@@ -17,4 +18,5 @@
     --jitter 1e-3 \
     --use-ard \
     --warm-starting \
-    --output-dir active_learning_gp_output_500
+    --output-dir active_learning_gp_output \
+    --gpu-ids 0,1

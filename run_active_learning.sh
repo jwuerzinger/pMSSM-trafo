@@ -21,7 +21,7 @@
     --n-samples 2000 \
     --n-iterations 40 \
     --n-select 500 \
-    --n-candidates 50_000 \
+    --n-candidates 1_000_000 \
     --entropy-pool-size 5_000 \
     --gen-workers 20 \
     --mcmc-data-dir data/19250082 \

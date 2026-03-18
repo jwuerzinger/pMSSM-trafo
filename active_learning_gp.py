@@ -27,6 +27,7 @@ from pmssm import (
     GP_RANGE_DICT,
     # Data operations
     load_pmssm_data,
+    load_mcmc_data,
     build_norm_tensors,
     normalize_x,
     unnormalize_x,
@@ -64,6 +65,7 @@ import json
 import multiprocessing as mp
 
 import click
+import numpy as np
 import pandas as pd
 import torch
 import gpytorch
@@ -90,11 +92,13 @@ from gp_pipeline.utils.evaluation import (
 
 
 def cross_evaluate_gp(model, X_other, Y_other, data_min, data_max, model_type,
-                      jitter=1e-3, num_samples=8, target='DMRD'):
+                      jitter=1e-3, num_samples=8, target='DMRD',
+                      return_predictions=False):
     """Evaluate a trained GP model on an arbitrary dataset.
 
     Returns (mse_loss, r2) where mse_loss is in transformed space
     and r2 is in physical space (matching the regular metric computations).
+    If return_predictions=True, returns (mse_loss, r2, y_true_phys, y_pred_phys).
     """
     from pmssm.visualization import gp_predict
     from pmssm.data import inverse_transform_y
@@ -114,7 +118,82 @@ def cross_evaluate_gp(model, X_other, Y_other, data_min, data_max, model_type,
     ss_res = ((y_true_phys - y_pred_phys) ** 2).sum()
     ss_tot = ((y_true_phys - y_true_phys.mean()) ** 2).sum()
     r2 = (1 - (ss_res / ss_tot)).item()
+    if return_predictions:
+        return mse, r2, y_true_phys.squeeze(), y_pred_phys.squeeze()
     return mse, r2
+
+
+def plot_eval_scatterplots(eval_results, iteration, plot_dir, logger, max_points=10_000):
+    """Plot a grid of true-vs-predicted scatterplots for all model/dataset combinations.
+
+    Args:
+        eval_results: list of dicts with keys:
+            'model_name', 'dataset_name', 'y_true', 'y_pred', 'loss', 'r2', 'n'
+        iteration: current iteration number
+        plot_dir: directory to save the plot
+        logger: logger instance
+        max_points: max points to plot per panel (subsampled for speed)
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    n = len(eval_results)
+    if n == 0:
+        return
+
+    # Layout: one row per model, one column per dataset
+    model_names = list(dict.fromkeys(r['model_name'] for r in eval_results))
+    dataset_names = list(dict.fromkeys(r['dataset_name'] for r in eval_results))
+    n_rows = len(model_names)
+    n_cols = len(dataset_names)
+
+    # Build lookup
+    lookup = {(r['model_name'], r['dataset_name']): r for r in eval_results}
+
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 5 * n_rows), squeeze=False)
+
+    for row, model_name in enumerate(model_names):
+        for col, dataset_name in enumerate(dataset_names):
+            ax = axes[row, col]
+            key = (model_name, dataset_name)
+            if key not in lookup:
+                ax.text(0.5, 0.5, "N/A", ha="center", va="center",
+                        fontsize=14, color="gray", transform=ax.transAxes)
+                ax.set_xlabel("True")
+                ax.set_ylabel("Predicted")
+                ax.set_title(f"{model_name} on {dataset_name}", fontsize=10)
+                continue
+
+            r = lookup[key]
+            y_true = r['y_true'].detach().numpy() if hasattr(r['y_true'], 'numpy') else r['y_true']
+            y_pred = r['y_pred'].detach().numpy() if hasattr(r['y_pred'], 'numpy') else r['y_pred']
+
+            # Subsample for plotting speed
+            if len(y_true) > max_points:
+                idx = np.random.default_rng(42).choice(len(y_true), max_points, replace=False)
+                y_true = y_true[idx]
+                y_pred = y_pred[idx]
+
+            ax.scatter(y_true, y_pred, alpha=0.3, s=4, rasterized=True)
+            vmin = min(y_true.min(), y_pred.min())
+            vmax = max(y_true.max(), y_pred.max())
+            ax.plot([vmin, vmax], [vmin, vmax], '--', color='grey', lw=1)
+            ax.set_xlabel("True Omega h^2", fontsize=9)
+            ax.set_ylabel("Predicted Omega h^2", fontsize=9)
+            ax.set_title(
+                f"{model_name} on {dataset_name}\n"
+                f"MSE={r['loss']:.4f}, R2={r['r2']:.4f}, n={r['n']}",
+                fontsize=10
+            )
+            ax.grid(True, alpha=0.2)
+
+    fig.suptitle(f"Iteration {iteration} — True vs Predicted", fontsize=14, y=1.01)
+    plt.tight_layout()
+    out_path = plot_dir / f"scatterplots_iter_{iteration:03d}.png"
+    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    logger.info(f"Saved evaluation scatterplots to {out_path}")
 
 
 # ---------------------------------------------------------------------------
@@ -125,6 +204,7 @@ def select_entropy_batch(model, X_candidates_norm, n_select, model_type,
                          threshold=0.0, blur=0.15, beta=50.0,
                          tolerance_sampling=1.0, proximity_sampling=0.1,
                          use_dkl=False, jitter=1e-3, num_samples=8,
+                         entropy_pool_size=10_000,
                          device=None, logger=None,
                          norm_bounds_lo=None, norm_bounds_hi=None):
     """
@@ -167,7 +247,7 @@ def select_entropy_batch(model, X_candidates_norm, n_select, model_type,
         device = next(model.parameters()).device
     thr = torch.tensor([threshold], device=device)
 
-    n_pool = 1000 if use_dkl else 10000
+    n_pool = 1000 if use_dkl else entropy_pool_size
     is_deep = model_type == "deep_gp"
     ns = 1 if not is_deep else num_samples
 
@@ -375,10 +455,15 @@ def load_config_with_sweep(config_file, sweep_index=None):
 @click.option('--entropy-beta', default=50.0, type=float, help="Gibbs sampling temperature (entropy_batch only).")
 @click.option('--tolerance-sampling', default=1.0, type=float, help="Threshold filter width (entropy_batch only).")
 @click.option('--proximity-sampling', default=0.1, type=float, help="Proximity weighting width (entropy_batch only).")
+@click.option('--entropy-pool-size', default=10_000, type=int, help="Focused pool size for entropy_batch pre-filtering (default: 10000).")
 # Evaluation options
 @click.option('--compute-full-metrics/--no-compute-full-metrics', default=False,
               help="Compute comprehensive GoF metrics (accuracy, chi2, pulls, etc.).")
 @click.option('--eval-data-path', default=None, type=str, help="Path to true eval dataset (ROOT/CSV).")
+@click.option('--mcmc-data-dir', default=None, type=str,
+              help="Directory containing MCMC ROOT files for static evaluation (e.g. data/19250082).")
+@click.option('--static-eval-size', default=100_000, type=int,
+              help="Number of models to reserve from the random pool as a static evaluation set (default: 100000).")
 @click.option('--track-lengthscales/--no-track-lengthscales', default=True,
               help="Save learned ARD lengthscales per iteration.")
 @click.option('--advanced-plots/--no-advanced-plots', default=False,
@@ -396,8 +481,9 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, v
          num_hidden_dims, num_middle_dims, num_inducing_max, inducing_strategy,
          gp_num_samples, batch_size, warm_starting, m_nu, num_mixtures,
          selection_strategy, entropy_blur, entropy_beta,
-         tolerance_sampling, proximity_sampling,
-         compute_full_metrics, eval_data_path, track_lengthscales, advanced_plots,
+         tolerance_sampling, proximity_sampling, entropy_pool_size,
+         compute_full_metrics, eval_data_path, mcmc_data_dir, static_eval_size,
+         track_lengthscales, advanced_plots,
          config_file, sweep_index, gpu_ids):
     """
     Active learning pipeline for pMSSM relic density prediction using GP models.
@@ -590,6 +676,35 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, v
 
     logger.info(f"Baseline pool: X_full={X_full.shape}, reserved [0..{initial_reserved-1}] excluded from sampling")
 
+    # Load MCMC evaluation data if provided
+    X_mcmc, Y_mcmc = None, None
+    if mcmc_data_dir is not None:
+        X_mcmc, Y_mcmc = load_mcmc_data(data_dir=mcmc_data_dir, logger=logger)
+        logger.info(f"Loaded MCMC evaluation data: {len(X_mcmc)} samples")
+
+    # Carve out static random evaluation set from X_full (after initial reserved block)
+    X_static_random, Y_static_random = None, None
+    static_random_indices = torch.tensor([], dtype=torch.long)
+    if static_eval_size > 0:
+        available_for_static = len(X_full) - initial_reserved
+        actual_static_size = min(static_eval_size, available_for_static)
+        if actual_static_size < static_eval_size:
+            logger.warning(
+                f"Requested static_eval_size={static_eval_size} but only "
+                f"{available_for_static} available after reserving {initial_reserved} "
+                f"for initial AL data. Using {actual_static_size}."
+            )
+        if actual_static_size > 0:
+            g_static = torch.Generator().manual_seed(123)
+            perm_static = torch.randperm(available_for_static, generator=g_static)
+            static_random_indices = perm_static[:actual_static_size] + initial_reserved
+            X_static_random = X_full[static_random_indices].clone()
+            Y_static_random = Y_full[static_random_indices].clone()
+            logger.info(
+                f"Static random evaluation set: {len(X_static_random)} samples "
+                f"(carved from indices {initial_reserved}..{len(X_full)-1})"
+            )
+
     # Determine if we can train AL and Baseline in parallel (2+ GPUs)
     use_parallel = torch.cuda.is_available() and torch.cuda.device_count() >= 2
     if use_parallel:
@@ -614,6 +729,12 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, v
     al_on_base_val_r2 = []
     base_on_al_val_losses = []
     base_on_al_val_r2 = []
+
+    # MCMC and static random evaluation metrics
+    al_on_mcmc_losses, al_on_mcmc_r2 = [], []
+    baseline_on_mcmc_losses, baseline_on_mcmc_r2 = [], []
+    al_on_static_random_losses, al_on_static_random_r2 = [], []
+    baseline_on_static_random_losses, baseline_on_static_random_r2 = [], []
 
     # Lengthscale tracking
     lengthscale_rows = []
@@ -658,9 +779,11 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, v
 
             all_indices = torch.arange(len(X_full))
             mask = torch.ones(len(X_full), dtype=torch.bool)
-            mask[initial_al_indices] = False
+            mask[initial_al_indices] = False  # Exclude initial reserved data
+            if len(static_random_indices) > 0:
+                mask[static_random_indices] = False  # Exclude static eval set
             if len(baseline_add_indices) > 0:
-                mask[baseline_add_indices] = False
+                mask[baseline_add_indices] = False  # Exclude already-sampled baseline points
             available_indices = all_indices[mask]
 
             logger.info(f"Baseline sampling: need {n_new_total} new points "
@@ -720,7 +843,8 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, v
         Y_al_combined = torch.cat([Y, Y_val], dim=0)
         idx_train_plot = torch.arange(len(X))
         idx_val_plot = torch.arange(len(X), len(X_al_combined))
-        plot_data_histograms(X_al_combined, Y_al_combined, idx_train_plot, idx_val_plot, al_hist_dir, "AL", iteration, logger)
+        plot_data_histograms(X_al_combined, Y_al_combined, idx_train_plot, idx_val_plot, al_hist_dir, "AL", iteration, logger,
+                             reference_X=X_mcmc, reference_Y=Y_mcmc, reference_label="MCMC")
         plot_parallel_coordinates(X_al_combined, idx_train_plot, idx_val_plot, al_hist_dir, "AL", iteration, logger)
 
         # Plot data distribution histograms and parallel coordinates for Baseline
@@ -731,7 +855,8 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, v
         idx_train_base_plot = torch.arange(len(X_baseline_train))
         idx_val_base_plot = torch.arange(len(X_baseline_train), len(X_base_combined))
         plot_data_histograms(X_base_combined, Y_base_combined, idx_train_base_plot, idx_val_base_plot,
-                             baseline_hist_dir, "Baseline", iteration, logger)
+                             baseline_hist_dir, "Baseline", iteration, logger,
+                             reference_X=X_static_random, reference_Y=Y_static_random, reference_label="Static Random")
         plot_parallel_coordinates(X_base_combined, idx_train_base_plot, idx_val_base_plot, baseline_hist_dir, "Baseline", iteration, logger)
 
         # Plot new-points-only histograms for baseline (iteration 2+)
@@ -776,11 +901,14 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, v
                         f"Baseline on cuda:{BASELINE_GPU_ID}")
             al_process.start()
             baseline_process.start()
-            al_process.join()
-            baseline_process.join()
 
+            # Read from queues BEFORE joining — joining first can deadlock
+            # if the result object is large enough to fill the pipe buffer.
             al_results = al_queue.get()
             baseline_results = baseline_queue.get()
+
+            al_process.join()
+            baseline_process.join()
         else:
             # ---- Train AL and Baseline sequentially ----
             al_warm_start = prev_al_checkpoint if warm_starting else None
@@ -851,18 +979,24 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, v
         al_model = create_gp_model(
             model_type, x_train_norm, y_train_t, x_val_norm, y_val_t,
             n_dim=len(PARAM_ORDER), num_samples=gp_num_samples,
-            target=target, **gp_kwargs
+            target=target, device=device, **gp_kwargs
         )
         checkpoint = torch.load(al_checkpoint_path, map_location=device)
         al_model.load_state_dict(checkpoint['model_state_dict'])
         if model_has_likelihood(model_type):
             al_model.likelihood.load_state_dict(checkpoint['likelihood_state_dict'])
+        al_model = al_model.to(device)
+        if model_has_likelihood(model_type):
+            al_model.likelihood = al_model.likelihood.to(device)
         logger.info("AL model reloaded for uncertainty estimation")
 
         # ---- Cross-evaluation: each model on the other's validation set ----
-        al_cross_loss, al_cross_r2 = cross_evaluate_gp(
-            al_model, X_baseline_val, Y_baseline_val, data_min, data_max,
-            model_type, jitter=jitter, num_samples=gp_num_samples, target=target)
+        _gp_eval_kw = dict(data_min=data_min, data_max=data_max, model_type=model_type,
+                           jitter=jitter, num_samples=gp_num_samples, target=target,
+                           return_predictions=True)
+
+        al_cross_loss, al_cross_r2, al_cross_yt, al_cross_yp = cross_evaluate_gp(
+            al_model, X_baseline_val, Y_baseline_val, **_gp_eval_kw)
 
         # Load baseline model for cross-eval
         x_train_base_norm = normalize_x(X_train_base, data_min, data_max)
@@ -874,22 +1008,77 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, v
             model_type, x_train_base_norm, y_train_base_t,
             x_val_base_norm, y_val_base_t,
             n_dim=len(PARAM_ORDER), num_samples=gp_num_samples,
-            target=target, **gp_kwargs
+            target=target, device=device, **gp_kwargs
         )
         base_ckpt = torch.load(baseline_checkpoint_path, map_location=device)
         baseline_model.load_state_dict(base_ckpt['model_state_dict'])
         if model_has_likelihood(model_type):
             baseline_model.likelihood.load_state_dict(base_ckpt['likelihood_state_dict'])
+        baseline_model = baseline_model.to(device)
+        if model_has_likelihood(model_type):
+            baseline_model.likelihood = baseline_model.likelihood.to(device)
 
-        base_cross_loss, base_cross_r2 = cross_evaluate_gp(
-            baseline_model, X_val_al, Y_val_al, data_min, data_max,
-            model_type, jitter=jitter, num_samples=gp_num_samples, target=target)
+        base_cross_loss, base_cross_r2, base_cross_yt, base_cross_yp = cross_evaluate_gp(
+            baseline_model, X_val_al, Y_val_al, **_gp_eval_kw)
 
         logger.info(f"Cross-eval: AL_on_base_val_loss={al_cross_loss:.6f}, AL_on_base_val_R²={al_cross_r2:.4f}, base_on_al_val_loss={base_cross_loss:.6f}, base_on_al_val_R²={base_cross_r2:.4f}")
         al_on_base_val_losses.append(al_cross_loss)
         al_on_base_val_r2.append(al_cross_r2)
         base_on_al_val_losses.append(base_cross_loss)
         base_on_al_val_r2.append(base_cross_r2)
+
+        # Own-val predictions for scatterplots
+        al_own_loss, al_own_r2, al_own_yt, al_own_yp = cross_evaluate_gp(
+            al_model, X_val_al, Y_val_al, **_gp_eval_kw)
+        base_own_loss, base_own_r2, base_own_yt, base_own_yp = cross_evaluate_gp(
+            baseline_model, X_baseline_val, Y_baseline_val, **_gp_eval_kw)
+
+        scatter_results = [
+            dict(model_name="AL", dataset_name="AL Val", y_true=al_own_yt, y_pred=al_own_yp,
+                 loss=al_own_loss, r2=al_own_r2, n=len(X_val_al)),
+            dict(model_name="AL", dataset_name="Base Val", y_true=al_cross_yt, y_pred=al_cross_yp,
+                 loss=al_cross_loss, r2=al_cross_r2, n=len(X_baseline_val)),
+            dict(model_name="Baseline", dataset_name="AL Val", y_true=base_cross_yt, y_pred=base_cross_yp,
+                 loss=base_cross_loss, r2=base_cross_r2, n=len(X_val_al)),
+            dict(model_name="Baseline", dataset_name="Base Val", y_true=base_own_yt, y_pred=base_own_yp,
+                 loss=base_own_loss, r2=base_own_r2, n=len(X_baseline_val)),
+        ]
+
+        # ---- Evaluate on MCMC static dataset ----
+        if X_mcmc is not None:
+            mcmc_loss_al, mcmc_r2_al, mcmc_yt_al, mcmc_yp_al = cross_evaluate_gp(
+                al_model, X_mcmc, Y_mcmc, **_gp_eval_kw)
+            mcmc_loss_base, mcmc_r2_base, mcmc_yt_base, mcmc_yp_base = cross_evaluate_gp(
+                baseline_model, X_mcmc, Y_mcmc, **_gp_eval_kw)
+            al_on_mcmc_losses.append(mcmc_loss_al)
+            al_on_mcmc_r2.append(mcmc_r2_al)
+            baseline_on_mcmc_losses.append(mcmc_loss_base)
+            baseline_on_mcmc_r2.append(mcmc_r2_base)
+            logger.info(f"MCMC eval: AL_loss={mcmc_loss_al:.6f}, AL_R²={mcmc_r2_al:.4f}, "
+                        f"Base_loss={mcmc_loss_base:.6f}, Base_R²={mcmc_r2_base:.4f}")
+            scatter_results.append(dict(model_name="AL", dataset_name="MCMC",
+                y_true=mcmc_yt_al, y_pred=mcmc_yp_al, loss=mcmc_loss_al, r2=mcmc_r2_al, n=len(X_mcmc)))
+            scatter_results.append(dict(model_name="Baseline", dataset_name="MCMC",
+                y_true=mcmc_yt_base, y_pred=mcmc_yp_base, loss=mcmc_loss_base, r2=mcmc_r2_base, n=len(X_mcmc)))
+
+        # ---- Evaluate on static random dataset ----
+        if X_static_random is not None:
+            static_loss_al, static_r2_al, static_yt_al, static_yp_al = cross_evaluate_gp(
+                al_model, X_static_random, Y_static_random, **_gp_eval_kw)
+            static_loss_base, static_r2_base, static_yt_base, static_yp_base = cross_evaluate_gp(
+                baseline_model, X_static_random, Y_static_random, **_gp_eval_kw)
+            al_on_static_random_losses.append(static_loss_al)
+            al_on_static_random_r2.append(static_r2_al)
+            baseline_on_static_random_losses.append(static_loss_base)
+            baseline_on_static_random_r2.append(static_r2_base)
+            logger.info(f"Static random eval: AL_loss={static_loss_al:.6f}, AL_R²={static_r2_al:.4f}, "
+                        f"Base_loss={static_loss_base:.6f}, Base_R²={static_r2_base:.4f}")
+            scatter_results.append(dict(model_name="AL", dataset_name="Static Rnd",
+                y_true=static_yt_al, y_pred=static_yp_al, loss=static_loss_al, r2=static_r2_al, n=len(X_static_random)))
+            scatter_results.append(dict(model_name="Baseline", dataset_name="Static Rnd",
+                y_true=static_yt_base, y_pred=static_yp_base, loss=static_loss_base, r2=static_r2_base, n=len(X_static_random)))
+
+        plot_eval_scatterplots(scatter_results, iteration, iter_plots_dir, logger)
 
         # ---- Full true dataset evaluation ----
         if eval_data_path is not None:
@@ -945,6 +1134,7 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, v
                 tolerance_sampling=tolerance_sampling,
                 proximity_sampling=proximity_sampling,
                 use_dkl=use_dkl, jitter=jitter, num_samples=gp_num_samples,
+                entropy_pool_size=entropy_pool_size,
                 device=device, logger=logger,
                 norm_bounds_lo=norm_lo, norm_bounds_hi=norm_hi,
             )
@@ -1130,6 +1320,10 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, v
         'train_r2_scores': al_train_r2_scores,
         'cross_val_losses': al_on_base_val_losses,
         'cross_val_r2': al_on_base_val_r2,
+        'mcmc_eval_losses': al_on_mcmc_losses,
+        'mcmc_eval_r2': al_on_mcmc_r2,
+        'static_random_eval_losses': al_on_static_random_losses,
+        'static_random_eval_r2': al_on_static_random_r2,
         'n_train': al_n_train,
         'n_val': al_n_val,
     }
@@ -1140,6 +1334,10 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, v
         'train_r2_scores': baseline_train_r2_scores,
         'cross_val_losses': base_on_al_val_losses,
         'cross_val_r2': base_on_al_val_r2,
+        'mcmc_eval_losses': baseline_on_mcmc_losses,
+        'mcmc_eval_r2': baseline_on_mcmc_r2,
+        'static_random_eval_losses': baseline_on_static_random_losses,
+        'static_random_eval_r2': baseline_on_static_random_r2,
         'n_train': baseline_n_train,
         'n_val': baseline_n_val,
     }
