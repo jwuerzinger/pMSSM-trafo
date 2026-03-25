@@ -12,6 +12,7 @@
     --n-candidates 1_000_000 \
     --entropy-pool-size 5_000 \
     --gen-workers 20 \
+    --mcmc-data-dir data/19250082 \
     --kernel RBF \
     --lengthscale 1.0 \
     --noise 1e-2 \
@@ -19,4 +20,4 @@
     --use-ard \
     --warm-starting \
     --output-dir active_learning_gp_output \
-    --gpu-ids 0,1
+    --gpu-ids 2,3
