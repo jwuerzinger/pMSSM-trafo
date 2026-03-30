@@ -55,12 +55,17 @@ def gp_predict(model, X_norm, model_type, jitter=1e-3, num_samples=8):
             return model(X_norm.to(device)).squeeze().cpu()
     elif model_type == "deep_gp":
         model.likelihood.eval()
+        batch_size = 1024
+        all_means = []
         with torch.no_grad(), \
              gpytorch.settings.fast_pred_var(False), \
              gpytorch.settings.cholesky_jitter(jitter), \
              gpytorch.settings.num_likelihood_samples(num_samples):
-            preds = model.likelihood(model(X_norm.to(device)))
-            return preds.mean.detach().mean(dim=0).squeeze().cpu()
+            for start in range(0, len(X_norm), batch_size):
+                x_batch = X_norm[start:start + batch_size].to(device)
+                preds = model.likelihood(model(x_batch))
+                all_means.append(preds.mean.detach().mean(dim=0).view(-1).cpu())
+            return torch.cat(all_means, dim=0)
     else:
         # exact_gp, sparse_gp
         model.likelihood.eval()

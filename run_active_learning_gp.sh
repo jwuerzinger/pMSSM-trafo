@@ -20,4 +20,4 @@
     --use-ard \
     --warm-starting \
     --output-dir active_learning_gp_output \
-    --gpu-ids 2,3
+    --gpu-ids 1,2
