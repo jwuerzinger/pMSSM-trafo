@@ -518,8 +518,30 @@ def plot_iteration_metrics(iterations, al_metrics, baseline_metrics, output_dir,
     all_r2 += al_metrics.get('mcmc_eval_r2', []) + baseline_metrics.get('mcmc_eval_r2', [])
     all_r2 += al_metrics.get('static_random_eval_r2', []) + baseline_metrics.get('static_random_eval_r2', [])
     finite_r2 = [v for v in all_r2 if v is not None and not (v != v) and abs(v) != float('inf')]
-    if finite_r2:
-        ax2.set_ylim(min(0, min(finite_r2) - 0.1), 1.05)
+    r2_lower = -1.0
+    ax2.set_ylim(r2_lower, 1.05)
+
+    # Collect all (iteration, r2_value, color) pairs to check for below-limit points
+    _r2_series = [
+        (al_metrics.get('train_r2_scores', []), 'b'),
+        (al_metrics['r2_scores'], 'b'),
+        (baseline_metrics.get('train_r2_scores', []), 'r'),
+        (baseline_metrics['r2_scores'], 'r'),
+        (al_metrics.get('cross_val_r2', []), 'g'),
+        (baseline_metrics.get('cross_val_r2', []), 'g'),
+        (al_metrics.get('mcmc_eval_r2', []), 'm'),
+        (baseline_metrics.get('mcmc_eval_r2', []), 'm'),
+        (al_metrics.get('static_random_eval_r2', []), 'c'),
+        (baseline_metrics.get('static_random_eval_r2', []), 'c'),
+    ]
+    for r2_vals, color in _r2_series:
+        if not r2_vals:
+            continue
+        for it, val in zip(iterations, r2_vals):
+            if val is not None and val == val and val < r2_lower:
+                ax2.annotate('', xy=(it, r2_lower), xytext=(it, r2_lower + 0.08),
+                             arrowprops=dict(arrowstyle='->', color=color, lw=2))
+
     ax2.legend(fontsize=9)
 
     # Plot 3: Dataset Sizes

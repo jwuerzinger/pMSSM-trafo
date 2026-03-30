@@ -276,8 +276,30 @@ def plot(data, output_path):
     if has_static:
         all_r2 += data["al_on_static_r2"] + data["base_on_static_r2"]
     finite_r2 = [v for v in all_r2 if v is not None and v == v and abs(v) != float("inf")]
-    if finite_r2:
-        ax2.set_ylim(min(0, min(finite_r2) - 0.1), 1.05)
+    r2_lower = -1.0
+    ax2.set_ylim(r2_lower, 1.05)
+
+    # Draw downward arrows for any R² values that fall below the y-axis limit
+    _r2_series = [
+        (data["al_train_r2_scores"] if has_al_train_r2 else [], "b"),
+        (data["al_r2_scores"], "b"),
+        (data["baseline_train_r2_scores"] if has_base_train_r2 else [], "r"),
+        (data["baseline_r2_scores"], "r"),
+        (data["al_on_base_val_r2"] if has_cross else [], "g"),
+        (data["base_on_al_val_r2"] if has_cross else [], "g"),
+        (data["al_on_mcmc_r2"] if has_mcmc else [], "m"),
+        (data["base_on_mcmc_r2"] if has_mcmc else [], "m"),
+        (data["al_on_static_r2"] if has_static else [], "c"),
+        (data["base_on_static_r2"] if has_static else [], "c"),
+    ]
+    for r2_vals, color in _r2_series:
+        if not r2_vals:
+            continue
+        for it, val in zip(iters, r2_vals):
+            if val is not None and val == val and val < r2_lower:
+                ax2.annotate("", xy=(it, r2_lower), xytext=(it, r2_lower + 0.08),
+                             arrowprops=dict(arrowstyle="->", color=color, lw=2))
+
     ax2.legend(fontsize=9)
 
     # --- Dataset sizes (AL and Baseline separately) ---

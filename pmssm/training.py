@@ -286,40 +286,34 @@ def train_model_worker(gpu_id, X, Y, idx_train, idx_val, epochs, dropout,
     model.to(device)
     _, _, mean_Y, std_Y = stats
 
+    def _batched_predict(dataset):
+        """Run inference in batches to avoid OOM on large datasets."""
+        loader = DataLoader(dataset, batch_size=1024, shuffle=False)
+        preds, targets = [], []
+        with torch.no_grad():
+            for X_b, Y_b in loader:
+                preds.append(model(X_b.to(device)).cpu())
+                targets.append(Y_b)
+        return torch.cat(preds, dim=0), torch.cat(targets, dim=0)
+
+    def _to_physical(Y_batch, Y_pred_transformed):
+        if y_transform == 'log':
+            return (inverse_transform_y(Y_batch, target=target),
+                    inverse_transform_y(Y_pred_transformed, target=target))
+        return Y_batch * std_Y + mean_Y, Y_pred_transformed * std_Y + mean_Y
+
     # Validation R²
-    loader = DataLoader(val_dataset, batch_size=len(val_dataset), shuffle=False)
-    X_batch, Y_batch = next(iter(loader))
-    X_batch = X_batch.to(device)
-    with torch.no_grad():
-        Y_pred_transformed = model(X_batch).cpu()
-
-    if y_transform == 'log':
-        Y_true = inverse_transform_y(Y_batch, target=target)
-        Y_pred = inverse_transform_y(Y_pred_transformed, target=target)
-    else:  # zscore
-        Y_true = Y_batch * std_Y + mean_Y
-        Y_pred = Y_pred_transformed * std_Y + mean_Y
-
+    Y_pred_transformed, Y_batch = _batched_predict(val_dataset)
+    Y_true, Y_pred = _to_physical(Y_batch, Y_pred_transformed)
     ss_res = ((Y_true - Y_pred) ** 2).sum()
     ss_tot = ((Y_true - Y_true.mean()) ** 2).sum()
     r2 = (1 - (ss_res / ss_tot)).item()
 
     # Training R²
-    train_loader_r2 = DataLoader(train_dataset, batch_size=len(train_dataset), shuffle=False)
-    X_train_r2, Y_train_r2 = next(iter(train_loader_r2))
-    X_train_r2 = X_train_r2.to(device)
-    with torch.no_grad():
-        Y_train_pred_transformed = model(X_train_r2).cpu()
-
-    if y_transform == 'log':
-        Y_train_true_r2 = inverse_transform_y(Y_train_r2, target=target)
-        Y_train_pred_r2 = inverse_transform_y(Y_train_pred_transformed, target=target)
-    else:  # zscore
-        Y_train_true_r2 = Y_train_r2 * std_Y + mean_Y
-        Y_train_pred_r2 = Y_train_pred_transformed * std_Y + mean_Y
-
-    ss_res_train = ((Y_train_true_r2 - Y_train_pred_r2) ** 2).sum()
-    ss_tot_train = ((Y_train_true_r2 - Y_train_true_r2.mean()) ** 2).sum()
+    Y_train_pred_transformed, Y_train_batch = _batched_predict(train_dataset)
+    Y_train_true, Y_train_pred = _to_physical(Y_train_batch, Y_train_pred_transformed)
+    ss_res_train = ((Y_train_true - Y_train_pred) ** 2).sum()
+    ss_tot_train = ((Y_train_true - Y_train_true.mean()) ** 2).sum()
     train_r2 = (1 - (ss_res_train / ss_tot_train)).item()
 
     # Log final metrics
@@ -339,27 +333,8 @@ def train_model_worker(gpu_id, X, Y, idx_train, idx_val, epochs, dropout,
         # Plot losses
         plot_losses(train_losses, val_losses, get_model_name(model), plot_dir=str(plots_dir))
 
-        # Get predictions for plotting
-        model.eval()
-        model.to(device)
-
-        # Training set predictions
-        train_loader_full = DataLoader(train_dataset, batch_size=len(train_dataset), shuffle=False)
-        X_train_batch, Y_train_batch = next(iter(train_loader_full))
-        X_train_batch = X_train_batch.to(device)
-        with torch.no_grad():
-            Y_train_pred_transformed = model(X_train_batch).cpu()
-
-        # Convert to physical space for plotting
-        if y_transform == 'log':
-            Y_train_true = inverse_transform_y(Y_train_batch, target=target)
-            Y_train_pred = inverse_transform_y(Y_train_pred_transformed, target=target)
-        else:  # zscore
-            Y_train_true = Y_train_batch * std_Y + mean_Y
-            Y_train_pred = Y_train_pred_transformed * std_Y + mean_Y
-
-        # Validation set predictions (already computed in physical space)
-        # Y_true, Y_pred from R² calculation
+        # Reuse predictions already computed for R² (Y_train_true, Y_train_pred,
+        # Y_true, Y_pred are all in physical space)
 
         # Compare random predictions (text log)
         compare_random_predictions(
