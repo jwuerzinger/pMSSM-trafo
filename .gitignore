@@ -10,4 +10,5 @@ plots/
 logs/
 active_learning_output*
 active_learning_gp_output*
+active_learning_exact_gp_output*
 pipeline_analysis*
