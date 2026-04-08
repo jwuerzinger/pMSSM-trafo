@@ -1,6 +1,6 @@
 #!/bin/bash
 .pixi/envs/default/bin/python active_learning_gp.py \
-    --model-type deep_gp \
+    --model-type exact_gp \
     --epochs 10_000 \
     --early-stopping \
     --patience 100 \
@@ -19,5 +19,5 @@
     --jitter 1e-3 \
     --use-ard \
     --warm-starting \
-    --output-dir active_learning_gp_output \
-    --gpu-ids 1,3
+    --output-dir active_learning_exact_gp_output \
+    --gpu-ids 2,3
