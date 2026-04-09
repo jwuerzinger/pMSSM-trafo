@@ -89,20 +89,19 @@ def select_top_uncertain(X_candidates, uncertainties, n_select):
 
 def select_entropy_batch_mc(X_candidates, predictions, pred_mean, pred_var,
                             n_select, blur=0.15, beta=50.0, n_pool=5000,
-                            threshold=0.0, proximity_sampling=0.0,
+                            threshold=0.0, tolerance_sampling=0.0,
+                            proximity_sampling=0.0,
                             device='cpu', logger=None):
     """
-    Entropy-based batch selection using MC Dropout sample covariance.
+    Entropy-based batch selection using MC Dropout/ensemble sample covariance.
 
-    Pre-filters candidates by variance to a focused pool, computes sample
-    covariance from MC Dropout predictions, then uses EntropySelectionStrategy
-    for iterative batch selection with diversity.
-
-    NEW: Optional proximity weighting to focus on regions near threshold.
+    Pre-filters candidates (hard tolerance cut, then proximity-weighted variance
+    ranking) to a focused pool, computes sample covariance from predictions,
+    then uses EntropySelectionStrategy for iterative batch selection with diversity.
 
     Args:
         X_candidates: (N, D) candidate points
-        predictions: (T, N, 1) MC Dropout predictions tensor
+        predictions: (T, N, 1) MC Dropout/ensemble predictions tensor
         pred_mean: (N, 1) mean predictions in transformed space
         pred_var: (N, 1) prediction variance
         n_select: Number of points to select
@@ -110,6 +109,8 @@ def select_entropy_batch_mc(X_candidates, predictions, pred_mean, pred_var,
         beta: Gibbs sampling temperature (high=deterministic, low=random)
         n_pool: Focused pool size (pre-filtered by variance)
         threshold: Decision threshold in transformed space (default: 0.0)
+        tolerance_sampling: Hard cut width around threshold (0 to disable).
+            Keeps only candidates with pred_mean in [threshold ± tolerance].
         proximity_sampling: Gaussian proximity weighting width (0 to disable)
         device: Torch device
         logger: Logger instance
@@ -143,27 +144,43 @@ def select_entropy_batch_mc(X_candidates, predictions, pred_mean, pred_var,
             )
         n_pool = n_select
 
-    # Apply proximity weighting if enabled
+    # Step 1: Hard tolerance cut (if enabled) — keep only candidates near threshold
+    if tolerance_sampling > 0.0:
+        mean_flat = pred_mean.squeeze()
+        mask = (mean_flat > threshold - tolerance_sampling) & (mean_flat < threshold + tolerance_sampling)
+        surviving_indices = torch.where(mask)[0]
+        if logger:
+            logger.info(f"Tolerance filter (±{tolerance_sampling:.2f}): "
+                       f"{len(surviving_indices)}/{N} candidates survive")
+        if len(surviving_indices) == 0:
+            if logger:
+                logger.warning("No candidates survived tolerance filter, falling back to all candidates")
+            surviving_indices = torch.arange(N)
+    else:
+        surviving_indices = torch.arange(N)
+
+    # Step 2: Proximity-weighted variance ranking on survivors
+    surv_mean = pred_mean[surviving_indices]
+    surv_var = pred_var[surviving_indices]
+
     if proximity_sampling > 0.0:
-        # Gaussian weighting: exp(-((pred_mean - threshold)^2) / proximity_sampling)
-        # Favors points near the threshold (e.g., 0.12 in physical space for DMRD)
-        proximity = torch.exp(-((pred_mean.squeeze() - threshold) ** 2) / proximity_sampling)
-        weighted_var = proximity.unsqueeze(1) * pred_var
+        proximity = torch.exp(-((surv_mean.squeeze() - threshold) ** 2) / proximity_sampling)
+        weighted_var = proximity.unsqueeze(1) * surv_var
 
         if logger:
-            logger.info(f"Proximity weighting enabled: "
-                       f"focusing on predictions near threshold={threshold:.3f}")
-            logger.info(f"Proximity weights: mean={proximity.mean():.4f}, "
-                       f"max={proximity.max():.4f}, min={proximity.min():.4f}")
+            logger.info(f"Proximity weighting (σ={proximity_sampling:.3f}): "
+                       f"mean={proximity.mean():.4f}, max={proximity.max():.4f}")
     else:
-        weighted_var = pred_var
+        weighted_var = surv_var
 
-    # Pre-filter to focused pool: top n_pool candidates by weighted variance
+    # Step 3: Take top n_pool by weighted variance
+    k = min(n_pool, len(surviving_indices))
     var_flat = weighted_var.squeeze()
-    pool_indices = torch.argsort(var_flat, descending=True)[:n_pool]
+    topk = torch.argsort(var_flat, descending=True)[:k]
+    pool_indices = surviving_indices[topk]
 
     if logger:
-        logger.info(f"Entropy batch: focused pool of {n_pool} candidates (from {N} total)")
+        logger.info(f"Focused pool: {len(pool_indices)} candidates (from {len(surviving_indices)} after tolerance filter)")
 
     # Extract predictions for the focused pool: (T, n_pool, 1)
     pool_preds = predictions[:, pool_indices, :]  # (T, n_pool, 1)

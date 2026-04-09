@@ -235,8 +235,6 @@ def select_entropy_batch(model, X_candidates_norm, n_select, model_type,
         selected_indices: Indices into X_candidates_norm of selected points.
         per_point_entropy: Entropy scores for each selected point.
     """
-    from scipy.stats import qmc
-
     strategy = EntropySelectionStrategy(
         blur=blur, beta=beta,
         tolerance_sampling=tolerance_sampling,
@@ -255,77 +253,65 @@ def select_entropy_batch(model, X_candidates_norm, n_select, model_type,
     if model_has_likelihood(model_type):
         model.likelihood.eval()
 
-    # Compute normalized bounds for LHS sampling
-    n_dim = X_candidates_norm.shape[1]
-    if norm_bounds_lo is None:
-        norm_bounds_lo = torch.zeros(n_dim)
-    if norm_bounds_hi is None:
-        norm_bounds_hi = torch.ones(n_dim)
-    norm_bounds_lo = norm_bounds_lo.to(device)
-    norm_bounds_hi = norm_bounds_hi.to(device)
+    # Evaluate mean and variance on the passed-in candidates
+    if logger:
+        logger.info(f"Entropy selection: evaluating {len(X_candidates_norm)} candidates...")
 
-    if tolerance_sampling != 0:
-        # Sample large initial pool with LHS, filter near threshold
-        n_large = 1_000_000
-        lhs_unit = torch.tensor(
-            qmc.LatinHypercube(d=n_dim).random(n=n_large),
-            dtype=torch.float32,
-        ).to(device)
-        # Scale from [0,1] to [norm_bounds_lo, norm_bounds_hi]
-        x_large = lhs_unit * (norm_bounds_hi - norm_bounds_lo) + norm_bounds_lo
-
-        if logger:
-            logger.info(f"Entropy selection: evaluating {n_large} LHS candidates...")
-
-        batch_size = 100_000
-        means_list, vars_list = [], []
-        for i in range(0, len(x_large), batch_size):
-            x_batch = x_large[i:i + batch_size]
-            with torch.no_grad(), \
-                 gpytorch.settings.eval_cg_tolerance(1e-4), \
-                 gpytorch.settings.max_cg_iterations(300), \
-                 gpytorch.settings.fast_pred_var(False), \
-                 gpytorch.settings.fast_pred_samples(True), \
-                 gpytorch.settings.cholesky_jitter(jitter), \
-                 gpytorch.settings.num_likelihood_samples(ns):
-                preds = model.likelihood(model(x_batch))
-                m = preds.mean.detach()
-                v = preds.variance.detach()
-                if is_deep:
-                    means_list.append(m.mean(dim=0).squeeze())
-                    vars_list.append(v.mean(dim=0))
-                else:
-                    means_list.append(m)
-                    vars_list.append(v)
-
-        mean_all = torch.cat(means_list)
-        var_all = torch.cat(vars_list)
-
-        # Filter near threshold
-        mask = (mean_all > thr - tolerance_sampling) & (mean_all < thr + tolerance_sampling)
-
-        if proximity_sampling != 0:
-            proximity = torch.exp(-((mean_all[mask] - thr) ** 2) / proximity_sampling)
-            entropy_score = proximity * var_all[mask]
-            k = min(n_pool, int(mask.sum()))
-            topk = torch.topk(entropy_score, k=k, largest=True)
-            x_pool = x_large[mask][topk.indices]
-        else:
-            candidates_filtered = x_large[mask]
-            if len(candidates_filtered) > n_pool:
-                idx = torch.randperm(len(candidates_filtered), device=device)[:n_pool]
-                x_pool = candidates_filtered[idx]
+    batch_size = 100_000
+    means_list, vars_list = [], []
+    for i in range(0, len(X_candidates_norm), batch_size):
+        x_batch = X_candidates_norm[i:i + batch_size].to(device)
+        with torch.no_grad(), \
+             gpytorch.settings.eval_cg_tolerance(1e-4), \
+             gpytorch.settings.max_cg_iterations(300), \
+             gpytorch.settings.fast_pred_var(False), \
+             gpytorch.settings.fast_pred_samples(True), \
+             gpytorch.settings.cholesky_jitter(jitter), \
+             gpytorch.settings.num_likelihood_samples(ns):
+            preds = model.likelihood(model(x_batch))
+            m = preds.mean.detach()
+            v = preds.variance.detach()
+            if is_deep:
+                means_list.append(m.mean(dim=0).squeeze())
+                vars_list.append(v.mean(dim=0))
             else:
-                x_pool = candidates_filtered
+                means_list.append(m)
+                vars_list.append(v)
 
+    mean_all = torch.cat(means_list)
+    var_all = torch.cat(vars_list)
+
+    # Step 1: Hard tolerance cut (if enabled)
+    if tolerance_sampling != 0:
+        mask = (mean_all > thr - tolerance_sampling) & (mean_all < thr + tolerance_sampling)
+        surviving_indices = torch.where(mask)[0]
         if logger:
-            logger.info(f"Focused pool: {len(x_pool)} candidates near threshold")
+            logger.info(f"Tolerance filter (±{tolerance_sampling:.1f}): "
+                       f"{len(surviving_indices)}/{len(mean_all)} candidates survive")
+        if len(surviving_indices) == 0:
+            if logger:
+                logger.warning("No candidates survived tolerance filter, using all candidates")
+            surviving_indices = torch.arange(len(mean_all), device=device)
     else:
-        lhs_unit = torch.tensor(
-            qmc.LatinHypercube(d=n_dim).random(n=n_pool),
-            dtype=torch.float32,
-        ).to(device)
-        x_pool = lhs_unit * (norm_bounds_hi - norm_bounds_lo) + norm_bounds_lo
+        surviving_indices = torch.arange(len(mean_all), device=device)
+
+    # Step 2: Proximity-weighted variance ranking on survivors
+    surv_mean = mean_all[surviving_indices]
+    surv_var = var_all[surviving_indices]
+
+    if proximity_sampling != 0:
+        proximity = torch.exp(-((surv_mean - thr) ** 2) / proximity_sampling)
+        entropy_score = proximity * surv_var
+    else:
+        entropy_score = surv_var
+
+    k = min(n_pool, len(surviving_indices))
+    topk = torch.topk(entropy_score, k=k, largest=True)
+    pool_indices = surviving_indices[topk.indices]
+    x_pool = X_candidates_norm[pool_indices].to(device)
+
+    if logger:
+        logger.info(f"Focused pool: {len(x_pool)} candidates")
 
     # Get full covariance matrix on focused pool
     if logger:
@@ -367,8 +353,9 @@ def select_entropy_batch(model, X_candidates_norm, n_select, model_type,
     if logger:
         logger.info(f"Entropy selection complete: {len(selected_indices)} points selected")
 
-    # Return the actual normalized points and their indices in the pool
-    return x_pool[selected_indices], per_point_entropy
+    # Map pool-local indices back to original candidate indices
+    original_indices = pool_indices[selected_indices]
+    return X_candidates_norm[original_indices], per_point_entropy
 
 
 # ---------------------------------------------------------------------------
@@ -1121,9 +1108,8 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, v
                 generate_candidate_pool(n_candidates, seed=iteration),
                 data_min, data_max,
             )
-            # Compute PARAM_RANGES bounds in normalized [0,1] space so the
-            # internal LHS in select_entropy_batch stays within the actual
-            # parameter ranges (not the wider GP_RANGE_DICT ranges).
+            # Compute PARAM_RANGES bounds in normalized [0,1] space for
+            # candidate evaluation within the actual parameter ranges.
             param_lo = torch.tensor([PARAM_RANGES[p][0] for p in PARAM_ORDER], dtype=torch.float32)
             param_hi = torch.tensor([PARAM_RANGES[p][1] for p in PARAM_ORDER], dtype=torch.float32)
             norm_lo = normalize_x(param_lo, data_min, data_max)

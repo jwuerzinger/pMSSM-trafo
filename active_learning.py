@@ -97,8 +97,12 @@ def cross_evaluate_transformer(model, stats, X_other, Y_other,
     else:
         Y_transformed = (Y_other - mean_Y) / std_Y
 
+    # Batch inference to avoid OOM on large datasets (e.g., 410k MCMC samples)
+    preds = []
     with torch.no_grad():
-        Y_pred_transformed = model(X_norm.to(device)).cpu()
+        for i in range(0, len(X_norm), 1024):
+            preds.append(model(X_norm[i:i+1024].to(device)).cpu())
+    Y_pred_transformed = torch.cat(preds, dim=0)
 
     # MSE in transformed space (same space as training loss)
     mse = ((Y_transformed.squeeze() - Y_pred_transformed.squeeze()) ** 2).mean().item()
@@ -258,6 +262,8 @@ def load_config_with_sweep(config_file, sweep_index=None):
               help="Candidate pool generation method: uniform random or Latin Hypercube Sampling (default: lhs).")
 @click.option('--proximity-sampling', default=0.1, type=float,
               help="Gaussian proximity weighting width around target value (0 to disable, default: 0.1).")
+@click.option('--tolerance-sampling', default=0.0, type=float,
+              help="Hard cut: keep only candidates within ±tolerance of threshold in transformed space (0 to disable, default: 0).")
 @click.option('--target-value', default=0.12, type=float,
               help="Target relic density value for proximity weighting (default: 0.12).")
 @click.option('--config-file', default=None, type=str,
@@ -282,7 +288,7 @@ def load_config_with_sweep(config_file, sweep_index=None):
               help="Number of models to reserve from the random pool as a static evaluation set (default: 100000).")
 @click.option('--gpu-ids', default='2,3', type=str,
               help="Comma-separated GPU IDs for AL and baseline models (default: 2,3).")
-def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, dropout, n_datasets, n_samples, val_fraction, output_dir, generate_data, min_gen_fraction, max_gen_attempts, gen_workers, selection_strategy, entropy_blur, entropy_beta, entropy_pool_size, candidate_generation, proximity_sampling, target_value, config_file, sweep_index, early_stopping, patience, warm_starting, eval_data_path, compute_full_metrics, y_transform, mcmc_data_dir, static_eval_size, gpu_ids):
+def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, dropout, n_datasets, n_samples, val_fraction, output_dir, generate_data, min_gen_fraction, max_gen_attempts, gen_workers, selection_strategy, entropy_blur, entropy_beta, entropy_pool_size, candidate_generation, proximity_sampling, tolerance_sampling, target_value, config_file, sweep_index, early_stopping, patience, warm_starting, eval_data_path, compute_full_metrics, y_transform, mcmc_data_dir, static_eval_size, gpu_ids):
     """
     Active learning pipeline for pMSSM relic density prediction.
 
@@ -307,6 +313,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
             'entropy_pool_size': 'entropy_pool_size',
             'candidate_generation': 'candidate_generation',
             'proximity_sampling': 'proximity_sampling',
+            'tolerance_sampling': 'tolerance_sampling',
             'target_value': 'target_value',
             'early_stopping': 'early_stopping',
             'patience': 'patience',
@@ -342,6 +349,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
         entropy_pool_size = locals().get('entropy_pool_size', entropy_pool_size)
         candidate_generation = locals().get('candidate_generation', candidate_generation)
         proximity_sampling = locals().get('proximity_sampling', proximity_sampling)
+        tolerance_sampling = locals().get('tolerance_sampling', tolerance_sampling)
         target_value = locals().get('target_value', target_value)
         early_stopping = locals().get('early_stopping', early_stopping)
         patience = locals().get('patience', patience)
@@ -398,6 +406,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
         logger.info(f"  entropy_pool_size: {entropy_pool_size}")
     logger.info(f"  candidate_generation: {candidate_generation}")
     logger.info(f"  proximity_sampling: {proximity_sampling}")
+    logger.info(f"  tolerance_sampling: {tolerance_sampling}")
     logger.info(f"  target_value: {target_value}")
     logger.info(f"  early_stopping: {early_stopping} (patience={patience})")
     logger.info(f"  warm_starting: {warm_starting}")
@@ -930,7 +939,8 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
                 candidates, predictions, pred_mean, pred_var,
                 n_select, blur=entropy_blur, beta=entropy_beta,
                 n_pool=entropy_pool_size,
-                threshold=threshold_transformed, proximity_sampling=proximity_sampling,
+                threshold=threshold_transformed, tolerance_sampling=tolerance_sampling,
+                proximity_sampling=proximity_sampling,
                 device=device, logger=logger
             )
         else:
@@ -993,7 +1003,8 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
                             attempt_candidates, attempt_preds, attempt_mean, attempt_pred_var,
                             n_select, blur=entropy_blur, beta=entropy_beta,
                             n_pool=entropy_pool_size,
-                            threshold=threshold_transformed, proximity_sampling=proximity_sampling,
+                            threshold=threshold_transformed, tolerance_sampling=tolerance_sampling,
+                            proximity_sampling=proximity_sampling,
                             device=device, logger=logger
                         )
                     else:
