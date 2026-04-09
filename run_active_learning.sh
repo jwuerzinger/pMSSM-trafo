@@ -26,6 +26,7 @@
     --gen-workers 20 \
     --mcmc-data-dir data/19250082 \
     --static-eval-size 100_000 \
+    --tolerance-sampling 1.0 \
     --warm-starting \
     --early-stopping \
     --gpu-ids 2,3

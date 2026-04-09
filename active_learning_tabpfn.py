@@ -315,8 +315,8 @@ def load_config_with_sweep(config_file, sweep_index=None):
               help="Candidate pool generation method: uniform random or Latin Hypercube Sampling (default: lhs).")
 @click.option('--proximity-sampling', default=0.1, type=float,
               help="Gaussian proximity weighting width around target value (0 to disable, default: 0.1).")
-@click.option('--tolerance-sampling', default=0.0, type=float,
-              help="Hard cut: keep only candidates within ±tolerance of threshold in transformed space (0 to disable, default: 0).")
+@click.option('--tolerance-sampling', default=1.0, type=float,
+              help="Hard cut: keep only candidates within ±tolerance of threshold in transformed space (0 to disable, default: 1.0).")
 @click.option('--target-value', default=0.12, type=float,
               help="Target relic density value for proximity weighting (default: 0.12).")
 @click.option('--config-file', default=None, type=str,
@@ -777,7 +777,7 @@ def main(testing, n_iterations, n_candidates, n_select, n_ensemble_samples, n_da
         candidates = generate_candidate_pool(n_candidates, method=candidate_generation, seed=iteration)
 
         # Convert target value to transformed space for threshold
-        if proximity_sampling > 0:
+        if proximity_sampling > 0 or tolerance_sampling > 0:
             threshold_transformed = transform_y(torch.tensor([target_value]), target="DMRD").item()
         else:
             threshold_transformed = 0.0

@@ -396,7 +396,7 @@ def load_config_with_sweep(config_file, sweep_index=None):
 # ---------------------------------------------------------------------------
 
 @click.command()
-@click.option('--testing/--no-testing', default=False, help="Run in testing mode (small data, few iterations).")
+@click.option('--testing/--no-testing', default=False, help="Run in testing mode (small data).")
 @click.option('--n-iterations', default=1, type=int, help="Number of active learning iterations.")
 @click.option('--n-candidates', default=1000, type=int, help="Candidate pool size.")
 @click.option('--n-select', default=10, type=int, help="Number of points to select per iteration.")
@@ -405,9 +405,9 @@ def load_config_with_sweep(config_file, sweep_index=None):
 @click.option('--val-fraction', default=0.2, type=float, help="Fraction of data reserved for validation (default: 0.2). Applied to initial data and each batch of new points.")
 @click.option('--output-dir', default='active_learning_gp_output', type=str, help="Output directory.")
 @click.option('--generate-data/--no-generate-data', default=False, help="Generate new models using Run3ModelGen.")
-@click.option('--min-gen-fraction', default=0.6, type=float, help="Minimum fraction of n-select that must be generated successfully.")
-@click.option('--max-gen-attempts', default=10, type=int, help="Maximum generation attempts per iteration.")
-@click.option('--gen-workers', default=1, type=int, help="Number of parallel genModels.py workers.")
+@click.option('--min-gen-fraction', default=0.6, type=float, help="Minimum fraction of n-select that must be generated successfully before stopping retries (default: 0.6).")
+@click.option('--max-gen-attempts', default=10, type=int, help="Maximum number of generation attempts per iteration (default: 10).")
+@click.option('--gen-workers', default=1, type=int, help="Number of parallel genModels.py workers per generation attempt (default: 1).")
 # Target & model options
 @click.option('--target', default='DMRD', type=click.Choice(['DMRD', 'CrossSection', 'CLs']),
               help="Target function to predict.")
@@ -437,12 +437,14 @@ def load_config_with_sweep(config_file, sweep_index=None):
 @click.option('--num-mixtures', default=4, type=int, help="Number of mixtures for SpectralMixture kernel.")
 # Selection strategy options
 @click.option('--selection-strategy', default='entropy_batch', type=click.Choice(['top_k', 'entropy_batch']),
-              help="Point selection strategy: top_k (variance) or entropy_batch.")
-@click.option('--entropy-blur', default=0.15, type=float, help="Entropy smoothing (entropy_batch only).")
+              help="Selection strategy: top_k or entropy_batch (default).")
+@click.option('--entropy-blur', default=0.15, type=float, help="Entropy smoothing parameter (entropy_batch only).")
 @click.option('--entropy-beta', default=50.0, type=float, help="Gibbs sampling temperature (entropy_batch only).")
-@click.option('--tolerance-sampling', default=1.0, type=float, help="Threshold filter width (entropy_batch only).")
-@click.option('--proximity-sampling', default=0.1, type=float, help="Proximity weighting width (entropy_batch only).")
-@click.option('--entropy-pool-size', default=10_000, type=int, help="Focused pool size for entropy_batch pre-filtering (default: 10000).")
+@click.option('--tolerance-sampling', default=1.0, type=float,
+              help="Hard cut: keep only candidates within ±tolerance of threshold in transformed space (0 to disable, default: 1.0).")
+@click.option('--proximity-sampling', default=0.1, type=float,
+              help="Gaussian proximity weighting width around target value (0 to disable, default: 0.1).")
+@click.option('--entropy-pool-size', default=10_000, type=int, help="Focused pool size for entropy_batch pre-filtering.")
 # Evaluation options
 @click.option('--compute-full-metrics/--no-compute-full-metrics', default=False,
               help="Compute comprehensive GoF metrics (accuracy, chi2, pulls, etc.).")
@@ -456,7 +458,8 @@ def load_config_with_sweep(config_file, sweep_index=None):
 @click.option('--advanced-plots/--no-advanced-plots', default=False,
               help="Generate advanced diagnostic plots (heatmaps, residuals).")
 # Config file / sweep options
-@click.option('--config-file', default=None, type=str, help="YAML config file (overrides CLI args).")
+@click.option('--config-file', default=None, type=str,
+              help="YAML config file (overrides CLI args). Supports parameter sweeps.")
 @click.option('--sweep-index', default=None, type=int, help="Sweep combination index (requires --config-file).")
 @click.option('--gpu-ids', default='0,1', type=str,
               help="Comma-separated GPU IDs for AL and baseline models (default: 0,1).")

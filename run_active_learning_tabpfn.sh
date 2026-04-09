@@ -19,6 +19,7 @@
     --mcmc-data-dir data/19250082 \
     --static-eval-size 100_000 \
     --proximity-sampling 0.1 \
+    --tolerance-sampling 1.0 \
     --output-dir active_learning_tabpfn_output \
     --gpu-id 0 \
     --selection-strategy top_k \
