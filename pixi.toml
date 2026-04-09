@@ -23,5 +23,8 @@ scikit-learn = "*"
 scipy = "*"
 seaborn = ">=0.13.2,<0.14"
 
+[pypi-dependencies]
+tabpfn = ">=7.1.0"
+
 [system-requirements]
 cuda = "12.6"

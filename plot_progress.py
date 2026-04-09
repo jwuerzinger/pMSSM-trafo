@@ -61,7 +61,7 @@ def parse_log(log_path):
     baseline_n_trains, baseline_n_vals = [], []
 
     current_iteration = None
-    pipeline = None  # auto-detected: "transformer" or "gp"
+    pipeline = None  # auto-detected: "transformer", "gp", or "tabpfn"
 
     # Iteration headers — accept both formats
     iter_re = re.compile(
@@ -93,13 +93,23 @@ def parse_log(log_path):
     )
     # Auto-detect pipeline type
     gp_header_re = re.compile(r"GP Active Learning")
+    tabpfn_header_re = re.compile(r"pMSSM \(TabPFN\)")
+    # TabPFN logs dataset sizes inline: "AL: n_train=1600, n_val=400"
+    al_size_re = re.compile(r"AL: n_train=(\d+), n_val=(\d+)")
+    base_size_re = re.compile(r"Baseline: n_train=(\d+), n_val=(\d+)")
 
     log_dir = log_path.parent
+
+    # Track inline sizes for TabPFN (no worker logs)
+    _pending_al_nt, _pending_al_nv = None, None
+    _pending_base_nt, _pending_base_nv = None, None
 
     with open(log_path) as f:
         for line in f:
             # Auto-detect pipeline on first match
-            if pipeline is None and gp_header_re.search(line):
+            if pipeline is None and tabpfn_header_re.search(line):
+                pipeline = "tabpfn"
+            elif pipeline is None and gp_header_re.search(line):
                 pipeline = "gp"
 
             m = iter_re.search(line)
@@ -107,6 +117,21 @@ def parse_log(log_path):
                 if pipeline is None:
                     pipeline = "transformer"
                 current_iteration = int(m.group(1))
+                _pending_al_nt, _pending_al_nv = None, None
+                _pending_base_nt, _pending_base_nv = None, None
+                continue
+
+            # Parse inline dataset sizes (TabPFN logs these in the main log)
+            m = al_size_re.search(line)
+            if m and current_iteration is not None:
+                _pending_al_nt = int(m.group(1))
+                _pending_al_nv = int(m.group(2))
+                continue
+
+            m = base_size_re.search(line)
+            if m and current_iteration is not None:
+                _pending_base_nt = int(m.group(1))
+                _pending_base_nv = int(m.group(2))
                 continue
 
             m = al_re.search(line)
@@ -124,13 +149,22 @@ def parse_log(log_path):
                 baseline_r2_scores.append(float(m.group(3)))
                 baseline_train_r2_scores.append(float(m.group(4)) if m.group(4) else None)
 
-                # Read dataset sizes from worker logs (authoritative source)
+                # Read dataset sizes: try worker logs first, fall back to inline
                 al_nt, al_nv = _read_worker_log_sizes(
                     log_dir, current_iteration, "al"
                 )
                 base_nt, base_nv = _read_worker_log_sizes(
                     log_dir, current_iteration, "baseline"
                 )
+                # Use inline sizes if worker logs unavailable (TabPFN pipeline)
+                if al_nt is None:
+                    al_nt = _pending_al_nt
+                if al_nv is None:
+                    al_nv = _pending_al_nv
+                if base_nt is None:
+                    base_nt = _pending_base_nt
+                if base_nv is None:
+                    base_nv = _pending_base_nv
 
                 iterations.append(current_iteration)
                 al_n_trains.append(al_nt)
@@ -201,7 +235,8 @@ def plot(data, output_path):
         return
 
     pipeline = data["pipeline"]
-    pipeline_label = "GP" if pipeline == "gp" else "Transformer"
+    _pipeline_labels = {"gp": "GP", "transformer": "Transformer", "tabpfn": "TabPFN"}
+    pipeline_label = _pipeline_labels.get(pipeline, pipeline.title())
 
     fig, axes = plt.subplots(1, 3, figsize=(18, 5))
     ax1, ax2, ax3 = axes
@@ -356,6 +391,7 @@ def main():
         candidates = [
             Path("active_learning_output/active_learning.log"),
             Path("active_learning_gp_output/active_learning.log"),
+            Path("active_learning_tabpfn_output/active_learning.log"),
         ]
         for c in candidates:
             if c.exists():
