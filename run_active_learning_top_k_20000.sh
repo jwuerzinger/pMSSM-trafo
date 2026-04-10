@@ -30,5 +30,5 @@
     --selection-strategy top_k \
     --n-select 20_000 \
     --output-dir active_learning_output_top_k_n_select_20k \
-    --gpu-ids 1,2
+    --gpu-ids 2,3
     
