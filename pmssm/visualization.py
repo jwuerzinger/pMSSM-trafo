@@ -353,12 +353,14 @@ def plot_data_histograms(X, Y, idx_train, idx_val, output_dir, model_name, itera
 
 
 def plot_parallel_coordinates(X, idx_train, idx_val, output_dir, model_name, iteration, logger,
-                              max_lines=500):
+                              max_lines=300):
     """
     Plot parallel coordinate chart for input parameters (train vs validation).
 
     Only non-fixed parameters (where lo < hi in PARAM_RANGES) are shown.
     Values are normalized to [0, 1] using PARAM_RANGES for comparability.
+    Train and validation sets are shown in separate side-by-side subplots
+    to avoid visual overlap.
 
     Args:
         X: Full input tensor (N, 19) in physical units.
@@ -401,37 +403,40 @@ def plot_parallel_coordinates(X, idx_train, idx_val, output_dir, model_name, ite
     X_train_norm = (X_train_sel - var_lo) / (var_hi - var_lo)
     X_val_norm = (X_val_sel - var_lo) / (var_hi - var_lo)
 
-    # Subsample if too many lines
-    if len(X_train_norm) > max_lines:
-        idx = np.random.choice(len(X_train_norm), max_lines, replace=False)
-        X_train_norm = X_train_norm[idx]
-    if len(X_val_norm) > max_lines:
-        idx = np.random.choice(len(X_val_norm), max_lines, replace=False)
-        X_val_norm = X_val_norm[idx]
+    n_train_total = len(X_train_norm)
+    n_val_total = len(X_val_norm)
 
-    fig, ax = plt.subplots(figsize=(max(14, n_axes * 1.2), 6))
+    # Subsample if too many lines
+    rng = np.random.default_rng(iteration)
+    if n_train_total > max_lines:
+        X_train_norm = X_train_norm[rng.choice(n_train_total, max_lines, replace=False)]
+    if n_val_total > max_lines:
+        X_val_norm = X_val_norm[rng.choice(n_val_total, max_lines, replace=False)]
+
+    # Alpha scales with sample count so dense plots aren't overwhelming
+    alpha_train = max(0.05, min(0.35, 30.0 / max(1, len(X_train_norm))))
+    alpha_val = max(0.08, min(0.45, 40.0 / max(1, len(X_val_norm))))
+
+    fig, axes = plt.subplots(1, 2, figsize=(max(14, n_axes * 1.4), 5.5), sharey=True)
     xs = np.arange(n_axes)
 
-    for row in X_train_norm:
-        ax.plot(xs, row, color='blue', alpha=0.03, linewidth=0.5)
-    for row in X_val_norm:
-        ax.plot(xs, row, color='orange', alpha=0.06, linewidth=0.5)
+    panels = [
+        (axes[0], X_train_norm, 'steelblue', alpha_train, f'Train  (n={n_train_total})'),
+        (axes[1], X_val_norm, 'darkorange', alpha_val, f'Val  (n={n_val_total})'),
+    ]
+    for ax, data, color, alpha, title in panels:
+        for row in data:
+            ax.plot(xs, row, color=color, alpha=alpha, linewidth=0.6)
+        ax.set_xticks(xs)
+        ax.set_xticklabels(var_names, rotation=45, ha='right', fontsize=9)
+        ax.set_ylim(-0.05, 1.05)
+        ax.set_title(title, fontsize=12)
+        ax.grid(True, alpha=0.3, axis='y')
+        for x in xs:
+            ax.axvline(x, color='grey', linewidth=0.5, alpha=0.5)
 
-    # Dummy lines for the legend
-    ax.plot([], [], color='blue', alpha=0.6, linewidth=1.5, label='Train')
-    ax.plot([], [], color='orange', alpha=0.6, linewidth=1.5, label='Val')
-
-    ax.set_xticks(xs)
-    ax.set_xticklabels(var_names, rotation=45, ha='right', fontsize=9)
-    ax.set_ylabel('Normalized value [0, 1]', fontsize=11)
-    ax.set_ylim(-0.05, 1.05)
-    ax.set_title(f'{model_name} Parallel Coordinates — Iteration {iteration}', fontsize=14)
-    ax.legend(fontsize=11, loc='upper right')
-    ax.grid(True, alpha=0.3, axis='y')
-
-    # Draw vertical axis lines
-    for x in xs:
-        ax.axvline(x, color='grey', linewidth=0.5, alpha=0.5)
+    axes[0].set_ylabel('Normalized value [0, 1]', fontsize=11)
+    fig.suptitle(f'{model_name} Parallel Coordinates — Iteration {iteration}', fontsize=14)
 
     plt.tight_layout()
     plot_path = output_dir / f'{model_name.lower()}_parallel_coords_iter{iteration:03d}.png'
