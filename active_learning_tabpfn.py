@@ -40,6 +40,7 @@ from pmssm import (
     # Visualization
     plot_data_histograms,
     plot_parallel_coordinates,
+    plot_candidate_uncertainty,
     plot_iteration_metrics,
     # Logging
     setup_logging,
@@ -812,6 +813,21 @@ def main(testing, n_iterations, n_candidates, n_select, n_ensemble_samples, n_da
                 top_indices = select_top_uncertain(candidates, pred_var, n_select)
 
         logger.info(f"Selected {len(top_indices)} points via {selection_strategy} (requested: {n_select}, available: {len(candidates)})")
+
+        # ---- Candidate uncertainty plots (AL + Baseline) ----
+        try:
+            _plot_pool_size = min(len(candidates), 20_000)
+            _plot_idx = torch.randperm(len(candidates))[:_plot_pool_size]
+            _plot_cands = candidates[_plot_idx]
+            _plot_al_var = pred_var[_plot_idx]
+            plot_candidate_uncertainty(_plot_cands, _plot_al_var, al_hist_dir,
+                                       "AL", iteration, logger)
+            _, _base_var_np = tabpfn_predict_with_variance(baseline_model, _plot_cands)
+            _base_pred_var = torch.from_numpy(_base_var_np).float().unsqueeze(1)
+            plot_candidate_uncertainty(_plot_cands, _base_pred_var, baseline_hist_dir,
+                                       "Baseline", iteration, logger)
+        except Exception as e:
+            logger.warning(f"Candidate uncertainty plot failed: {e}")
 
         csv_path = save_selected_points(candidates, pred_var, top_indices, output_dir, iteration)
         logger.info(f"Saved selected points to {csv_path}")

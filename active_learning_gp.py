@@ -47,6 +47,7 @@ from pmssm import (
     # Visualization
     plot_data_histograms,
     plot_parallel_coordinates,
+    plot_candidate_uncertainty,
     plot_iteration_metrics,
     plot_advanced_diagnostics,
     # Logging
@@ -1105,6 +1106,36 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, v
             val_metrics_path = iter_dir / "gof_al.csv"
             pd.DataFrame([val_metrics]).to_csv(val_metrics_path, index=False)
             logger.info(f"AL validation metrics saved to {val_metrics_path}")
+
+        # ---- Candidate uncertainty plots (AL + Baseline) ----
+        # Compute uncertainty on the full candidate pool for both models and
+        # plot std vs each input parameter. Done BEFORE selection to avoid
+        # `candidates` being overwritten by `selected_points_phys` in the
+        # entropy_batch path.
+        try:
+            _candidate_plot_pool = generate_candidate_pool(
+                min(n_candidates, 50_000), seed=iteration,
+            )
+            _al_plot_mean, _al_plot_var = compute_uncertainty_gp(
+                al_model, _candidate_plot_pool, data_min, data_max,
+                model_type=model_type, jitter=jitter, num_samples=gp_num_samples,
+                logger=logger,
+            )
+            plot_candidate_uncertainty(
+                _candidate_plot_pool, _al_plot_var,
+                al_hist_dir, "AL", iteration, logger,
+            )
+            _, _base_plot_var = compute_uncertainty_gp(
+                baseline_model, _candidate_plot_pool, data_min, data_max,
+                model_type=model_type, jitter=jitter, num_samples=gp_num_samples,
+                logger=logger,
+            )
+            plot_candidate_uncertainty(
+                _candidate_plot_pool, _base_plot_var,
+                baseline_hist_dir, "Baseline", iteration, logger,
+            )
+        except Exception as _e:
+            logger.warning(f"Candidate uncertainty plot failed: {_e}")
 
         # ---- Select new points ----
         if selection_strategy == "entropy_batch" and model_has_likelihood(model_type):

@@ -447,6 +447,125 @@ def plot_parallel_coordinates(X, idx_train, idx_val, output_dir, model_name, ite
         logger.info(f"{model_name} parallel coordinates saved to {output_dir}")
 
 
+def plot_candidate_uncertainty(candidates, pred_var, output_dir, model_name, iteration,
+                                logger, max_points=5000, n_bins=20):
+    """
+    Plot predicted uncertainty on candidate points vs each input parameter.
+
+    Creates a grid of subplots (one per non-fixed parameter). Each subplot shows
+    candidate uncertainty (standard deviation) as a function of the parameter
+    value, overlaid with a binned running mean to reveal structure.
+
+    Args:
+        candidates: Candidate tensor (N, 19) in physical units.
+        pred_var: Predicted variance tensor (N,) or (N, 1).
+        output_dir: Directory to save the plot.
+        model_name: Name identifier (e.g. "AL", "Baseline"). Used in filename and title.
+        iteration: Current iteration number.
+        logger: Logger instance.
+        max_points: Maximum number of points to scatter (subsample if more).
+        n_bins: Number of bins for the running mean line.
+    """
+    output_dir = Path(output_dir)
+
+    cand_np = candidates.detach().cpu().numpy() if hasattr(candidates, 'detach') else np.asarray(candidates)
+    var_np = pred_var.detach().cpu().numpy() if hasattr(pred_var, 'detach') else np.asarray(pred_var)
+    var_np = np.asarray(var_np).reshape(-1)
+    # Use standard deviation for plotting (more interpretable than variance)
+    std_np = np.sqrt(np.clip(var_np, a_min=0.0, a_max=None))
+
+    # Select only non-fixed parameters
+    var_indices = []
+    var_names = []
+    var_lo = []
+    var_hi = []
+    for i, key in enumerate(PARAM_ORDER):
+        lo, hi = PARAM_RANGES[key]
+        if lo < hi:
+            var_indices.append(i)
+            var_names.append(key.replace("IN_", ""))
+            var_lo.append(lo)
+            var_hi.append(hi)
+
+    if not var_indices:
+        return
+
+    n_params = len(var_indices)
+
+    # Subsample points if there are too many to scatter efficiently
+    n_total = len(cand_np)
+    rng = np.random.default_rng(iteration)
+    if n_total > max_points:
+        sel = rng.choice(n_total, max_points, replace=False)
+        cand_plot = cand_np[sel]
+        std_plot = std_np[sel]
+    else:
+        cand_plot = cand_np
+        std_plot = std_np
+
+    # Layout: 3 columns, enough rows to fit all parameters
+    n_cols = min(3, n_params)
+    n_rows = int(np.ceil(n_params / n_cols))
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 3.2 * n_rows),
+                              sharey=True)
+    axes = np.atleast_1d(axes).flatten()
+
+    # Fixed y-range for visual comparison across parameters
+    y_max = float(np.quantile(std_plot, 0.995)) * 1.05 if len(std_plot) else 1.0
+    if not np.isfinite(y_max) or y_max <= 0:
+        y_max = 1.0
+
+    color = 'steelblue' if model_name.lower().startswith('al') else 'darkorange'
+
+    for ax_idx, (param_idx, name, lo, hi) in enumerate(
+            zip(var_indices, var_names, var_lo, var_hi)):
+        ax = axes[ax_idx]
+        x = cand_plot[:, param_idx]
+        ax.scatter(x, std_plot, s=4, alpha=0.15, color=color, linewidths=0)
+
+        # Binned running mean of std vs parameter value
+        bin_edges = np.linspace(lo, hi, n_bins + 1)
+        bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+        bin_means = np.full(n_bins, np.nan)
+        # Use the full (unsubsampled) arrays for accurate binning
+        x_full = cand_np[:, param_idx]
+        for b in range(n_bins):
+            mask = (x_full >= bin_edges[b]) & (x_full < bin_edges[b + 1])
+            if b == n_bins - 1:
+                mask |= (x_full == bin_edges[-1])
+            if mask.any():
+                bin_means[b] = std_np[mask].mean()
+        ax.plot(bin_centers, bin_means, color='black', linewidth=1.6,
+                marker='o', markersize=3, label='binned mean')
+
+        ax.set_xlabel(name, fontsize=10)
+        ax.set_xlim(lo, hi)
+        ax.set_ylim(0, y_max)
+        ax.grid(True, alpha=0.3)
+        if ax_idx % n_cols == 0:
+            ax.set_ylabel('Candidate std', fontsize=10)
+
+    # Hide unused axes
+    for j in range(n_params, len(axes)):
+        axes[j].set_visible(False)
+
+    # Single legend on the first axis
+    axes[0].legend(loc='upper right', fontsize=8, framealpha=0.9)
+    fig.suptitle(
+        f'{model_name} Candidate Uncertainty vs Input Parameters — Iteration {iteration}  '
+        f'(N={n_total})',
+        fontsize=13,
+    )
+
+    plt.tight_layout()
+    plot_path = output_dir / f'{model_name.lower()}_candidate_uncertainty_iter{iteration:03d}.png'
+    plt.savefig(plot_path, dpi=130, bbox_inches='tight')
+    plt.close()
+
+    if logger:
+        logger.info(f"{model_name} candidate uncertainty plot saved to {plot_path}")
+
+
 def plot_iteration_metrics(iterations, al_metrics, baseline_metrics, output_dir, logger):
     """
     Plot validation loss, R² score, and dataset sizes across active learning iterations.
