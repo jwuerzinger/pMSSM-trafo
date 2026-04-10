@@ -286,9 +286,11 @@ def load_config_with_sweep(config_file, sweep_index=None):
               help="Directory containing MCMC ROOT files for static evaluation (e.g., data/19250082).")
 @click.option('--static-eval-size', default=100_000, type=int,
               help="Number of models to reserve from the random pool as a static evaluation set (default: 100000).")
+@click.option('--data-dir', default='data/18387358', type=str,
+              help="Directory containing training ROOT files (default: data/18387358).")
 @click.option('--gpu-ids', default='2,3', type=str,
               help="Comma-separated GPU IDs for AL and baseline models (default: 2,3).")
-def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, dropout, n_datasets, n_samples, val_fraction, output_dir, generate_data, min_gen_fraction, max_gen_attempts, gen_workers, selection_strategy, entropy_blur, entropy_beta, entropy_pool_size, candidate_generation, proximity_sampling, tolerance_sampling, target_value, config_file, sweep_index, early_stopping, patience, warm_starting, eval_data_path, compute_full_metrics, y_transform, mcmc_data_dir, static_eval_size, gpu_ids):
+def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, dropout, n_datasets, n_samples, val_fraction, output_dir, generate_data, min_gen_fraction, max_gen_attempts, gen_workers, selection_strategy, entropy_blur, entropy_beta, entropy_pool_size, candidate_generation, proximity_sampling, tolerance_sampling, target_value, config_file, sweep_index, early_stopping, patience, warm_starting, eval_data_path, compute_full_metrics, y_transform, mcmc_data_dir, static_eval_size, data_dir, gpu_ids):
     """
     Active learning pipeline for pMSSM relic density prediction.
 
@@ -432,7 +434,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
     logger.info("Loading data...")
     plots_dir = output_dir / "plots"
     plots_dir.mkdir(parents=True, exist_ok=True)
-    X, Y = load_pmssm_data(n_datasets=n_datasets, logger=logger, plot_dir=str(plots_dir))
+    X, Y = load_pmssm_data(n_datasets=n_datasets, logger=logger, plot_dir=str(plots_dir), data_dir=data_dir)
 
     # Load MCMC evaluation dataset if provided
     X_mcmc, Y_mcmc = None, None

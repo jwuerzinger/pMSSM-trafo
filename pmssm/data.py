@@ -33,7 +33,7 @@ def running_in_notebook():
 
 # ===== Data Loading =====
 
-def load_pmssm_data(n_datasets=-1, logger=None, plot_dir="plots", target="DMRD"):
+def load_pmssm_data(n_datasets=-1, logger=None, plot_dir="plots", target="DMRD", data_dir="data/18387358"):
     """
     Load pMSSM ROOT data with combined filter.
 
@@ -47,6 +47,7 @@ def load_pmssm_data(n_datasets=-1, logger=None, plot_dir="plots", target="DMRD")
         logger: Logger instance for output
         plot_dir: Directory to save histogram plot
         target: Target variable name (default: "DMRD")
+        data_dir: Directory containing ROOT files (default: "data/18387358")
 
     Returns:
         X: Input tensor (N, 19) in physical units
@@ -54,7 +55,7 @@ def load_pmssm_data(n_datasets=-1, logger=None, plot_dir="plots", target="DMRD")
     """
     import uproot
 
-    files = sorted(glob.glob("data/18387358/*.root"))
+    files = sorted(glob.glob(f"{data_dir}/*.root"))
     if logger:
         logger.info(f"Found {len(files)} ROOT files")
 

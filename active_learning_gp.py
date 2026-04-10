@@ -461,6 +461,8 @@ def load_config_with_sweep(config_file, sweep_index=None):
 @click.option('--config-file', default=None, type=str,
               help="YAML config file (overrides CLI args). Supports parameter sweeps.")
 @click.option('--sweep-index', default=None, type=int, help="Sweep combination index (requires --config-file).")
+@click.option('--data-dir', default='data/18387358', type=str,
+              help="Directory containing training ROOT files (default: data/18387358).")
 @click.option('--gpu-ids', default='0,1', type=str,
               help="Comma-separated GPU IDs for AL and baseline models (default: 0,1).")
 def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, val_fraction,
@@ -474,7 +476,7 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, v
          tolerance_sampling, proximity_sampling, entropy_pool_size,
          compute_full_metrics, eval_data_path, mcmc_data_dir, static_eval_size,
          track_lengthscales, advanced_plots,
-         config_file, sweep_index, gpu_ids):
+         config_file, sweep_index, data_dir, gpu_ids):
     """
     Active learning pipeline for pMSSM relic density prediction using GP models.
 
@@ -626,7 +628,7 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, v
     plots_dir = output_dir / "plots"
     plots_dir.mkdir(parents=True, exist_ok=True)
     X, Y = load_pmssm_data(n_datasets=n_datasets, logger=logger,
-                           plot_dir=str(plots_dir))
+                           plot_dir=str(plots_dir), data_dir=data_dir)
 
     # Store full dataset for baseline random sampling
     X_full, Y_full = X.clone(), Y.clone()
