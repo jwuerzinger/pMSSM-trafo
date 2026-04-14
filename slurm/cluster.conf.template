@@ -14,6 +14,7 @@ CLUSTER_GPU_GRES_2="gpu:2"
 CLUSTER_GPU_GRES_1="gpu:1"
 PIXI_ENV="rocm"
 CLUSTER_DATA_DIR="/ptmp/jwuerzin/data"
+# TABPFN_TOKEN="<your-api-key>"   # get from https://ux.priorlabs.ai/account
 
 # ---- Raven (NVIDIA A100) ----------------------------------------------------
 # CLUSTER_PARTITION="gpu"
@@ -22,3 +23,4 @@ CLUSTER_DATA_DIR="/ptmp/jwuerzin/data"
 # CLUSTER_GPU_GRES_1="gpu:a100:1"
 # PIXI_ENV="cuda"
 # CLUSTER_DATA_DIR="/ptmp/jwuerzin/data"
+# TABPFN_TOKEN="<your-api-key>"   # get from https://ux.priorlabs.ai/account
