@@ -118,6 +118,7 @@ echo "[params] AL_GENERATE_DATA=${AL_GENERATE_DATA:---generate-data}"
     --proximity-sampling "${AL_PROXIMITY_SAMPLING:-0.1}" \
     --tolerance-sampling "${AL_TOLERANCE_SAMPLING:-1.0}" \
     --mcmc-data-dir "${AL_MCMC_DATA_DIR:-/ptmp/jwuerzin/data/19250082}" \
+    --data-dir "${AL_DATA_DIR:-/ptmp/jwuerzin/data/18387358}" \
     --static-eval-size "${AL_STATIC_EVAL_SIZE:-100000}" \
     --gen-workers "${AL_GEN_WORKERS:-20}" \
     --output-dir "${AL_OUTPUT_DIR:-/ptmp/jwuerzin/active_learning_tabpfn_entropy_output_slurm}" \

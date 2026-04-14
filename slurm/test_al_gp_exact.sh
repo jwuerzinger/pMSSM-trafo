@@ -86,7 +86,7 @@ echo "[gpu] PIXI_ENV=${PIXI_ENV}"
     --jitter 1e-3 \
     --use-ard \
     --warm-starting \
-    --data-dir /ptmp/jwuerzin/data \
+    --data-dir /ptmp/jwuerzin/data/18387358 \
     --output-dir /ptmp/jwuerzin/active_learning_test_output \
     --gpu-ids 0,1
 

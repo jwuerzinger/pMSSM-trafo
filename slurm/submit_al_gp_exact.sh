@@ -90,6 +90,7 @@ echo "[gpu] Using --gpu-ids ${GPU_IDS} (${N_GPUS} GPU(s) detected)"
     --tolerance-sampling 1.0 \
     --gen-workers 20 \
     --mcmc-data-dir /ptmp/jwuerzin/data/19250082 \
+    --data-dir /ptmp/jwuerzin/data/18387358 \
     --kernel RBF \
     --lengthscale 1.0 \
     --noise 1e-2 \

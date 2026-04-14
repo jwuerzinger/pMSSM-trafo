@@ -58,6 +58,7 @@ echo "[gpu] CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<not set>}"
     --proximity-sampling 0.1 \
     --tolerance-sampling 1.0 \
     --mcmc-data-dir /ptmp/jwuerzin/data/19250082 \
+    --data-dir /ptmp/jwuerzin/data/18387358 \
     --static-eval-size 10000 \
     --output-dir /ptmp/jwuerzin/test_al_tabpfn_output \
     --gpu-id 0
