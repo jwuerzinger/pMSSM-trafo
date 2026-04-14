@@ -73,6 +73,8 @@ echo "[gpu] ROCR_VISIBLE_DEVICES=${ROCR_VISIBLE_DEVICES:-<not set>}"
 echo "[gpu] PIXI_ENV=${PIXI_ENV}"
 echo "[gpu] Using --gpu-ids ${GPU_IDS} (${N_GPUS} GPU(s) detected)"
 
+source "${REPO_ROOT}/slurm/resume_args.sh"
+
 "${PYTHON}" active_learning_gp.py \
     --model-type exact_gp \
     --epochs 10000 \
@@ -97,7 +99,7 @@ echo "[gpu] Using --gpu-ids ${GPU_IDS} (${N_GPUS} GPU(s) detected)"
     --use-ard \
     --warm-starting \
     --selection-strategy top_k \
-    --output-dir "${AL_OUTPUT_DIR:-/ptmp/jwuerzin/output/active_learning_exact_gp_top_k_output}" \
+    --output-dir "${AL_OUTPUT_DIR:-/ptmp/jwuerzin/output/active_learning_exact_gp_top_k_output}" ${RESUME_ARGS} \
     --gpu-ids "${GPU_IDS}"
 
 echo "=========================================="

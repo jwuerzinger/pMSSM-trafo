@@ -45,6 +45,7 @@ from . import training
 from . import evaluation
 from . import visualization
 from . import logging_utils
+from . import resume
 from . import model_generation
 
 # Backward compatibility: expose commonly used functions at package level

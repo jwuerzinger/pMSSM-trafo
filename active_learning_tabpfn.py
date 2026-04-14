@@ -330,9 +330,13 @@ def load_config_with_sweep(config_file, sweep_index=None):
               help="Number of models to reserve from the random pool as a static evaluation set (default: 100000).")
 @click.option('--data-dir', default='data/18387358', type=str,
               help="Directory containing training ROOT files (default: data/18387358).")
+@click.option('--resume-from', default=None, type=str,
+              help="Path to previous output dir to resume from (loads state.pt).")
+@click.option('--n-additional-iterations', default=None, type=int,
+              help="If --resume-from given, run this many more iterations.")
 @click.option('--gpu-id', default='0', type=str,
               help="GPU ID for TabPFN inference (default: 0).")
-def main(testing, n_iterations, n_candidates, n_select, n_ensemble_samples, n_datasets, n_samples, val_fraction, output_dir, generate_data, min_gen_fraction, max_gen_attempts, gen_workers, selection_strategy, entropy_blur, entropy_beta, entropy_pool_size, candidate_generation, proximity_sampling, tolerance_sampling, target_value, config_file, sweep_index, mcmc_data_dir, static_eval_size, data_dir, gpu_id):
+def main(testing, n_iterations, n_candidates, n_select, n_ensemble_samples, n_datasets, n_samples, val_fraction, output_dir, generate_data, min_gen_fraction, max_gen_attempts, gen_workers, selection_strategy, entropy_blur, entropy_beta, entropy_pool_size, candidate_generation, proximity_sampling, tolerance_sampling, target_value, config_file, sweep_index, mcmc_data_dir, static_eval_size, data_dir, resume_from, n_additional_iterations, gpu_id):
     """
     Active learning pipeline for pMSSM relic density prediction using TabPFN.
 
@@ -554,7 +558,49 @@ def main(testing, n_iterations, n_candidates, n_select, n_ensemble_samples, n_da
     al_on_static_random_losses, al_on_static_random_r2 = [], []
     baseline_on_static_random_losses, baseline_on_static_random_r2 = [], []
 
-    for iteration in range(1, n_iterations + 1):
+    # ---- Resume handling ----------------------------------------------------
+    start_iteration = 1
+    if resume_from is not None:
+        from pmssm.resume import load_state, restore_rng
+        if n_additional_iterations is None:
+            raise click.UsageError("--n-additional-iterations is required with --resume-from")
+        saved = load_state(resume_from)
+        if saved is None:
+            raise click.UsageError(f"No state.pt found in {resume_from}")
+        logger.info(f"Resuming from {resume_from} (last completed iteration: {saved['iteration']})")
+        X, Y = saved["X"], saved["Y"]
+        X_val, Y_val = saved["X_val"], saved["Y_val"]
+        baseline_add_indices = saved["baseline_add_indices"]
+        prev_n_add_train = saved["prev_n_add_train"]
+        prev_n_add_val = saved["prev_n_add_val"]
+        all_selected_points = saved["all_selected_points"]
+        iteration_numbers = saved["iteration_numbers"]
+        al_train_losses = saved["al_train_losses"]; al_val_losses = saved["al_val_losses"]
+        al_r2_scores = saved["al_r2_scores"]; al_train_r2_scores = saved["al_train_r2_scores"]
+        al_n_train = saved["al_n_train"]; al_n_val = saved["al_n_val"]
+        baseline_train_losses = saved["baseline_train_losses"]
+        baseline_val_losses = saved["baseline_val_losses"]
+        baseline_r2_scores = saved["baseline_r2_scores"]
+        baseline_train_r2_scores = saved["baseline_train_r2_scores"]
+        baseline_n_train = saved["baseline_n_train"]; baseline_n_val = saved["baseline_n_val"]
+        al_on_base_val_losses = saved["al_on_base_val_losses"]
+        al_on_base_val_r2 = saved["al_on_base_val_r2"]
+        base_on_al_val_losses = saved["base_on_al_val_losses"]
+        base_on_al_val_r2 = saved["base_on_al_val_r2"]
+        al_on_mcmc_losses = saved["al_on_mcmc_losses"]; al_on_mcmc_r2 = saved["al_on_mcmc_r2"]
+        baseline_on_mcmc_losses = saved["baseline_on_mcmc_losses"]
+        baseline_on_mcmc_r2 = saved["baseline_on_mcmc_r2"]
+        al_on_static_random_losses = saved["al_on_static_random_losses"]
+        al_on_static_random_r2 = saved["al_on_static_random_r2"]
+        baseline_on_static_random_losses = saved["baseline_on_static_random_losses"]
+        baseline_on_static_random_r2 = saved["baseline_on_static_random_r2"]
+        eval_r2_scores = saved.get("eval_r2_scores", [])
+        restore_rng(saved["rng"])
+        start_iteration = saved["iteration"] + 1
+        n_iterations = saved["iteration"] + n_additional_iterations
+        logger.info(f"Resuming at iteration {start_iteration}, will run through {n_iterations}")
+
+    for iteration in range(start_iteration, n_iterations + 1):
         logger.info(f"=== Global Iteration {iteration} ===")
 
         # Create iteration directory for logs and plots
@@ -970,6 +1016,41 @@ def main(testing, n_iterations, n_candidates, n_select, n_ensemble_samples, n_da
                                      fixed_axes=True)
 
         # No checkpoints to update — TabPFN is re-fitted each iteration
+
+        # ---- Checkpoint run state for resume -------------------------------
+        from pmssm.resume import save_state, capture_rng
+        save_state(output_dir, {
+            "iteration": iteration,
+            "X": X, "Y": Y, "X_val": X_val, "Y_val": Y_val,
+            "baseline_add_indices": baseline_add_indices,
+            "prev_n_add_train": prev_n_add_train,
+            "prev_n_add_val": prev_n_add_val,
+            "all_selected_points": all_selected_points,
+            "iteration_numbers": iteration_numbers,
+            "al_train_losses": al_train_losses, "al_val_losses": al_val_losses,
+            "al_r2_scores": al_r2_scores, "al_train_r2_scores": al_train_r2_scores,
+            "al_n_train": al_n_train, "al_n_val": al_n_val,
+            "baseline_train_losses": baseline_train_losses,
+            "baseline_val_losses": baseline_val_losses,
+            "baseline_r2_scores": baseline_r2_scores,
+            "baseline_train_r2_scores": baseline_train_r2_scores,
+            "baseline_n_train": baseline_n_train,
+            "baseline_n_val": baseline_n_val,
+            "al_on_base_val_losses": al_on_base_val_losses,
+            "al_on_base_val_r2": al_on_base_val_r2,
+            "base_on_al_val_losses": base_on_al_val_losses,
+            "base_on_al_val_r2": base_on_al_val_r2,
+            "al_on_mcmc_losses": al_on_mcmc_losses, "al_on_mcmc_r2": al_on_mcmc_r2,
+            "baseline_on_mcmc_losses": baseline_on_mcmc_losses,
+            "baseline_on_mcmc_r2": baseline_on_mcmc_r2,
+            "al_on_static_random_losses": al_on_static_random_losses,
+            "al_on_static_random_r2": al_on_static_random_r2,
+            "baseline_on_static_random_losses": baseline_on_static_random_losses,
+            "baseline_on_static_random_r2": baseline_on_static_random_r2,
+            "eval_r2_scores": eval_r2_scores,
+            "rng": capture_rng(),
+        })
+        logger.info(f"[resume] state.pt saved (iteration {iteration})")
 
     # Plot iteration metrics
     al_metrics = {

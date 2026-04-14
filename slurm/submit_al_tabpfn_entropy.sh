@@ -118,6 +118,8 @@ echo "[params] AL_OUTPUT_DIR=${AL_OUTPUT_DIR:-/ptmp/jwuerzin/output/active_learn
 echo "[params] AL_GENERATE_DATA=${AL_GENERATE_DATA:---generate-data}"
 
 # ---- Run active learning -----------------------------------------------------
+source "${REPO_ROOT}/slurm/resume_args.sh"
+
 "${PYTHON}" active_learning_tabpfn.py \
     --n-samples "${AL_N_SAMPLES:-2000}" \
     --n-iterations "${AL_N_ITERATIONS:-40}" \
@@ -133,7 +135,7 @@ echo "[params] AL_GENERATE_DATA=${AL_GENERATE_DATA:---generate-data}"
     --gen-workers "${AL_GEN_WORKERS:-20}" \
     --output-dir "${AL_OUTPUT_DIR:-/ptmp/jwuerzin/output/active_learning_tabpfn_entropy_output_slurm}" \
     --gpu-id 0 \
-    ${AL_GENERATE_DATA:---generate-data} \
+    ${AL_GENERATE_DATA:---generate-data} ${RESUME_ARGS} \
     ${AL_EXTRA_ARGS:-}
 
 echo "=========================================="

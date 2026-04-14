@@ -58,6 +58,8 @@ echo "[gpu] ROCR_VISIBLE_DEVICES=${ROCR_VISIBLE_DEVICES:-<not set>}"
 echo "[gpu] SLURM_GPUS_ON_NODE=${SLURM_GPUS_ON_NODE:-<not set>}"
 echo "[gpu] PIXI_ENV=${PIXI_ENV}"
 
+source "${REPO_ROOT}/slurm/resume_args.sh"
+
 "${PYTHON}" active_learning.py \
     --y-transform log \
     --n-samples 500 \
@@ -75,7 +77,7 @@ echo "[gpu] PIXI_ENV=${PIXI_ENV}"
     --output-dir "${AL_OUTPUT_DIR:-/ptmp/jwuerzin/output/test_al_transformer_output}" \
     --early-stopping \
     --patience 50 \
-    --warm-starting \
+    --warm-starting ${RESUME_ARGS} \
     --gpu-ids 0
 
 echo "=========================================="

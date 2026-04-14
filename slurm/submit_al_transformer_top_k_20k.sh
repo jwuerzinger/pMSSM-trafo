@@ -80,6 +80,8 @@ echo "[gpu] PIXI_ENV=${PIXI_ENV}"
 echo "[gpu] Using --gpu-ids ${GPU_IDS} (${N_GPUS} GPU(s) detected)"
 
 # ---- Run active learning -----------------------------------------------------
+source "${REPO_ROOT}/slurm/resume_args.sh"
+
 "${PYTHON}" active_learning.py \
     --y-transform log \
     --epochs 10000 \
@@ -96,7 +98,7 @@ echo "[gpu] Using --gpu-ids ${GPU_IDS} (${N_GPUS} GPU(s) detected)"
     --early-stopping \
     --selection-strategy top_k \
     --n-select 20000 \
-    --output-dir "${AL_OUTPUT_DIR:-/ptmp/jwuerzin/output/active_learning_output_top_k_n_select_20k}" \
+    --output-dir "${AL_OUTPUT_DIR:-/ptmp/jwuerzin/output/active_learning_output_top_k_n_select_20k}" ${RESUME_ARGS} \
     --gpu-ids "${GPU_IDS}"
 
 echo "=========================================="

@@ -70,6 +70,8 @@ echo "[gpu] PIXI_ENV=${PIXI_ENV}"
 # ---- Run active learning (exact_gp, 5 iterations, with data generation) ------
 # --gpu-ids 0,1: AL model on cuda:0, baseline on cuda:1 (parallel processes)
 # Slurm remaps physical GPUs via CUDA_VISIBLE_DEVICES, so 0,1 are always correct
+source "${REPO_ROOT}/slurm/resume_args.sh"
+
 "${PYTHON}" active_learning_gp.py \
     --model-type exact_gp \
     --n-samples 2000 \
@@ -91,7 +93,7 @@ echo "[gpu] PIXI_ENV=${PIXI_ENV}"
     --data-dir ${CLUSTER_DATA_DIR}/18387358 \
     --mcmc-data-dir ${CLUSTER_DATA_DIR}/19250082 \
     --static-eval-size 10000 \
-    --output-dir "${AL_OUTPUT_DIR:-/ptmp/jwuerzin/output/test_al_gp_exact_output/}" \
+    --output-dir "${AL_OUTPUT_DIR:-/ptmp/jwuerzin/output/test_al_gp_exact_output/}" ${RESUME_ARGS} \
     --gpu-ids 0,1
 
 echo "=========================================="

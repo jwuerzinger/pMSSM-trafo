@@ -68,6 +68,8 @@ echo "[gpu] ROCR_VISIBLE_DEVICES=${ROCR_VISIBLE_DEVICES:-<not set>}"
 echo "[gpu] SLURM_GPUS_ON_NODE=${SLURM_GPUS_ON_NODE:-<not set>}"
 echo "[gpu] PIXI_ENV=${PIXI_ENV}"
 
+source "${REPO_ROOT}/slurm/resume_args.sh"
+
 "${PYTHON}" active_learning_tabpfn.py \
     --n-samples 500 \
     --n-iterations 5 \
@@ -82,7 +84,7 @@ echo "[gpu] PIXI_ENV=${PIXI_ENV}"
     --mcmc-data-dir ${CLUSTER_DATA_DIR}/19250082 \
     --data-dir ${CLUSTER_DATA_DIR}/18387358 \
     --static-eval-size 10000 \
-    --output-dir "${AL_OUTPUT_DIR:-/ptmp/jwuerzin/output/test_al_tabpfn_output}" \
+    --output-dir "${AL_OUTPUT_DIR:-/ptmp/jwuerzin/output/test_al_tabpfn_output}" ${RESUME_ARGS} \
     --gpu-id 0
 
 echo "=========================================="

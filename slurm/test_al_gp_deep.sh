@@ -58,6 +58,8 @@ echo "[gpu] ROCR_VISIBLE_DEVICES=${ROCR_VISIBLE_DEVICES:-<not set>}"
 echo "[gpu] SLURM_GPUS_ON_NODE=${SLURM_GPUS_ON_NODE:-<not set>}"
 echo "[gpu] PIXI_ENV=${PIXI_ENV}"
 
+source "${REPO_ROOT}/slurm/resume_args.sh"
+
 "${PYTHON}" active_learning_gp.py \
     --model-type deep_gp \
     --n-samples 500 \
@@ -79,7 +81,7 @@ echo "[gpu] PIXI_ENV=${PIXI_ENV}"
     --mcmc-data-dir ${CLUSTER_DATA_DIR}/19250082 \
     --static-eval-size 10000 \
     --warm-starting \
-    --output-dir "${AL_OUTPUT_DIR:-/ptmp/jwuerzin/output/test_al_gp_deep_output}" \
+    --output-dir "${AL_OUTPUT_DIR:-/ptmp/jwuerzin/output/test_al_gp_deep_output}" ${RESUME_ARGS} \
     --gpu-ids 0
 
 echo "=========================================="

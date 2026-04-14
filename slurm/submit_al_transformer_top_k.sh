@@ -119,6 +119,8 @@ echo "[params] AL_OUTPUT_DIR=${AL_OUTPUT_DIR:-/ptmp/jwuerzin/output/active_learn
 echo "[params] AL_GENERATE_DATA=${AL_GENERATE_DATA:---generate-data}"
 
 # ---- Run active learning -----------------------------------------------------
+source "${REPO_ROOT}/slurm/resume_args.sh"
+
 "${PYTHON}" active_learning.py \
     --y-transform log \
     --n-samples "${AL_N_SAMPLES:-2000}" \
@@ -138,7 +140,7 @@ echo "[params] AL_GENERATE_DATA=${AL_GENERATE_DATA:---generate-data}"
     --warm-starting \
     --selection-strategy top_k \
     --gpu-ids "${GPU_IDS}" \
-    ${AL_GENERATE_DATA:---generate-data} \
+    ${AL_GENERATE_DATA:---generate-data} ${RESUME_ARGS} \
     ${AL_EXTRA_ARGS:-}
 
 echo "=========================================="
