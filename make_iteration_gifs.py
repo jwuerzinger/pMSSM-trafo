@@ -171,6 +171,7 @@ def generate_gifs(run_dir, fps=2, logger=None):
         ("*_hist_true_vs_pred_train.png", "*_hist_true_vs_pred_train.png", "hist_true_vs_pred_train"),
         ("*_hist_true_vs_pred_validation.png", "*_hist_true_vs_pred_validation.png", "hist_true_vs_pred_validation"),
         ("losses_*.png", "losses_*.png", "losses"),
+        ("al_candidate_uncertainty_*.png", "baseline_candidate_uncertainty_*.png", "candidate_uncertainty"),
     ]
 
     for pat_al, pat_base, name in plot_types:
