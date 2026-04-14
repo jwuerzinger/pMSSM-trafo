@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/bash -l
 # ==============================================================================
 # Slurm job: GP active learning — ExactGP
 #
@@ -11,13 +11,12 @@
 #   sbatch --partition=rvs --account=mpp slurm/submit_al_gp_exact.sh
 # ==============================================================================
 #SBATCH --job-name=al_gp_exact
-#SBATCH --partition=gpu
-#SBATCH --account=mpp
+#SBATCH --constraint="gpu"
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:a100:2
-#SBATCH --cpus-per-task=24
-#SBATCH --mem=128G
+#SBATCH --cpus-per-task=36
+#SBATCH --mem=250000
 #SBATCH --time=24:00:00
 #SBATCH --output=/raven/u/jwuerzin/pMSSM-trafo/logs/%x_%j.out
 #SBATCH --error=/raven/u/jwuerzin/pMSSM-trafo/logs/%x_%j.err

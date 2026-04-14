@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/bash -l
 # ==============================================================================
 # Slurm array job: hyperparameter sweep for any active learning script
 #
@@ -38,13 +38,12 @@
 #       injected here. Put everything else in the YAML.
 # ==============================================================================
 #SBATCH --job-name=al_sweep
-#SBATCH --partition=gpu
-#SBATCH --account=mpp
+#SBATCH --constraint="gpu"
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:a100:1
-#SBATCH --cpus-per-task=8
-#SBATCH --mem=64G
+#SBATCH --cpus-per-task=18
+#SBATCH --mem=125000
 #SBATCH --time=04:00:00
 #SBATCH --output=/raven/u/jwuerzin/pMSSM-trafo/logs/%x_%A_%a.out
 #SBATCH --error=/raven/u/jwuerzin/pMSSM-trafo/logs/%x_%A_%a.err

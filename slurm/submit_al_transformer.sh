@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/bash -l
 # ==============================================================================
 # Slurm job: Transformer-based active learning (PMSSMTransformerTabular + MC Dropout)
 #
@@ -37,13 +37,12 @@
 #   sbatch --export=ALL,AL_OUTPUT_DIR=my_run slurm/submit_al_transformer.sh
 # ==============================================================================
 #SBATCH --job-name=al_transformer
-#SBATCH --partition=gpu
-#SBATCH --account=mpp
+#SBATCH --constraint="gpu"
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:a100:2
-#SBATCH --cpus-per-task=24
-#SBATCH --mem=128G
+#SBATCH --cpus-per-task=36
+#SBATCH --mem=250000
 #SBATCH --time=24:00:00
 #SBATCH --output=/raven/u/jwuerzin/pMSSM-trafo/logs/%x_%j.out
 #SBATCH --error=/raven/u/jwuerzin/pMSSM-trafo/logs/%x_%j.err

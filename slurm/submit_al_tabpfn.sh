@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/bash -l
 # ==============================================================================
 # Slurm job: TabPFN-based active learning
 #
@@ -44,13 +44,12 @@
 #   sbatch --export=ALL,AL_SELECTION_STRATEGY=entropy_batch slurm/submit_al_tabpfn.sh
 # ==============================================================================
 #SBATCH --job-name=al_tabpfn
-#SBATCH --partition=gpu
-#SBATCH --account=mpp
+#SBATCH --constraint="gpu"
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:a100:1
-#SBATCH --cpus-per-task=16
-#SBATCH --mem=64G
+#SBATCH --cpus-per-task=18
+#SBATCH --mem=125000
 #SBATCH --time=24:00:00
 #SBATCH --output=/raven/u/jwuerzin/pMSSM-trafo/logs/%x_%j.out
 #SBATCH --error=/raven/u/jwuerzin/pMSSM-trafo/logs/%x_%j.err

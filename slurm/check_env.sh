@@ -1,11 +1,10 @@
-#!/bin/bash
+#!/bin/bash -l
 # Quick environment check — verifies imports and CUDA before submitting full jobs.
 # Uses gpudev partition (short queue, starts almost immediately).
 #
 # Submit: sbatch slurm/check_env.sh
 #SBATCH --job-name=al_check_env
 #SBATCH --partition=gpudev
-#SBATCH --account=mpp
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:a100:1

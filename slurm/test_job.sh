@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/bash -l
 # ==============================================================================
 # Test job: GP-based active learning, ~30 min, 2 GPUs (no data generation)
 #
@@ -13,13 +13,12 @@
 # Expected output: active_learning_test_output/ with 5 AL iterations
 # ==============================================================================
 #SBATCH --job-name=al_test
-#SBATCH --partition=gpu
-#SBATCH --account=mpp
+#SBATCH --constraint="gpu"
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:a100:2
-#SBATCH --cpus-per-task=8
-#SBATCH --mem=64G
+#SBATCH --cpus-per-task=36
+#SBATCH --mem=250000
 #SBATCH --time=00:45:00
 #SBATCH --output=/raven/u/jwuerzin/pMSSM-trafo/logs/%x_%j.out
 #SBATCH --error=/raven/u/jwuerzin/pMSSM-trafo/logs/%x_%j.err
