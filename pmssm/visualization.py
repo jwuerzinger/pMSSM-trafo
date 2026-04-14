@@ -59,7 +59,7 @@ def gp_predict(model, X_norm, model_type, jitter=1e-3, num_samples=8):
         all_means = []
         with torch.no_grad(), \
              gpytorch.settings.fast_pred_var(False), \
-             gpytorch.settings.cholesky_jitter(float=jitter, double=jitter), \
+             gpytorch.settings.cholesky_jitter(float_value=jitter, double_value=jitter), \
              gpytorch.settings.num_likelihood_samples(num_samples):
             for start in range(0, len(X_norm), batch_size):
                 x_batch = X_norm[start:start + batch_size].to(device)
@@ -73,7 +73,7 @@ def gp_predict(model, X_norm, model_type, jitter=1e-3, num_samples=8):
         all_means = []
         with torch.no_grad(), \
              gpytorch.settings.fast_pred_var(), \
-             gpytorch.settings.cholesky_jitter(float=jitter, double=jitter):
+             gpytorch.settings.cholesky_jitter(float_value=jitter, double_value=jitter):
             for start in range(0, len(X_norm), batch_size):
                 x_batch = X_norm[start:start + batch_size].to(device)
                 preds = model.likelihood(model(x_batch))
@@ -735,7 +735,7 @@ def plot_advanced_diagnostics(model, X_eval_norm, Y_eval_true, X_train_norm,
         model.likelihood.eval()
         with torch.no_grad(), \
              gpytorch.settings.fast_pred_var(False), \
-             gpytorch.settings.cholesky_jitter(float=jitter, double=jitter), \
+             gpytorch.settings.cholesky_jitter(float_value=jitter, double_value=jitter), \
              gpytorch.settings.num_likelihood_samples(num_samples):
             preds = model.likelihood(model(X_eval_norm))
             mean = preds.mean.detach().mean(dim=0).squeeze().cpu()
@@ -744,7 +744,7 @@ def plot_advanced_diagnostics(model, X_eval_norm, Y_eval_true, X_train_norm,
         model.likelihood.eval()
         with torch.no_grad(), \
              gpytorch.settings.fast_pred_var(), \
-             gpytorch.settings.cholesky_jitter(float=jitter, double=jitter):
+             gpytorch.settings.cholesky_jitter(float_value=jitter, double_value=jitter):
             preds = model.likelihood(model(X_eval_norm))
             mean = preds.mean.detach().cpu()
 
