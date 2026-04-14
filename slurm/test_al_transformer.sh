@@ -1,28 +1,35 @@
-#!/bin/bash -l
+#!/bin/bash
 # ==============================================================================
-# Test job: Transformer (MC Dropout) active learning smoke test on gpudev
-# (15 min, 1 GPU, no data generation)
+# Test job: Transformer (MC Dropout) active learning smoke test (1 GPU)
 #
-# Submit from repo root:
-#   mkdir -p logs
-#   sbatch slurm/test_al_transformer.sh
+# Submit from repo root (partition/gres come from cluster.conf):
+#   sbatch --partition="${CLUSTER_PARTITION_DEV}" \
+#          --gres="${CLUSTER_GPU_GRES_1}" slurm/test_al_transformer.sh
 #
 # Expected output: /ptmp/jwuerzin/test_al_transformer_output/ with 2 AL iterations
 # ==============================================================================
 #SBATCH --job-name=test_al_transformer
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=18
-#SBATCH --mem=125000
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=64G
 #SBATCH --time=00:15:00
-#SBATCH --output=/raven/u/jwuerzin/pMSSM-trafo/logs/%x_%j.out
-#SBATCH --error=/raven/u/jwuerzin/pMSSM-trafo/logs/%x_%j.err
+#SBATCH --output=logs/%x_%j.out
+#SBATCH --error=logs/%x_%j.err
+# Partition and gres are set via sbatch flags from cluster.conf.
+# See slurm/cluster.conf.template for details.
 
 set -euo pipefail
 
-REPO_ROOT="${SLURM_SUBMIT_DIR:-/raven/u/jwuerzin/pMSSM-trafo}"
+REPO_ROOT="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
 cd "${REPO_ROOT}"
 mkdir -p "${REPO_ROOT}/logs"
+
+if [[ -f "${REPO_ROOT}/slurm/cluster.conf" ]]; then
+    source "${REPO_ROOT}/slurm/cluster.conf"
+else
+    echo "[warn] slurm/cluster.conf not found — using defaults"
+fi
 
 export PYTHONUNBUFFERED=1
 export PYTHONPATH="${REPO_ROOT}/al_pmssmwithgp/model:${PYTHONPATH:-}"
@@ -34,10 +41,11 @@ echo " Started: $(date)"
 echo " Repo:    ${REPO_ROOT}"
 echo "=========================================="
 
-PYTHON="${REPO_ROOT}/.pixi/envs/default/bin/python"
+PIXI_ENV="${PIXI_ENV:-cuda}"
+PYTHON="${REPO_ROOT}/.pixi/envs/${PIXI_ENV}/bin/python"
 if [[ ! -x "${PYTHON}" ]]; then
-    echo "[setup] pixi env not found — running: pixi install"
-    /u/jwuerzin/.pixi/bin/pixi install
+    echo "[setup] pixi env '${PIXI_ENV}' not found — running: pixi install -e ${PIXI_ENV}"
+    /u/jwuerzin/.pixi/bin/pixi install -e "${PIXI_ENV}"
 fi
 if [[ ! -x "${PYTHON}" ]]; then
     echo "[error] Python executable not found after pixi install: ${PYTHON}"
@@ -46,7 +54,9 @@ fi
 echo "[env] $(${PYTHON} --version)"
 
 echo "[gpu] CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<not set>}"
+echo "[gpu] ROCR_VISIBLE_DEVICES=${ROCR_VISIBLE_DEVICES:-<not set>}"
 echo "[gpu] SLURM_GPUS_ON_NODE=${SLURM_GPUS_ON_NODE:-<not set>}"
+echo "[gpu] PIXI_ENV=${PIXI_ENV}"
 
 "${PYTHON}" active_learning.py \
     --y-transform log \
