@@ -127,7 +127,7 @@ def compute_gp_r2(model, x_val, y_val, model_type, jitter=1e-3, num_samples=8, t
         model.likelihood.eval()
         with torch.no_grad(), \
              gpytorch.settings.fast_pred_var(False), \
-             gpytorch.settings.cholesky_jitter(jitter), \
+             gpytorch.settings.cholesky_jitter(float=jitter, double=jitter), \
              gpytorch.settings.num_likelihood_samples(num_samples):
             preds = model.likelihood(model(x_val.to(device)))
             y_pred_transformed = preds.mean.detach().mean(dim=0).squeeze()
@@ -136,7 +136,7 @@ def compute_gp_r2(model, x_val, y_val, model_type, jitter=1e-3, num_samples=8, t
         model.likelihood.eval()
         with torch.no_grad(), \
              gpytorch.settings.fast_pred_var(), \
-             gpytorch.settings.cholesky_jitter(jitter):
+             gpytorch.settings.cholesky_jitter(float=jitter, double=jitter):
             preds = model.likelihood(model(x_val.to(device)))
             y_pred_transformed = preds.mean.detach()
 
@@ -211,7 +211,7 @@ def compute_comprehensive_metrics(model, X_eval_norm, Y_eval_true, model_type,
         model.likelihood.eval()
         with torch.no_grad(), \
              gpytorch.settings.fast_pred_var(False), \
-             gpytorch.settings.cholesky_jitter(jitter), \
+             gpytorch.settings.cholesky_jitter(float=jitter, double=jitter), \
              gpytorch.settings.num_likelihood_samples(num_samples):
             preds = model.likelihood(model(X_eval_norm))
             mean = preds.mean.detach().mean(dim=0).squeeze()
@@ -223,7 +223,7 @@ def compute_comprehensive_metrics(model, X_eval_norm, Y_eval_true, model_type,
         model.likelihood.eval()
         with torch.no_grad(), \
              gpytorch.settings.fast_pred_var(), \
-             gpytorch.settings.cholesky_jitter(jitter):
+             gpytorch.settings.cholesky_jitter(float=jitter, double=jitter):
             preds = model.likelihood(model(X_eval_norm))
             mean = preds.mean.detach()
             lower, upper = preds.confidence_region()

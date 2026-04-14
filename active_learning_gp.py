@@ -264,7 +264,7 @@ def select_entropy_batch(model, X_candidates_norm, n_select, model_type,
              gpytorch.settings.max_cg_iterations(300), \
              gpytorch.settings.fast_pred_var(False), \
              gpytorch.settings.fast_pred_samples(True), \
-             gpytorch.settings.cholesky_jitter(jitter), \
+             gpytorch.settings.cholesky_jitter(float=jitter, double=jitter), \
              gpytorch.settings.num_likelihood_samples(ns):
             preds = model.likelihood(model(x_batch))
             m = preds.mean.detach()
@@ -320,7 +320,7 @@ def select_entropy_batch(model, X_candidates_norm, n_select, model_type,
          gpytorch.settings.max_cg_iterations(300), \
          gpytorch.settings.fast_pred_var(False), \
          gpytorch.settings.fast_pred_samples(True), \
-         gpytorch.settings.cholesky_jitter(jitter), \
+         gpytorch.settings.cholesky_jitter(float=jitter, double=jitter), \
          gpytorch.settings.num_likelihood_samples(ns):
         preds_focus = model.likelihood(model(x_pool))
         if is_deep:
