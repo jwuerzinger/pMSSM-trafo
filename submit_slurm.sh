@@ -34,6 +34,14 @@ sbatch ${COMMON} --gres=${CLUSTER_GPU_GRES_2} slurm/submit_al_gp_exact_top_k.sh
 sbatch ${COMMON} --gres=${CLUSTER_GPU_GRES_2} slurm/submit_al_gp_deep.sh
 sbatch ${COMMON} --gres=${CLUSTER_GPU_GRES_2} slurm/submit_al_gp_deep_top_k.sh
 
+# TabPFN requires a license token to download model weights.
+# Prompt once here; the token is propagated to the batch job via the environment.
+if [[ -z "${TABPFN_TOKEN:-}" ]]; then
+    read -rsp "TABPFN_TOKEN not set. Enter your token (input hidden): " TABPFN_TOKEN
+    echo
+fi
+export TABPFN_TOKEN
+
 # TabPFN (1 GPU)
 sbatch ${COMMON} --gres=${CLUSTER_GPU_GRES_1} slurm/submit_al_tabpfn.sh
 sbatch ${COMMON} --gres=${CLUSTER_GPU_GRES_1} slurm/submit_al_tabpfn_entropy.sh

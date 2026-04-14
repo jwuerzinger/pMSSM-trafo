@@ -30,5 +30,13 @@ sbatch ${COMMON} --gres=${CLUSTER_GPU_GRES_2} slurm/test_al_gp_exact.sh
 # DeepGP (1 GPU)
 sbatch ${COMMON} --gres=${CLUSTER_GPU_GRES_1} slurm/test_al_gp_deep.sh
 
+# TabPFN requires a license token to download model weights.
+# Prompt once here; the token is propagated to the batch job via the environment.
+if [[ -z "${TABPFN_TOKEN:-}" ]]; then
+    read -rsp "TABPFN_TOKEN not set. Enter your token (input hidden): " TABPFN_TOKEN
+    echo
+fi
+export TABPFN_TOKEN
+
 # TabPFN (1 GPU)
 sbatch ${COMMON} --gres=${CLUSTER_GPU_GRES_1} slurm/test_al_tabpfn.sh

@@ -31,6 +31,16 @@ else
     echo "[warn] slurm/cluster.conf not found — using defaults"
 fi
 
+# TabPFN requires a license token to download model weights non-interactively.
+# Set it via: export TABPFN_TOKEN="<key>"  (get key at https://ux.priorlabs.ai/account)
+if [[ -z "${TABPFN_TOKEN:-}" ]]; then
+    echo "[error] TABPFN_TOKEN is not set. Cannot run TabPFN without a license token."
+    echo "        Submit via submit_slurm_tests.sh (prompts automatically), or:"
+    echo "        export TABPFN_TOKEN='<your-api-key>' && bash submit_slurm_tests.sh"
+    exit 1
+fi
+export TABPFN_TOKEN
+
 export PYTHONUNBUFFERED=1
 export PYTHONPATH="${REPO_ROOT}/al_pmssmwithgp/model:${PYTHONPATH:-}"
 
