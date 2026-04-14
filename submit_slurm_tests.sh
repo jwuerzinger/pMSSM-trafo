@@ -41,4 +41,4 @@ fi
 export TABPFN_TOKEN
 
 # TabPFN (1 GPU)
-sbatch ${COMMON} --gres=${CLUSTER_GPU_GRES_1} slurm/test_al_tabpfn.sh
+sbatch ${COMMON} --gres=${CLUSTER_GPU_GRES_1} --export=ALL,TABPFN_TOKEN="${TABPFN_TOKEN}" slurm/test_al_tabpfn.sh
