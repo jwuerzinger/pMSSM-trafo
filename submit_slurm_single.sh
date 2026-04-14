@@ -38,7 +38,11 @@ sub() {
     base="${base#submit_}"   # submit_al_foo → al_foo
     local jobname="${base}_single"
     echo "[submit] ${script} → ${dir}  (job name: ${jobname})"
+    # Override cpus/mem to the 1-GPU ratio (see slurm/cluster.conf).
+    # The scripts' #SBATCH directives match the 2-GPU ratio and exceed the
+    # per-GPU cap (>1/4 of 500G node memory) when only 1 GPU is requested.
     sbatch ${COMMON} --gres="${CLUSTER_GPU_GRES_1}" \
+           --cpus-per-task=18 --mem=125000 \
            --job-name="${jobname}" --export="${exp}" "${script}"
 }
 
