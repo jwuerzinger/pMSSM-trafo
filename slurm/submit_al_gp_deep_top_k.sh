@@ -97,7 +97,7 @@ echo "[gpu] Using --gpu-ids ${GPU_IDS} (${N_GPUS} GPU(s) detected)"
     --use-ard \
     --warm-starting \
     --selection-strategy top_k \
-    --output-dir /ptmp/jwuerzin/active_learning_deep_gp_top_k_output \
+    --output-dir "${AL_OUTPUT_DIR:-/ptmp/jwuerzin/output/active_learning_deep_gp_top_k_output}" \
     --gpu-ids "${GPU_IDS}"
 
 echo "=========================================="

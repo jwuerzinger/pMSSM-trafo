@@ -98,7 +98,7 @@ echo "[gpu] Using --gpu-ids ${GPU_IDS} (${N_GPUS} GPU(s) detected)"
     --jitter 1e-3 \
     --use-ard \
     --warm-starting \
-    --output-dir /ptmp/jwuerzin/active_learning_deep_gp_output \
+    --output-dir "${AL_OUTPUT_DIR:-/ptmp/jwuerzin/output/active_learning_deep_gp_output}" \
     --gpu-ids "${GPU_IDS}"
 
 echo "=========================================="

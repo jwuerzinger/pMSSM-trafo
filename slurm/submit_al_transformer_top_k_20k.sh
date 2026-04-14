@@ -96,7 +96,7 @@ echo "[gpu] Using --gpu-ids ${GPU_IDS} (${N_GPUS} GPU(s) detected)"
     --early-stopping \
     --selection-strategy top_k \
     --n-select 20000 \
-    --output-dir /ptmp/jwuerzin/active_learning_output_top_k_n_select_20k \
+    --output-dir "${AL_OUTPUT_DIR:-/ptmp/jwuerzin/output/active_learning_output_top_k_n_select_20k}" \
     --gpu-ids "${GPU_IDS}"
 
 echo "=========================================="

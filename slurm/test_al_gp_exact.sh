@@ -91,7 +91,7 @@ echo "[gpu] PIXI_ENV=${PIXI_ENV}"
     --data-dir ${CLUSTER_DATA_DIR}/18387358 \
     --mcmc-data-dir ${CLUSTER_DATA_DIR}/19250082 \
     --static-eval-size 10000 \
-    --output-dir /ptmp/jwuerzin/test_al_gp_exact_output/ \
+    --output-dir "${AL_OUTPUT_DIR:-/ptmp/jwuerzin/output/test_al_gp_exact_output/}" \
     --gpu-ids 0,1
 
 echo "=========================================="

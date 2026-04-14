@@ -6,7 +6,7 @@
 #   sbatch --partition="${CLUSTER_PARTITION_DEV}" \
 #          --gres="${CLUSTER_GPU_GRES_1}" slurm/test_al_transformer.sh
 #
-# Expected output: /ptmp/jwuerzin/test_al_transformer_output/ with 5 AL iterations
+# Expected output: /ptmp/jwuerzin/output/test_al_transformer_output/ with 5 AL iterations
 # ==============================================================================
 #SBATCH --job-name=test_al_transformer
 #SBATCH --nodes=1
@@ -72,7 +72,7 @@ echo "[gpu] PIXI_ENV=${PIXI_ENV}"
     --mcmc-data-dir ${CLUSTER_DATA_DIR}/19250082 \
     --data-dir ${CLUSTER_DATA_DIR}/18387358 \
     --static-eval-size 10000 \
-    --output-dir /ptmp/jwuerzin/test_al_transformer_output \
+    --output-dir "${AL_OUTPUT_DIR:-/ptmp/jwuerzin/output/test_al_transformer_output}" \
     --early-stopping \
     --patience 50 \
     --warm-starting \

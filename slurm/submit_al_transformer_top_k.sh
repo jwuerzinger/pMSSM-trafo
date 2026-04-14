@@ -115,7 +115,7 @@ echo "[params] AL_N_SELECT=${AL_N_SELECT:-500}"
 echo "[params] AL_N_CANDIDATES=${AL_N_CANDIDATES:-1000000}"
 echo "[params] AL_EPOCHS=${AL_EPOCHS:-10000}"
 echo "[params] AL_GEN_WORKERS=${AL_GEN_WORKERS:-20}"
-echo "[params] AL_OUTPUT_DIR=${AL_OUTPUT_DIR:-/ptmp/jwuerzin/active_learning_output_top_k_slurm}"
+echo "[params] AL_OUTPUT_DIR=${AL_OUTPUT_DIR:-/ptmp/jwuerzin/output/active_learning_output_top_k_slurm}"
 echo "[params] AL_GENERATE_DATA=${AL_GENERATE_DATA:---generate-data}"
 
 # ---- Run active learning -----------------------------------------------------
@@ -132,7 +132,7 @@ echo "[params] AL_GENERATE_DATA=${AL_GENERATE_DATA:---generate-data}"
     --data-dir "${AL_DATA_DIR:-${CLUSTER_DATA_DIR}/18387358}" \
     --static-eval-size "${AL_STATIC_EVAL_SIZE:-100000}" \
     --gen-workers "${AL_GEN_WORKERS:-20}" \
-    --output-dir "${AL_OUTPUT_DIR:-/ptmp/jwuerzin/active_learning_output_top_k_slurm}" \
+    --output-dir "${AL_OUTPUT_DIR:-/ptmp/jwuerzin/output/active_learning_output_top_k_slurm}" \
     --early-stopping \
     --patience "${AL_PATIENCE:-200}" \
     --warm-starting \

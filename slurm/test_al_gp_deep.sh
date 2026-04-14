@@ -6,7 +6,7 @@
 #   sbatch --partition="${CLUSTER_PARTITION_DEV}" \
 #          --gres="${CLUSTER_GPU_GRES_1}" slurm/test_al_gp_deep.sh
 #
-# Expected output: /ptmp/jwuerzin/test_al_gp_deep_output/ with 5 AL iterations
+# Expected output: /ptmp/jwuerzin/output/test_al_gp_deep_output/ with 5 AL iterations
 # ==============================================================================
 #SBATCH --job-name=test_al_gp_deep
 #SBATCH --nodes=1
@@ -79,7 +79,7 @@ echo "[gpu] PIXI_ENV=${PIXI_ENV}"
     --mcmc-data-dir ${CLUSTER_DATA_DIR}/19250082 \
     --static-eval-size 10000 \
     --warm-starting \
-    --output-dir /ptmp/jwuerzin/test_al_gp_deep_output \
+    --output-dir "${AL_OUTPUT_DIR:-/ptmp/jwuerzin/output/test_al_gp_deep_output}" \
     --gpu-ids 0
 
 echo "=========================================="

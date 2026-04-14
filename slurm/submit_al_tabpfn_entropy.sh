@@ -114,7 +114,7 @@ echo "[params] AL_N_SELECT=${AL_N_SELECT:-500}"
 echo "[params] AL_N_CANDIDATES=${AL_N_CANDIDATES:-1000000}"
 echo "[params] AL_N_ENSEMBLE_SAMPLES=${AL_N_ENSEMBLE_SAMPLES:-16}"
 echo "[params] AL_SELECTION_STRATEGY=${AL_SELECTION_STRATEGY:-entropy_batch}"
-echo "[params] AL_OUTPUT_DIR=${AL_OUTPUT_DIR:-/ptmp/jwuerzin/active_learning_tabpfn_entropy_output_slurm}"
+echo "[params] AL_OUTPUT_DIR=${AL_OUTPUT_DIR:-/ptmp/jwuerzin/output/active_learning_tabpfn_entropy_output_slurm}"
 echo "[params] AL_GENERATE_DATA=${AL_GENERATE_DATA:---generate-data}"
 
 # ---- Run active learning -----------------------------------------------------
@@ -131,7 +131,7 @@ echo "[params] AL_GENERATE_DATA=${AL_GENERATE_DATA:---generate-data}"
     --data-dir "${AL_DATA_DIR:-${CLUSTER_DATA_DIR}/18387358}" \
     --static-eval-size "${AL_STATIC_EVAL_SIZE:-100000}" \
     --gen-workers "${AL_GEN_WORKERS:-20}" \
-    --output-dir "${AL_OUTPUT_DIR:-/ptmp/jwuerzin/active_learning_tabpfn_entropy_output_slurm}" \
+    --output-dir "${AL_OUTPUT_DIR:-/ptmp/jwuerzin/output/active_learning_tabpfn_entropy_output_slurm}" \
     --gpu-id 0 \
     ${AL_GENERATE_DATA:---generate-data} \
     ${AL_EXTRA_ARGS:-}
