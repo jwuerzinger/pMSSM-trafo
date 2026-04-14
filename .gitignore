@@ -2,6 +2,7 @@
 pixi.lock
 .pixi/*
 !.pixi/config.toml
+stubs/
 data/
 __pycache__/
 pmssm/__pycache__/

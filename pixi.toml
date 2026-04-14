@@ -35,14 +35,21 @@ cuda = "12.6"
 
 # ---------- AMD (ROCm) feature ----------
 # conda-forge does not ship ROCm PyTorch, so we install via pip from the
-# PyTorch ROCm wheel index.  We use rocm6.1/torch 2.4.x because the rocm6.2
-# index only has torch 2.5.x which requires pytorch-triton-rocm==3.1.0 — a
-# package that was pulled from PyPI.  Update if your cluster has a newer ROCm.
+# PyTorch ROCm wheel index.  pytorch-triton-rocm was pulled from PyPI so we
+# exclude it from the resolver — it is only needed for torch.compile (custom
+# kernel JIT), which we do not use.  With the exclusion we can install the
+# current torch 2.7.x / rocm6.3 wheel, which is compatible with ROCm 7.x and
+# has gfx942 (MI300A) support.
 [feature.rocm.dependencies]
 python = ">=3.11,<3.13"
 
+[feature.rocm.pypi-options]
+extra-index-urls = ["https://download.pytorch.org/whl/rocm6.3"]
+find-links = [{path = "stubs/"}]  # stub wheels for pytorch-triton-rocm (pulled from PyPI)
+index-strategy = "unsafe-best-match"
+
 [feature.rocm.pypi-dependencies]
-torch = {version = ">=2.4.0,<2.5.0", index = "https://download.pytorch.org/whl/rocm6.1"}
+torch = ">=2.7.0,<2.8.0"
 gpytorch = ">=1.12"
 
 # ---------- Environments ----------
