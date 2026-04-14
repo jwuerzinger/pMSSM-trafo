@@ -324,7 +324,7 @@ def select_entropy_batch(model, X_candidates_norm, n_select, model_type,
          gpytorch.settings.num_likelihood_samples(ns):
         preds_focus = model.likelihood(model(x_pool))
         if is_deep:
-            mean = preds_focus.mean.detach().mean(dim=0).squeeze()
+            mean = preds_focus.mean.detach().mean(dim=0).reshape(-1)
             covar = preds_focus.covariance_matrix.detach().mean(dim=0)
         else:
             mean = preds_focus.mean.detach()

@@ -616,18 +616,27 @@ def train_gp_worker(gpu_id, X, Y, X_val, Y_val, data_min, data_max,
     )
 
     # Warm-start: load previous iteration's state dict if provided.
-    # Use strict=False so that parameters whose shapes changed (e.g. DeepGP
-    # inducing points, which scale with training set size) are skipped rather
-    # than raising a RuntimeError. Fixed-size parameters such as kernel
-    # lengthscales, noise, and ARD weights are still loaded correctly.
+    # Filter out parameters whose shapes changed between iterations (e.g. DeepGP/
+    # SparseGP inducing points, which scale with training set size) so that
+    # fixed-size parameters like kernel lengthscales, noise, and ARD weights are
+    # still restored. strict=False handles the resulting missing keys gracefully.
     if warm_start_path is not None and Path(warm_start_path).exists():
         ckpt = torch.load(warm_start_path, map_location=device)
-        missing, unexpected = model.load_state_dict(ckpt['model_state_dict'], strict=False)
+        model_state = model.state_dict()
+        ckpt_model = ckpt['model_state_dict']
+        compatible = {k: v for k, v in ckpt_model.items()
+                      if k in model_state and v.shape == model_state[k].shape}
+        skipped = [k for k in ckpt_model if k not in compatible]
+        model.load_state_dict(compatible, strict=False)
+        if skipped:
+            logger.info(f"Warm-start: skipped {len(skipped)} param(s) with shape mismatch "
+                        f"(inducing points re-initialised) — kernel hyperparameters carried over.")
         if model_has_likelihood(model_type):
-            model.likelihood.load_state_dict(ckpt['likelihood_state_dict'], strict=False)
-        if missing or unexpected:
-            logger.info(f"Warm-start: {len(missing)} param(s) not restored (shape mismatch / new), "
-                        f"{len(unexpected)} unexpected — kernel hyperparameters carried over.")
+            ckpt_lik = ckpt['likelihood_state_dict']
+            lik_state = model.likelihood.state_dict()
+            compatible_lik = {k: v for k, v in ckpt_lik.items()
+                              if k in lik_state and v.shape == lik_state[k].shape}
+            model.likelihood.load_state_dict(compatible_lik, strict=False)
         logger.info(f"Warm-started from checkpoint: {warm_start_path}")
     elif warm_start_path is not None:
         logger.warning(f"Warm-start checkpoint not found: {warm_start_path}, training from scratch")
