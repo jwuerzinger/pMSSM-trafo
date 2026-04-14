@@ -67,7 +67,7 @@ echo "[gpu] ROCR_VISIBLE_DEVICES=${ROCR_VISIBLE_DEVICES:-<not set>}"
 echo "[gpu] SLURM_GPUS_ON_NODE=${SLURM_GPUS_ON_NODE:-<not set>}"
 echo "[gpu] PIXI_ENV=${PIXI_ENV}"
 
-# ---- Run active learning (exact_gp, 5 iterations, no data generation) --------
+# ---- Run active learning (exact_gp, 5 iterations, with data generation) ------
 # --gpu-ids 0,1: AL model on cuda:0, baseline on cuda:1 (parallel processes)
 # Slurm remaps physical GPUs via CUDA_VISIBLE_DEVICES, so 0,1 are always correct
 "${PYTHON}" active_learning_gp.py \
@@ -80,6 +80,8 @@ echo "[gpu] PIXI_ENV=${PIXI_ENV}"
     --learning-rate 1e-3 \
     --n-candidates 20000 \
     --n-select 10 \
+    --generate-data \
+    --gen-workers 8 \
     --kernel RBF \
     --lengthscale 1.0 \
     --noise 1e-2 \

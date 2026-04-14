@@ -73,6 +73,8 @@ echo "[gpu] PIXI_ENV=${PIXI_ENV}"
     --noise 1e-2 \
     --jitter 1e-3 \
     --use-ard \
+    --generate-data \
+    --gen-workers 8 \
     --data-dir ${CLUSTER_DATA_DIR}/18387358 \
     --mcmc-data-dir ${CLUSTER_DATA_DIR}/19250082 \
     --static-eval-size 10000 \

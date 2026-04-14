@@ -67,6 +67,8 @@ echo "[gpu] PIXI_ENV=${PIXI_ENV}"
     --epochs 100 \
     --entropy-pool-size 1000 \
     --tolerance-sampling 1.0 \
+    --generate-data \
+    --gen-workers 8 \
     --mcmc-data-dir ${CLUSTER_DATA_DIR}/19250082 \
     --data-dir ${CLUSTER_DATA_DIR}/18387358 \
     --static-eval-size 10000 \
