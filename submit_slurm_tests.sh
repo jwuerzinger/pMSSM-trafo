@@ -1,19 +1,34 @@
 #!/bin/bash
-# Submit all architecture test jobs to Slurm.
+# Submit all architecture smoke-test jobs to Slurm (dev partition).
+# Cluster-specific settings (partition, gres, pixi env) are read from
+# slurm/cluster.conf — copy slurm/cluster.conf.template and edit as needed.
+#
 # Run from repo root: bash submit_slurm_tests.sh
 
 set -euo pipefail
 
-mkdir -p /raven/u/jwuerzin/pMSSM-trafo/logs
+REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
 
-# Transformer
-sbatch slurm/test_al_transformer.sh
+if [[ ! -f "${REPO_ROOT}/slurm/cluster.conf" ]]; then
+    echo "Error: slurm/cluster.conf not found."
+    echo "       cp slurm/cluster.conf.template slurm/cluster.conf"
+    exit 1
+fi
+source "${REPO_ROOT}/slurm/cluster.conf"
+export PIXI_ENV
 
-# ExactGP
-sbatch slurm/test_al_gp_exact.sh
+mkdir -p "${REPO_ROOT}/logs"
 
-# DeepGP
-sbatch slurm/test_al_gp_deep.sh
+COMMON="--partition=${CLUSTER_PARTITION_DEV}"
 
-# TabPFN
-sbatch slurm/test_al_tabpfn.sh
+# Transformer (1 GPU)
+sbatch ${COMMON} --gres=${CLUSTER_GPU_GRES_1} slurm/test_al_transformer.sh
+
+# ExactGP (2 GPUs)
+sbatch ${COMMON} --gres=${CLUSTER_GPU_GRES_2} slurm/test_al_gp_exact.sh
+
+# DeepGP (1 GPU)
+sbatch ${COMMON} --gres=${CLUSTER_GPU_GRES_1} slurm/test_al_gp_deep.sh
+
+# TabPFN (1 GPU)
+sbatch ${COMMON} --gres=${CLUSTER_GPU_GRES_1} slurm/test_al_tabpfn.sh

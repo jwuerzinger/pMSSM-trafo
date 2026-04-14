@@ -10,10 +10,8 @@
 # Expected output: /ptmp/jwuerzin/test_al_transformer_output/ with 2 AL iterations
 # ==============================================================================
 #SBATCH --job-name=test_al_transformer
-#SBATCH --partition=gpudev
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --gres=gpu:a100:1
 #SBATCH --cpus-per-task=18
 #SBATCH --mem=125000
 #SBATCH --time=00:15:00
