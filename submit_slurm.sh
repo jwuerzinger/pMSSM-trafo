@@ -1,24 +1,39 @@
 #!/bin/bash
 # Submit all active learning jobs to Slurm.
+# Cluster-specific settings (partition, account, gres, pixi env) are read from
+# slurm/cluster.conf — copy slurm/cluster.conf.template and edit as needed.
+#
 # Run from repo root: bash submit_slurm.sh
 
 set -euo pipefail
 
-mkdir -p /raven/u/jwuerzin/pMSSM-trafo/logs
+REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
 
-# Transformer
-sbatch slurm/submit_al_transformer.sh
-sbatch slurm/submit_al_transformer_top_k.sh
-sbatch slurm/submit_al_transformer_top_k_20k.sh
+if [[ ! -f "${REPO_ROOT}/slurm/cluster.conf" ]]; then
+    echo "Error: slurm/cluster.conf not found."
+    echo "       cp slurm/cluster.conf.template slurm/cluster.conf"
+    exit 1
+fi
+source "${REPO_ROOT}/slurm/cluster.conf"
+export PIXI_ENV
 
-# ExactGP
-sbatch slurm/submit_al_gp_exact.sh
-sbatch slurm/submit_al_gp_exact_top_k.sh
+mkdir -p "${REPO_ROOT}/logs"
 
-# DeepGP
-sbatch slurm/submit_al_gp_deep.sh
-sbatch slurm/submit_al_gp_deep_top_k.sh
+COMMON="--partition=${CLUSTER_PARTITION} --account=${CLUSTER_ACCOUNT}"
 
-# TabPFN
-sbatch slurm/submit_al_tabpfn.sh
-sbatch slurm/submit_al_tabpfn_entropy.sh
+# Transformer (2 GPUs)
+sbatch ${COMMON} --gres=${CLUSTER_GPU_GRES_2} slurm/submit_al_transformer.sh
+sbatch ${COMMON} --gres=${CLUSTER_GPU_GRES_2} slurm/submit_al_transformer_top_k.sh
+sbatch ${COMMON} --gres=${CLUSTER_GPU_GRES_2} slurm/submit_al_transformer_top_k_20k.sh
+
+# ExactGP (2 GPUs)
+sbatch ${COMMON} --gres=${CLUSTER_GPU_GRES_2} slurm/submit_al_gp_exact.sh
+sbatch ${COMMON} --gres=${CLUSTER_GPU_GRES_2} slurm/submit_al_gp_exact_top_k.sh
+
+# DeepGP (2 GPUs)
+sbatch ${COMMON} --gres=${CLUSTER_GPU_GRES_2} slurm/submit_al_gp_deep.sh
+sbatch ${COMMON} --gres=${CLUSTER_GPU_GRES_2} slurm/submit_al_gp_deep_top_k.sh
+
+# TabPFN (1 GPU)
+sbatch ${COMMON} --gres=${CLUSTER_GPU_GRES_1} slurm/submit_al_tabpfn.sh
+sbatch ${COMMON} --gres=${CLUSTER_GPU_GRES_1} slurm/submit_al_tabpfn_entropy.sh

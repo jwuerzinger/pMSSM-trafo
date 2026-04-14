@@ -1,12 +1,12 @@
-#!/bin/bash -l
+#!/bin/bash
 # ==============================================================================
 # Slurm array job: hyperparameter sweep for any active learning script
 #
 # Each array task runs one combination from a YAML sweep config.
 # The Python scripts handle sweep logic via --config-file + --sweep-index.
 #
-# Usage (submit from repo root):
-#   sbatch --array=0-8 slurm/submit_sweep.sh <config.yaml>
+# Usage (submit from repo root; partition/account/gres come from cluster.conf):
+#   sbatch $(slurm/cluster_flags.sh 1gpu) --array=0-8 slurm/submit_sweep.sh <config.yaml>
 #
 # The config file path is the first positional argument ($1). It can be
 # relative (resolved from repo root) or absolute. Example configs:
@@ -38,22 +38,30 @@
 #       injected here. Put everything else in the YAML.
 # ==============================================================================
 #SBATCH --job-name=al_sweep
-#SBATCH --constraint="gpu"
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --gres=gpu:a100:1
-#SBATCH --cpus-per-task=18
-#SBATCH --mem=125000
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=64G
 #SBATCH --time=04:00:00
-#SBATCH --output=/raven/u/jwuerzin/pMSSM-trafo/logs/%x_%A_%a.out
-#SBATCH --error=/raven/u/jwuerzin/pMSSM-trafo/logs/%x_%A_%a.err
+#SBATCH --output=logs/%x_%A_%a.out
+#SBATCH --error=logs/%x_%A_%a.err
+# Partition, account, and gres are set via sbatch flags from cluster.conf.
+# See slurm/cluster.conf.template for details.
 
 set -euo pipefail
 
 # ---- Resolve repo root -------------------------------------------------------
-REPO_ROOT="${SLURM_SUBMIT_DIR:-/raven/u/jwuerzin/pMSSM-trafo}"
+REPO_ROOT="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
 cd "${REPO_ROOT}"
 mkdir -p "${REPO_ROOT}/logs"
+
+# ---- Cluster config ----------------------------------------------------------
+if [[ -f "${REPO_ROOT}/slurm/cluster.conf" ]]; then
+    source "${REPO_ROOT}/slurm/cluster.conf"
+else
+    echo "[warn] slurm/cluster.conf not found — using defaults"
+    echo "       cp slurm/cluster.conf.template slurm/cluster.conf"
+fi
 
 export PYTHONUNBUFFERED=1
 export PYTHONPATH="${REPO_ROOT}/al_pmssmwithgp/model:${PYTHONPATH:-}"
@@ -87,10 +95,11 @@ echo "[config] Config file: ${CONFIG_FILE}"
 echo "[config] Sweep index: ${SLURM_ARRAY_TASK_ID}"
 
 # ---- Pixi environment --------------------------------------------------------
-PYTHON="${REPO_ROOT}/.pixi/envs/default/bin/python"
+PIXI_ENV="${PIXI_ENV:-cuda}"
+PYTHON="${REPO_ROOT}/.pixi/envs/${PIXI_ENV}/bin/python"
 if [[ ! -x "${PYTHON}" ]]; then
-    echo "[setup] pixi env not found — running: pixi install"
-    /u/jwuerzin/.pixi/bin/pixi install
+    echo "[setup] pixi env '${PIXI_ENV}' not found — running: pixi install -e ${PIXI_ENV}"
+    /u/jwuerzin/.pixi/bin/pixi install -e "${PIXI_ENV}"
 fi
 if [[ ! -x "${PYTHON}" ]]; then
     echo "[error] Python executable not found after pixi install: ${PYTHON}"
@@ -99,6 +108,8 @@ fi
 echo "[env] $(${PYTHON} --version)"
 
 echo "[gpu] CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<not set>}"
+echo "[gpu] ROCR_VISIBLE_DEVICES=${ROCR_VISIBLE_DEVICES:-<not set>}"
+echo "[gpu] PIXI_ENV=${PIXI_ENV}"
 echo "[gpu] Using --gpu-ids 0 (single GPU per array task)"
 
 # ---- Output directory (one subdirectory per task) ----------------------------

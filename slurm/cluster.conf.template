@@ -1,0 +1,24 @@
+# =============================================================================
+# Cluster-specific SLURM configuration
+#
+# Copy this file to slurm/cluster.conf and uncomment the block for your cluster:
+#   cp slurm/cluster.conf.template slurm/cluster.conf
+#
+# slurm/cluster.conf is gitignored — each user/cluster keeps its own copy.
+# =============================================================================
+
+# ---- Viper (AMD GPUs) -------------------------------------------------------
+CLUSTER_PARTITION="apu"
+CLUSTER_PARTITION_DEV="apudev"
+CLUSTER_GPU_GRES_2="gpu:2"
+CLUSTER_GPU_GRES_1="gpu:1"
+CLUSTER_ACCOUNT="mpp_apu"
+PIXI_ENV="rocm"
+
+# ---- Raven (NVIDIA A100) ----------------------------------------------------
+# CLUSTER_PARTITION="gpu"
+# CLUSTER_PARTITION_DEV="gpudev"
+# CLUSTER_GPU_GRES_2="gpu:a100:2"
+# CLUSTER_GPU_GRES_1="gpu:a100:1"
+# CLUSTER_ACCOUNT="mpp"
+# PIXI_ENV="cuda"
