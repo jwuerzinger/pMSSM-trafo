@@ -39,6 +39,7 @@ else
 fi
 
 export PYTHONUNBUFFERED=1
+export PYTORCH_HIP_ALLOC_CONF=expandable_segments:True
 export PYTHONPATH="${REPO_ROOT}/al_pmssmwithgp/model:${PYTHONPATH:-}"
 
 echo "=========================================="

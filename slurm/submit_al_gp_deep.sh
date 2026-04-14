@@ -36,6 +36,7 @@ else
 fi
 
 export PYTHONUNBUFFERED=1
+export PYTORCH_HIP_ALLOC_CONF=expandable_segments:True
 export PYTHONPATH="${REPO_ROOT}/al_pmssmwithgp/model:${PYTHONPATH:-}"
 
 echo "=========================================="
@@ -98,6 +99,7 @@ source "${REPO_ROOT}/slurm/resume_args.sh"
     --lengthscale 1.0 \
     --noise 1e-2 \
     --jitter 1e-3 \
+    --num-inducing-max 256 \
     --use-ard \
     --warm-starting \
     --output-dir "${AL_OUTPUT_DIR:-/ptmp/jwuerzin/output/active_learning_deep_gp_output}" ${RESUME_ARGS} \
