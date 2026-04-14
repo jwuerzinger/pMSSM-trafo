@@ -8,11 +8,11 @@
 # This script requests 1 GPU. Pass --gpu-id 0 — Slurm always allocates the
 # device as cuda:0 inside the job via CUDA_VISIBLE_DEVICES.
 #
-# Submit from repo root (partition/account/gres come from cluster.conf):
+# Submit from repo root (partition/gres come from cluster.conf):
 #   sbatch $(slurm/cluster_flags.sh 1gpu) slurm/submit_al_tabpfn_entropy.sh
 #
 # Or override on the command line:
-#   sbatch --partition=rvs --account=mpp --gres=${CLUSTER_GPU_GRES_1} slurm/submit_al_tabpfn_entropy.sh
+#   sbatch --partition="${CLUSTER_PARTITION}" --gres="${CLUSTER_GPU_GRES_1}" slurm/submit_al_tabpfn_entropy.sh
 #
 # Customize via environment variables (export or --export=ALL,VAR=val):
 #   AL_N_SAMPLES              Initial dataset size               (default: 2000)
@@ -51,7 +51,7 @@
 #SBATCH --time=24:00:00
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err
-# Partition, account, and gres are set via sbatch flags from cluster.conf.
+# Partition and gres are set via sbatch flags from cluster.conf.
 # See slurm/cluster.conf.template for details.
 
 set -euo pipefail

@@ -4,11 +4,11 @@
 #
 # Defaults mirror run_active_learning.sh with top_k selection.
 #
-# Submit from repo root (partition/account/gres come from cluster.conf):
+# Submit from repo root (partition/gres come from cluster.conf):
 #   sbatch $(slurm/cluster_flags.sh 2gpu) slurm/submit_al_transformer_top_k.sh
 #
 # Or override on the command line:
-#   sbatch --partition=rvs --account=mpp --gres=${CLUSTER_GPU_GRES_2} slurm/submit_al_transformer_top_k.sh
+#   sbatch --partition="${CLUSTER_PARTITION}" --gres="${CLUSTER_GPU_GRES_2}" slurm/submit_al_transformer_top_k.sh
 #
 # Customize via environment variables (export or --export=ALL,VAR=val):
 #   AL_N_SAMPLES          Initial dataset size           (default: 2000)
@@ -44,7 +44,7 @@
 #SBATCH --time=24:00:00
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err
-# Partition, account, and gres are set via sbatch flags from cluster.conf.
+# Partition and gres are set via sbatch flags from cluster.conf.
 # See slurm/cluster.conf.template for details.
 
 set -euo pipefail

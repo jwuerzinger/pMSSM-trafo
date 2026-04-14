@@ -1,6 +1,6 @@
 #!/bin/bash
 # Submit all active learning jobs to Slurm.
-# Cluster-specific settings (partition, account, gres, pixi env) are read from
+# Cluster-specific settings (partition, gres, pixi env) are read from
 # slurm/cluster.conf — copy slurm/cluster.conf.template and edit as needed.
 #
 # Run from repo root: bash submit_slurm.sh
@@ -19,7 +19,7 @@ export PIXI_ENV
 
 mkdir -p "${REPO_ROOT}/logs"
 
-COMMON="--partition=${CLUSTER_PARTITION} --account=${CLUSTER_ACCOUNT}"
+COMMON="--partition=${CLUSTER_PARTITION}"
 
 # Transformer (2 GPUs)
 sbatch ${COMMON} --gres=${CLUSTER_GPU_GRES_2} slurm/submit_al_transformer.sh

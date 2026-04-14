@@ -6,8 +6,7 @@
 #
 # Submit from repo root:
 #   source slurm/cluster.conf
-#   sbatch --partition="${CLUSTER_PARTITION}" --account="${CLUSTER_ACCOUNT}" \
-#          --gres="${CLUSTER_GPU_GRES_2}" slurm/submit_al_gp_deep_top_k.sh
+#   sbatch --partition="${CLUSTER_PARTITION}" --gres="${CLUSTER_GPU_GRES_2}" slurm/submit_al_gp_deep_top_k.sh
 # ==============================================================================
 #SBATCH --job-name=al_gp_deep_top_k
 #SBATCH --nodes=1
@@ -17,7 +16,7 @@
 #SBATCH --time=24:00:00
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err
-# Partition, account, and gres are set via sbatch flags from cluster.conf.
+# Partition and gres are set via sbatch flags from cluster.conf.
 # See slurm/cluster.conf.template for details.
 
 set -euo pipefail

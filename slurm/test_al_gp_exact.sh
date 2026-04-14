@@ -2,8 +2,9 @@
 # ==============================================================================
 # Test job: GP-based active learning, ~30 min, 2 GPUs (no data generation)
 #
-# Submit from repo root (partition/account/gres come from cluster.conf):
-#   sbatch $(slurm/cluster_flags.sh 2gpu) slurm/test_job.sh
+# Submit from repo root (partition/gres come from cluster.conf):
+#   sbatch --partition="${CLUSTER_PARTITION}" \
+#          --gres="${CLUSTER_GPU_GRES_2}" slurm/test_al_gp_exact.sh
 #
 # Monitor:
 #   squeue -u $USER
@@ -17,10 +18,9 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 #SBATCH --time=00:45:00
-#SBATCH --constraint=normalmem
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err
-# Partition, account, and gres are set via sbatch flags from cluster.conf.
+# Partition and gres are set via sbatch flags from cluster.conf.
 # See slurm/cluster.conf.template for details.
 
 set -euo pipefail

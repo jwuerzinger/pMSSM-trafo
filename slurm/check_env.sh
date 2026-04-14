@@ -5,7 +5,7 @@
 #
 # Submit from repo root:
 #   source slurm/cluster.conf
-#   sbatch --partition="${CLUSTER_PARTITION_DEV}" --account="${CLUSTER_ACCOUNT}" \
+#   sbatch --partition="${CLUSTER_PARTITION_DEV}" \
 #          --gres="${CLUSTER_GPU_GRES_1}" slurm/check_env.sh
 #SBATCH --job-name=al_check_env
 #SBATCH --nodes=1
@@ -15,7 +15,7 @@
 #SBATCH --time=00:15:00
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err
-# Partition, account, and gres are set via sbatch flags from cluster.conf.
+# Partition and gres are set via sbatch flags from cluster.conf.
 # See slurm/cluster.conf.template for details.
 
 set -euo pipefail

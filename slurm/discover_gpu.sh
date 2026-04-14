@@ -2,7 +2,6 @@
 # Quick discovery job: detect GPU hardware, ROCm version, and driver info on compute nodes.
 #SBATCH --job-name=discover_gpu
 #SBATCH --partition=apudev
-#SBATCH --account=mpp
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:1

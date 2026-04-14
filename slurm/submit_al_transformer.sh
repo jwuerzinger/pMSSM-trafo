@@ -6,10 +6,9 @@
 #
 # Setup: cp slurm/cluster.conf.template slurm/cluster.conf  (edit for your cluster)
 #
-# Submit from repo root (reads partition/account/gres from cluster.conf):
+# Submit from repo root (reads partition/gres from cluster.conf):
 #   source slurm/cluster.conf
-#   sbatch --partition="${CLUSTER_PARTITION}" --account="${CLUSTER_ACCOUNT}" \
-#          --gres="${CLUSTER_GPU_GRES_2}" slurm/submit_al_transformer.sh
+#   sbatch --partition="${CLUSTER_PARTITION}" --gres="${CLUSTER_GPU_GRES_2}" slurm/submit_al_transformer.sh
 #
 # Customize via environment variables (export or --export=ALL,VAR=val):
 #   AL_N_SAMPLES          Initial dataset size           (default: 2000)
@@ -45,7 +44,7 @@
 #SBATCH --time=24:00:00
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err
-# Partition, account, and gres are set via sbatch flags from cluster.conf.
+# Partition and gres are set via sbatch flags from cluster.conf.
 # See slurm/cluster.conf.template for details.
 
 set -euo pipefail

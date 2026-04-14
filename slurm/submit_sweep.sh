@@ -5,7 +5,7 @@
 # Each array task runs one combination from a YAML sweep config.
 # The Python scripts handle sweep logic via --config-file + --sweep-index.
 #
-# Usage (submit from repo root; partition/account/gres come from cluster.conf):
+# Usage (submit from repo root; partition/gres come from cluster.conf):
 #   sbatch $(slurm/cluster_flags.sh 1gpu) --array=0-8 slurm/submit_sweep.sh <config.yaml>
 #
 # The config file path is the first positional argument ($1). It can be
@@ -45,7 +45,7 @@
 #SBATCH --time=04:00:00
 #SBATCH --output=logs/%x_%A_%a.out
 #SBATCH --error=logs/%x_%A_%a.err
-# Partition, account, and gres are set via sbatch flags from cluster.conf.
+# Partition and gres are set via sbatch flags from cluster.conf.
 # See slurm/cluster.conf.template for details.
 
 set -euo pipefail
