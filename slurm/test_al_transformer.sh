@@ -59,8 +59,7 @@ echo "[gpu] SLURM_GPUS_ON_NODE=${SLURM_GPUS_ON_NODE:-<not set>}"
     --epochs 100 \
     --entropy-pool-size 1000 \
     --tolerance-sampling 1.0 \
-    --mcmc-data-dir /ptmp/jwuerzin/data \
-    --data-dir /ptmp/jwuerzin/data \
+    --mcmc-data-dir /ptmp/jwuerzin/data/19250082 \
     --static-eval-size 10000 \
     --output-dir /ptmp/jwuerzin/test_al_transformer_output \
     --early-stopping \

@@ -123,7 +123,6 @@ echo "[params] Data dir:   ${AL_DATA_DIR}"
     --config-file "${CONFIG_FILE}" \
     --sweep-index "${SLURM_ARRAY_TASK_ID}" \
     --output-dir "${TASK_OUTPUT_DIR}" \
-    --data-dir "${AL_DATA_DIR}" \
     ${GPU_FLAG} 0 \
     ${AL_EXTRA_ARGS:-}
 

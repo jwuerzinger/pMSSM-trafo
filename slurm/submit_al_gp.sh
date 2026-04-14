@@ -29,7 +29,7 @@
 #   AL_PATIENCE           Early stopping patience        (default: 100)
 #   AL_ENTROPY_POOL_SIZE  Focused pool for entropy sel.  (default: 5000)
 #   AL_TOLERANCE_SAMPLING Hard candidate cut width       (default: 1.0)
-#   AL_MCMC_DATA_DIR      MCMC evaluation dataset dir    (default: /ptmp/jwuerzin/data)
+#   AL_MCMC_DATA_DIR      MCMC evaluation dataset dir    (default: /ptmp/jwuerzin/data/19250082)
 #   AL_OUTPUT_DIR         Output directory               (default: active_learning_exact_gp_output_slurm)
 #   AL_GENERATE_DATA      Set empty to disable physics simulation (default: --generate-data)
 #   AL_EXTRA_ARGS         Any additional flags passed verbatim to the script
@@ -131,8 +131,7 @@ echo "[params] AL_GENERATE_DATA=${AL_GENERATE_DATA:---generate-data}"
     ${AL_USE_ARD:---use-ard} \
     --entropy-pool-size "${AL_ENTROPY_POOL_SIZE:-5000}" \
     --tolerance-sampling "${AL_TOLERANCE_SAMPLING:-1.0}" \
-    --mcmc-data-dir "${AL_MCMC_DATA_DIR:-/ptmp/jwuerzin/data}" \
-    --data-dir "${AL_DATA_DIR:-/ptmp/jwuerzin/data}" \
+    --mcmc-data-dir "${AL_MCMC_DATA_DIR:-/ptmp/jwuerzin/data/19250082}" \
     --gen-workers "${AL_GEN_WORKERS:-20}" \
     --output-dir "${AL_OUTPUT_DIR:-/ptmp/jwuerzin/active_learning_exact_gp_output_slurm}" \
     --warm-starting \

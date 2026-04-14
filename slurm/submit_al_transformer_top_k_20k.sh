@@ -74,8 +74,7 @@ echo "[gpu] Using --gpu-ids ${GPU_IDS} (${N_GPUS} GPU(s) detected)"
     --n-candidates 1000000 \
     --entropy-pool-size 5000 \
     --gen-workers 20 \
-    --mcmc-data-dir /ptmp/jwuerzin/data \
-    --data-dir /ptmp/jwuerzin/data \
+    --mcmc-data-dir /ptmp/jwuerzin/data/19250082 \
     --static-eval-size 100000 \
     --warm-starting \
     --early-stopping \

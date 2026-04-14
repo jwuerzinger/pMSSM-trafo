@@ -71,7 +71,6 @@ echo "[gpu] SLURM_GPUS_ON_NODE=${SLURM_GPUS_ON_NODE:-<not set>}"
     --jitter 1e-3 \
     --use-ard \
     --warm-starting \
-    --data-dir /ptmp/jwuerzin/data \
     --output-dir /ptmp/jwuerzin/test_al_gp_exact_output \
     --gpu-ids 0
 
