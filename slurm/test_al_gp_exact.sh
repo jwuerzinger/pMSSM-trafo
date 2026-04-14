@@ -8,11 +8,11 @@
 #
 # Monitor:
 #   squeue -u $USER
-#   tail -f logs/al_test_<JOBID>.out
+#   tail -f logs/test_al_gp_exact_<JOBID>.out
 #
-# Expected output: active_learning_test_output/ with 5 AL iterations
+# Expected output: /ptmp/jwuerzin/output/test_al_gp_exact_output/ with 5 AL iterations
 # ==============================================================================
-#SBATCH --job-name=al_test
+#SBATCH --job-name=test_al_gp_exact
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
