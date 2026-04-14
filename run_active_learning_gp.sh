@@ -14,6 +14,8 @@
     --tolerance-sampling 1.0 \
     --gen-workers 20 \
     --mcmc-data-dir data/19250082 \
+    --data-dir data/18387358 \
+    --static-eval-size 100_000 \
     --kernel RBF \
     --lengthscale 1.0 \
     --noise 1e-2 \

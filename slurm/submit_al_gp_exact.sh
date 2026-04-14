@@ -91,6 +91,7 @@ echo "[gpu] Using --gpu-ids ${GPU_IDS} (${N_GPUS} GPU(s) detected)"
     --gen-workers 20 \
     --mcmc-data-dir ${CLUSTER_DATA_DIR}/19250082 \
     --data-dir ${CLUSTER_DATA_DIR}/18387358 \
+    --static-eval-size 100000 \
     --kernel RBF \
     --lengthscale 1.0 \
     --noise 1e-2 \
