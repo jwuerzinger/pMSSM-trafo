@@ -12,7 +12,6 @@ CLUSTER_PARTITION="apu"
 CLUSTER_PARTITION_DEV="apudev"
 CLUSTER_GPU_GRES_2="gpu:2"
 CLUSTER_GPU_GRES_1="gpu:1"
-CLUSTER_ACCOUNT="mpp_apu"
 PIXI_ENV="rocm"
 
 # ---- Raven (NVIDIA A100) ----------------------------------------------------
@@ -20,5 +19,4 @@ PIXI_ENV="rocm"
 # CLUSTER_PARTITION_DEV="gpudev"
 # CLUSTER_GPU_GRES_2="gpu:a100:2"
 # CLUSTER_GPU_GRES_1="gpu:a100:1"
-# CLUSTER_ACCOUNT="mpp"
 # PIXI_ENV="cuda"
