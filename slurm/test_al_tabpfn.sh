@@ -6,7 +6,7 @@
 #   sbatch --partition="${CLUSTER_PARTITION_DEV}" \
 #          --gres="${CLUSTER_GPU_GRES_1}" slurm/test_al_tabpfn.sh
 #
-# Expected output: /ptmp/jwuerzin/test_al_tabpfn_output/ with 2 AL iterations
+# Expected output: /ptmp/jwuerzin/test_al_tabpfn_output/ with 5 AL iterations
 # ==============================================================================
 #SBATCH --job-name=test_al_tabpfn
 #SBATCH --nodes=1
@@ -60,7 +60,7 @@ echo "[gpu] PIXI_ENV=${PIXI_ENV}"
 
 "${PYTHON}" active_learning_tabpfn.py \
     --n-samples 500 \
-    --n-iterations 2 \
+    --n-iterations 5 \
     --n-select 5 \
     --n-candidates 5000 \
     --n-ensemble-samples 4 \

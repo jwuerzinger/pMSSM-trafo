@@ -87,7 +87,9 @@ echo "[gpu] PIXI_ENV=${PIXI_ENV}"
     --use-ard \
     --warm-starting \
     --data-dir ${CLUSTER_DATA_DIR}/18387358 \
-    --output-dir /ptmp/jwuerzin/active_learning_test_output \
+    --mcmc-data-dir ${CLUSTER_DATA_DIR}/19250082 \
+    --static-eval-size 10000 \
+    --output-dir /ptmp/jwuerzin/test_al_gp_exact_output/ \
     --gpu-ids 0,1
 
 echo "=========================================="
