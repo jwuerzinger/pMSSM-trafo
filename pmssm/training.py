@@ -615,12 +615,19 @@ def train_gp_worker(gpu_id, X, Y, X_val, Y_val, data_min, data_max,
         target=target, **gp_kwargs
     )
 
-    # Warm-start: load previous iteration's state dict if provided
+    # Warm-start: load previous iteration's state dict if provided.
+    # Use strict=False so that parameters whose shapes changed (e.g. DeepGP
+    # inducing points, which scale with training set size) are skipped rather
+    # than raising a RuntimeError. Fixed-size parameters such as kernel
+    # lengthscales, noise, and ARD weights are still loaded correctly.
     if warm_start_path is not None and Path(warm_start_path).exists():
         ckpt = torch.load(warm_start_path, map_location=device)
-        model.load_state_dict(ckpt['model_state_dict'])
+        missing, unexpected = model.load_state_dict(ckpt['model_state_dict'], strict=False)
         if model_has_likelihood(model_type):
-            model.likelihood.load_state_dict(ckpt['likelihood_state_dict'])
+            model.likelihood.load_state_dict(ckpt['likelihood_state_dict'], strict=False)
+        if missing or unexpected:
+            logger.info(f"Warm-start: {len(missing)} param(s) not restored (shape mismatch / new), "
+                        f"{len(unexpected)} unexpected — kernel hyperparameters carried over.")
         logger.info(f"Warm-started from checkpoint: {warm_start_path}")
     elif warm_start_path is not None:
         logger.warning(f"Warm-start checkpoint not found: {warm_start_path}, training from scratch")
