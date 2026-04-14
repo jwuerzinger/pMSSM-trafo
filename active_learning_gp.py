@@ -206,8 +206,7 @@ def select_entropy_batch(model, X_candidates_norm, n_select, model_type,
                          tolerance_sampling=1.0, proximity_sampling=0.1,
                          use_dkl=False, jitter=1e-3, num_samples=8,
                          entropy_pool_size=10_000,
-                         device=None, logger=None,
-                         norm_bounds_lo=None, norm_bounds_hi=None):
+                         device=None, logger=None):
     """
     Entropy-based batch active learning selection.
 
@@ -229,8 +228,6 @@ def select_entropy_batch(model, X_candidates_norm, n_select, model_type,
         num_samples: Likelihood samples for DeepGP.
         device: Torch device.
         logger: Logger instance.
-        norm_bounds_lo: Lower bounds in normalized space (D,). If None, uses 0.
-        norm_bounds_hi: Upper bounds in normalized space (D,). If None, uses 1.
 
     Returns:
         selected_indices: Indices into X_candidates_norm of selected points.
@@ -1143,13 +1140,7 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, v
             candidates_norm = normalize_x(
                 generate_candidate_pool(n_candidates, seed=iteration),
                 data_min, data_max,
-            )
-            # Compute PARAM_RANGES bounds in normalized [0,1] space for
-            # candidate evaluation within the actual parameter ranges.
-            param_lo = torch.tensor([PARAM_RANGES[p][0] for p in PARAM_ORDER], dtype=torch.float32)
-            param_hi = torch.tensor([PARAM_RANGES[p][1] for p in PARAM_ORDER], dtype=torch.float32)
-            norm_lo = normalize_x(param_lo, data_min, data_max)
-            norm_hi = normalize_x(param_hi, data_min, data_max)
+            ).to(device)
             selected_points_norm, per_point_entropy = select_entropy_batch(
                 al_model, candidates_norm, n_select, model_type,
                 threshold=threshold, blur=entropy_blur, beta=entropy_beta,
@@ -1158,7 +1149,6 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, v
                 use_dkl=use_dkl, jitter=jitter, num_samples=gp_num_samples,
                 entropy_pool_size=entropy_pool_size,
                 device=device, logger=logger,
-                norm_bounds_lo=norm_lo, norm_bounds_hi=norm_hi,
             )
             # Unnormalize selected points back to physical space (move to CPU first)
             selected_points_phys = unnormalize_x(selected_points_norm.cpu(), data_min, data_max)
