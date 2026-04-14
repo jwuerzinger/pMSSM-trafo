@@ -73,7 +73,7 @@ echo "[gpu] PIXI_ENV=${PIXI_ENV}"
     --noise 1e-2 \
     --jitter 1e-3 \
     --use-ard \
-    --data-dir /ptmp/jwuerzin/data/18387358 \
+    --data-dir ${CLUSTER_DATA_DIR}/18387358 \
     --warm-starting \
     --output-dir /ptmp/jwuerzin/test_al_gp_deep_output \
     --gpu-ids 0

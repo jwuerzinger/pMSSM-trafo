@@ -116,7 +116,7 @@ echo "[gpu] Using --gpu-ids 0 (single GPU per array task)"
 SWEEP_SCRIPT="${AL_SWEEP_SCRIPT:-active_learning.py}"
 BASE_OUTPUT_DIR="${AL_OUTPUT_DIR:-/ptmp/jwuerzin/sweep_output}"
 TASK_OUTPUT_DIR="${BASE_OUTPUT_DIR}/task_${SLURM_ARRAY_TASK_ID}"
-AL_DATA_DIR="${AL_DATA_DIR:-/ptmp/jwuerzin/data}"
+AL_DATA_DIR="${AL_DATA_DIR:-${CLUSTER_DATA_DIR}}"
 
 # TabPFN uses --gpu-id (singular); the other two use --gpu-ids
 if [[ "${SWEEP_SCRIPT}" == *tabpfn* ]]; then

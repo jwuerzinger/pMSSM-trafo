@@ -67,8 +67,8 @@ echo "[gpu] PIXI_ENV=${PIXI_ENV}"
     --epochs 100 \
     --entropy-pool-size 1000 \
     --tolerance-sampling 1.0 \
-    --mcmc-data-dir /ptmp/jwuerzin/data/19250082 \
-    --data-dir /ptmp/jwuerzin/data/18387358 \
+    --mcmc-data-dir ${CLUSTER_DATA_DIR}/19250082 \
+    --data-dir ${CLUSTER_DATA_DIR}/18387358 \
     --static-eval-size 10000 \
     --output-dir /ptmp/jwuerzin/test_al_transformer_output \
     --early-stopping \

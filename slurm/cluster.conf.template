@@ -13,6 +13,7 @@ CLUSTER_PARTITION_DEV="apudev"
 CLUSTER_GPU_GRES_2="gpu:2"
 CLUSTER_GPU_GRES_1="gpu:1"
 PIXI_ENV="rocm"
+CLUSTER_DATA_DIR="/ptmp/jwuerzin/data"
 
 # ---- Raven (NVIDIA A100) ----------------------------------------------------
 # CLUSTER_PARTITION="gpu"
@@ -20,3 +21,4 @@ PIXI_ENV="rocm"
 # CLUSTER_GPU_GRES_2="gpu:a100:2"
 # CLUSTER_GPU_GRES_1="gpu:a100:1"
 # PIXI_ENV="cuda"
+# CLUSTER_DATA_DIR="/ptmp/jwuerzin/data"

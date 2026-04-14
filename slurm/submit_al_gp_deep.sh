@@ -89,8 +89,8 @@ echo "[gpu] Using --gpu-ids ${GPU_IDS} (${N_GPUS} GPU(s) detected)"
     --entropy-pool-size 5000 \
     --tolerance-sampling 1.0 \
     --gen-workers 20 \
-    --mcmc-data-dir /ptmp/jwuerzin/data/19250082 \
-    --data-dir /ptmp/jwuerzin/data/18387358 \
+    --mcmc-data-dir ${CLUSTER_DATA_DIR}/19250082 \
+    --data-dir ${CLUSTER_DATA_DIR}/18387358 \
     --kernel RBF \
     --lengthscale 1.0 \
     --noise 1e-2 \
