@@ -262,7 +262,7 @@ def select_entropy_batch(model, X_candidates_norm, n_select, model_type,
     # kernel matrix that causes OOM with fast_pred_var=False at large batch sizes.
     # DeepGP doesn't support LOVE so we keep fast_pred_var=False there.
     use_love = not is_deep
-    batch_size = 100_000
+    batch_size = 10_000 if is_deep else 100_000
     means_list, vars_list = [], []
     for i in range(0, len(X_candidates_norm), batch_size):
         x_batch = X_candidates_norm[i:i + batch_size].to(device)
