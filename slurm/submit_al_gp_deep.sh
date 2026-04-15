@@ -26,6 +26,10 @@ set -euo pipefail
 REPO_ROOT="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
 cd "${REPO_ROOT}"
 mkdir -p "${REPO_ROOT}/logs"
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+mv "${REPO_ROOT}/logs/${SLURM_JOB_NAME}_${SLURM_JOB_ID}.out" "${REPO_ROOT}/logs/${SLURM_JOB_NAME}_${SLURM_JOB_ID}_${TIMESTAMP}.out" 2>/dev/null || true
+mv "${REPO_ROOT}/logs/${SLURM_JOB_NAME}_${SLURM_JOB_ID}.err" "${REPO_ROOT}/logs/${SLURM_JOB_NAME}_${SLURM_JOB_ID}_${TIMESTAMP}.err" 2>/dev/null || true
+
 
 # ---- Cluster config ----------------------------------------------------------
 if [[ -f "${REPO_ROOT}/slurm/cluster.conf" ]]; then
@@ -88,7 +92,7 @@ source "${REPO_ROOT}/slurm/resume_args.sh"
     --n-samples 2000 \
     --n-iterations 40 \
     --n-select 500 \
-    --n-candidates 1000000 \
+    --n-candidates 500000 \
     --entropy-pool-size 5000 \
     --tolerance-sampling 1.0 \
     --gen-workers 20 \
@@ -102,7 +106,7 @@ source "${REPO_ROOT}/slurm/resume_args.sh"
     --num-inducing-max 256 \
     --use-ard \
     --warm-starting \
-    --output-dir "${AL_OUTPUT_DIR:-/ptmp/jwuerzin/output/active_learning_deep_gp_output}" ${RESUME_ARGS} \
+    --output-dir "${AL_OUTPUT_DIR:-/ptmp/jwuerzin/output/active_learning_deep_gp_output_${TIMESTAMP}}" ${RESUME_ARGS} \
     --gpu-ids "${GPU_IDS}"
 
 echo "=========================================="
