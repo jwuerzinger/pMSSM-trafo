@@ -257,19 +257,14 @@ def select_entropy_batch(model, X_candidates_norm, n_select, model_type,
     if logger:
         logger.info(f"Entropy selection: evaluating {len(X_candidates_norm)} candidates...")
 
-    # For variance-only candidate ranking, LOVE (fast_pred_var=True) is safe for
-    # ExactGP/SparseGP and avoids allocating the full [batch, batch] test-test
-    # kernel matrix that causes OOM with fast_pred_var=False at large batch sizes.
-    # DeepGP doesn't support LOVE so we keep fast_pred_var=False there.
-    use_love = not is_deep
-    batch_size = 10_000 if is_deep else 100_000
+    batch_size = 10_000 if is_deep else 5_000
     means_list, vars_list = [], []
     for i in range(0, len(X_candidates_norm), batch_size):
         x_batch = X_candidates_norm[i:i + batch_size].to(device)
         with torch.no_grad(), \
              gpytorch.settings.eval_cg_tolerance(1e-4), \
              gpytorch.settings.max_cg_iterations(300), \
-             gpytorch.settings.fast_pred_var(use_love), \
+             gpytorch.settings.fast_pred_var(False), \
              gpytorch.settings.fast_pred_samples(True), \
              gpytorch.settings.cholesky_jitter(float_value=jitter, double_value=jitter), \
              gpytorch.settings.num_likelihood_samples(ns):
