@@ -230,8 +230,10 @@ def select_entropy_batch(model, X_candidates_norm, n_select, model_type,
         logger: Logger instance.
 
     Returns:
-        selected_indices: Indices into X_candidates_norm of selected points.
+        selected_X: Selected points from X_candidates_norm (n_select, D).
         per_point_entropy: Entropy scores for each selected point.
+        mean_all: Mean predictions over the full candidate pool (N,).
+        var_all: Variance predictions over the full candidate pool (N,).
     """
     strategy = EntropySelectionStrategy(
         blur=blur, beta=beta,
@@ -353,7 +355,7 @@ def select_entropy_batch(model, X_candidates_norm, n_select, model_type,
 
     # Map pool-local indices back to original candidate indices
     original_indices = pool_indices[selected_indices]
-    return X_candidates_norm[original_indices], per_point_entropy
+    return X_candidates_norm[original_indices], per_point_entropy, mean_all, var_all
 
 
 # ---------------------------------------------------------------------------
@@ -1156,36 +1158,6 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, v
             pd.DataFrame([val_metrics]).to_csv(val_metrics_path, index=False)
             logger.info(f"AL validation metrics saved to {val_metrics_path}")
 
-        # ---- Candidate uncertainty plots (AL + Baseline) ----
-        # Compute uncertainty on the full candidate pool for both models and
-        # plot std vs each input parameter. Done BEFORE selection to avoid
-        # `candidates` being overwritten by `selected_points_phys` in the
-        # entropy_batch path.
-        try:
-            _candidate_plot_pool = generate_candidate_pool(
-                min(n_candidates, 50_000), seed=iteration,
-            )
-            _al_plot_mean, _al_plot_var = compute_uncertainty_gp(
-                al_model, _candidate_plot_pool, data_min, data_max,
-                model_type=model_type, jitter=jitter, num_samples=gp_num_samples,
-                logger=logger,
-            )
-            plot_candidate_uncertainty(
-                _candidate_plot_pool, _al_plot_var,
-                al_hist_dir, "AL", iteration, logger,
-            )
-            _, _base_plot_var = compute_uncertainty_gp(
-                baseline_model, _candidate_plot_pool, data_min, data_max,
-                model_type=model_type, jitter=jitter, num_samples=gp_num_samples,
-                logger=logger,
-            )
-            plot_candidate_uncertainty(
-                _candidate_plot_pool, _base_plot_var,
-                baseline_hist_dir, "Baseline", iteration, logger,
-            )
-        except Exception as _e:
-            logger.warning(f"Candidate uncertainty plot failed: {_e}")
-
         # ---- Select new points ----
         if selection_strategy == "entropy_batch" and model_has_likelihood(model_type):
             logger.info("Using entropy-based batch selection...")
@@ -1193,7 +1165,7 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, v
                 generate_candidate_pool(n_candidates, seed=iteration),
                 data_min, data_max,
             ).to(device)
-            selected_points_norm, per_point_entropy = select_entropy_batch(
+            selected_points_norm, per_point_entropy, _ent_mean_all, _ent_var_all = select_entropy_batch(
                 al_model, candidates_norm, n_select, model_type,
                 threshold=threshold, blur=entropy_blur, beta=entropy_beta,
                 tolerance_sampling=tolerance_sampling,
@@ -1233,6 +1205,46 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, v
         csv_path = save_selected_points(candidates, pred_var.unsqueeze(1),
                                         top_indices, output_dir, iteration)
         logger.info(f"Saved selected points to {csv_path}")
+
+        # ---- Candidate uncertainty plots (AL + Baseline) ----
+        # Reuse the variance already computed during selection instead of
+        # running a separate inference pass. For deep_gp, subsample to keep
+        # the baseline inference call affordable.
+        try:
+            _plot_size = min(50_000, n_candidates)
+            if selection_strategy == "entropy_batch" and model_has_likelihood(model_type):
+                # select_entropy_batch already evaluated all candidates — reuse.
+                _all_phys = unnormalize_x(candidates_norm.cpu(), data_min, data_max)
+                _all_var = _ent_var_all.cpu()
+            else:
+                # top_k path: candidates (physical) and pred_var already computed.
+                _all_phys = candidates
+                _all_var = pred_var
+
+            _n_all = len(_all_phys)
+            if _n_all > _plot_size:
+                _plot_idx = torch.randperm(_n_all)[:_plot_size]
+                _al_plot_pool = _all_phys[_plot_idx]
+                _al_plot_var = _all_var[_plot_idx]
+            else:
+                _al_plot_pool = _all_phys
+                _al_plot_var = _all_var
+
+            plot_candidate_uncertainty(
+                _al_plot_pool, _al_plot_var,
+                al_hist_dir, "AL", iteration, logger,
+            )
+            _, _base_plot_var = compute_uncertainty_gp(
+                baseline_model, _al_plot_pool, data_min, data_max,
+                model_type=model_type, jitter=jitter, num_samples=gp_num_samples,
+                logger=logger,
+            )
+            plot_candidate_uncertainty(
+                _al_plot_pool, _base_plot_var,
+                baseline_hist_dir, "Baseline", iteration, logger,
+            )
+        except Exception as _e:
+            logger.warning(f"Candidate uncertainty plot failed: {_e}")
 
         all_selected_points.append({
             "iteration": iteration,
