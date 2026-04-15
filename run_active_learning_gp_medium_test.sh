@@ -1,6 +1,6 @@
 #!/bin/bash
 
-.pixi/envs/default/bin/python active_learning_gp.py \
+.pixi/envs/cuda/bin/python active_learning_gp.py \
     --n-datasets 3 \
     --generate-data \
     --model-type exact_gp \

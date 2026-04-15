@@ -10,7 +10,7 @@
 # To shorten: reduce --n-iterations or --epochs
 # To lengthen: increase --n-iterations or --n-samples
 
-.pixi/envs/default/bin/python active_learning_gp.py \
+.pixi/envs/cuda/bin/python active_learning_gp.py \
     --model-type exact_gp \
     --n-samples 10000 \
     --n-iterations 10 \

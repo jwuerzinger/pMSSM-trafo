@@ -22,7 +22,7 @@
 #   --track-lengthscales          # Save ARD lengthscales per iteration
 #   --advanced-plots              # Advanced diagnostic plots
 
-.pixi/envs/default/bin/python active_learning_gp.py \
+.pixi/envs/cuda/bin/python active_learning_gp.py \
     --model-type deep_gp \
     --epochs 10000 \
     --early-stopping \

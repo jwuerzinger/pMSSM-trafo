@@ -11,7 +11,7 @@
 # Starting from same initial dataset size as full run (50k samples)
 # Training in log space (matching GP pipeline)
 
-.pixi/envs/default/bin/python active_learning.py \
+.pixi/envs/cuda/bin/python active_learning.py \
     --y-transform log \
     --n-samples 50000 \
     --n-iterations 2 \

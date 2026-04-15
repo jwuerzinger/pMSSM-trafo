@@ -9,7 +9,7 @@
 # Model: Deep Gaussian Process with ARD kernel
 # Starting from same initial dataset size as full run (50k samples)
 
-.pixi/envs/default/bin/python active_learning_gp.py \
+.pixi/envs/cuda/bin/python active_learning_gp.py \
     --model-type deep_gp \
     --n-samples 50000 \
     --n-iterations 3 \

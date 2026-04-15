@@ -1,5 +1,5 @@
 #!/bin/bash
-.pixi/envs/default/bin/python active_learning_gp.py \
+.pixi/envs/cuda/bin/python active_learning_gp.py \
     --model-type deep_gp \
     --epochs 10_000 \
     --early-stopping \
@@ -23,4 +23,4 @@
     --use-ard \
     --warm-starting \
     --output-dir active_learning_deep_gp_output \
-    --gpu-ids 2,3
+    --gpu-ids 2

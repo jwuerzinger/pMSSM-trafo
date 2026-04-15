@@ -8,7 +8,7 @@
 # Uncertainty is estimated via the predictive distribution (top_k) or
 # ensemble diversity with multiple random_state runs (entropy_batch).
 
-.pixi/envs/default/bin/python active_learning_tabpfn.py \
+.pixi/envs/cuda/bin/python active_learning_tabpfn.py \
     --n-samples 2000 \
     --n-iterations 40 \
     --n-select 500 \
