@@ -129,7 +129,7 @@ def compute_uncertainty_gp(model, X_candidates, data_min, data_max,
         for i in range(0, len(X_norm), batch_size):
             x_batch = X_norm[i:i + batch_size]
             with torch.no_grad(), \
-                 gpytorch.settings.fast_pred_var(), \
+                 gpytorch.settings.fast_pred_var(False), \
                  gpytorch.settings.cholesky_jitter(float_value=jitter, double_value=jitter):
                 preds = model.likelihood(model(x_batch))
                 means.append(preds.mean.detach())

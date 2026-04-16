@@ -135,7 +135,7 @@ def compute_gp_r2(model, x_val, y_val, model_type, jitter=1e-3, num_samples=8, t
         # exact_gp, sparse_gp
         model.likelihood.eval()
         with torch.no_grad(), \
-             gpytorch.settings.fast_pred_var(), \
+             gpytorch.settings.fast_pred_var(False), \
              gpytorch.settings.cholesky_jitter(float_value=jitter, double_value=jitter):
             preds = model.likelihood(model(x_val.to(device)))
             y_pred_transformed = preds.mean.detach()
@@ -222,7 +222,7 @@ def compute_comprehensive_metrics(model, X_eval_norm, Y_eval_true, model_type,
         # exact_gp, sparse_gp
         model.likelihood.eval()
         with torch.no_grad(), \
-             gpytorch.settings.fast_pred_var(), \
+             gpytorch.settings.fast_pred_var(False), \
              gpytorch.settings.cholesky_jitter(float_value=jitter, double_value=jitter):
             preds = model.likelihood(model(X_eval_norm))
             mean = preds.mean.detach()

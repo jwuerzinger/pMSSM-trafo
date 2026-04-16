@@ -106,7 +106,8 @@ source "${REPO_ROOT}/slurm/resume_args.sh"
     --use-ard \
     --warm-starting \
     --output-dir "${AL_OUTPUT_DIR:-/ptmp/jwuerzin/output/active_learning_exact_gp_output_${TIMESTAMP}}" ${RESUME_ARGS} \
-    --gpu-ids "${GPU_IDS}"
+    --gpu-ids "${GPU_IDS}" \
+    ${AL_EXTRA_ARGS:-}
 
 echo "=========================================="
 echo " Done: $(date)"

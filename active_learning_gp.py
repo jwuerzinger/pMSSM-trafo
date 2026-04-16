@@ -281,6 +281,11 @@ def select_entropy_batch(model, X_candidates_norm, n_select, model_type,
     mean_all = torch.cat(means_list)
     var_all = torch.cat(vars_list)
 
+    if logger:
+        logger.info(f"Candidate variance stats: mean={var_all.mean():.6f}, "
+                    f"max={var_all.max():.6f}, min={var_all.min():.6f}, "
+                    f"std_of_var={var_all.std():.6f}")
+
     # Step 1: Hard tolerance cut (if enabled)
     if tolerance_sampling != 0:
         mask = (mean_all > thr - tolerance_sampling) & (mean_all < thr + tolerance_sampling)
