@@ -65,15 +65,18 @@ TRANSFORMER_TOPK_2GPU="/ptmp/jwuerzin/output/active_learning_output_top_k_slurm_
 TRANSFORMER_TOPK_1GPU="/ptmp/jwuerzin/output/active_learning_output_top_k_slurm_single_20260414_152701"
 
 # ── ExactGP ───────────────────────────────────────────────────────────────────
-EXACT_GP_TOPK_2GPU="/ptmp/jwuerzin/output/active_learning_exact_gp_top_k_output_20260414_152657"
+EXACT_GP_ENTROPY_2GPU="/ptmp/jwuerzin/output/active_learning_exact_gp_output_20260415_113302"
+EXACT_GP_TOPK_2GPU="/ptmp/jwuerzin/output/active_learning_exact_gp_top_k_output_20260415_133709"
 EXACT_GP_TOPK_1GPU="/ptmp/jwuerzin/output/active_learning_exact_gp_top_k_output_single_20260414_183723"
 
 # ── DeepGP ────────────────────────────────────────────────────────────────────
+DEEP_GP_ENTROPY_2GPU="/ptmp/jwuerzin/output/active_learning_deep_gp_output_20260415_113302"
+DEEP_GP_TOPK_2GPU="/ptmp/jwuerzin/output/active_learning_deep_gp_top_k_output_20260415_133935"
 DEEP_GP_TOPK_1GPU="/ptmp/jwuerzin/output/active_learning_deep_gp_top_k_output_single_20260414_183027"
 
 # ── TabPFN ────────────────────────────────────────────────────────────────────
-TABPFN_ENTROPY_2GPU="/ptmp/jwuerzin/output/active_learning_tabpfn_output_slurm_20260414_152657"
-TABPFN_ENTROPY_1GPU="/ptmp/jwuerzin/output/active_learning_tabpfn_output_slurm_single_20260414_152701"
+TABPFN_TOPK_2GPU="/ptmp/jwuerzin/output/active_learning_tabpfn_output_slurm_20260414_152657"
+TABPFN_TOPK_1GPU="/ptmp/jwuerzin/output/active_learning_tabpfn_output_slurm_single_20260414_152701"
 
 # =============================================================================
 # Helper — run the analysis script
@@ -138,7 +141,34 @@ run_analysis "model_type_comparison" \
     "${TRANSFORMER_ENTROPY_1GPU}" "transformer" \
     "${EXACT_GP_TOPK_1GPU}"       "exact_gp" \
     "${DEEP_GP_TOPK_1GPU}"        "deep_gp" \
-    "${TABPFN_ENTROPY_1GPU}"      "tabpfn"
+    "${TABPFN_TOPK_1GPU}"         "tabpfn"
+
+# =============================================================================
+# Comparison 2b: Model type — 2-GPU entropy runs
+#
+# Fairer comparison using the same selection strategy (entropy) for GP models.
+# Requires exact_gp_entropy_2gpu to finish (job 8033834, ~32/40 as of writing).
+# =============================================================================
+run_analysis "model_type_entropy_comparison" \
+    --n-bootstrap 500 --n-permutations 200 \
+    -- \
+    "${TRANSFORMER_ENTROPY_2GPU}" "transformer" \
+    "${EXACT_GP_ENTROPY_2GPU}"    "exact_gp" \
+    "${DEEP_GP_ENTROPY_2GPU}"     "deep_gp" \
+    "${TABPFN_TOPK_2GPU}"         "tabpfn"
+
+# =============================================================================
+# Comparison 2c: GP strategy — entropy vs top-k for GP models
+#
+# Direct strategy comparison within each GP model type.
+# =============================================================================
+run_analysis "gp_strategy_comparison" \
+    --n-bootstrap 500 --n-permutations 200 \
+    -- \
+    "${EXACT_GP_ENTROPY_2GPU}"  "exact_gp_entropy" \
+    "${EXACT_GP_TOPK_2GPU}"     "exact_gp_top_k" \
+    "${DEEP_GP_ENTROPY_2GPU}"   "deep_gp_entropy" \
+    "${DEEP_GP_TOPK_1GPU}"      "deep_gp_top_k"
 
 # =============================================================================
 # Comparison 3: Parallelism — 1-GPU (sequential) vs 2-GPU (parallel)
@@ -153,7 +183,9 @@ run_analysis "parallelism_comparison" \
     "${TRANSFORMER_ENTROPY_1GPU}" "transformer_1gpu" \
     "${TRANSFORMER_ENTROPY_2GPU}" "transformer_2gpu" \
     "${EXACT_GP_TOPK_1GPU}"       "exact_gp_1gpu" \
-    "${EXACT_GP_TOPK_2GPU}"       "exact_gp_2gpu"
+    "${EXACT_GP_TOPK_2GPU}"       "exact_gp_2gpu" \
+    "${DEEP_GP_TOPK_1GPU}"        "deep_gp_1gpu" \
+    "${DEEP_GP_TOPK_2GPU}"        "deep_gp_2gpu"
 
 # =============================================================================
 # Comparison 4: Full cross-run overview — all completed runs
@@ -168,11 +200,14 @@ run_analysis "all_runs" \
     "${TRANSFORMER_TOPK_2GPU}"    "transformer_top_k_2gpu" \
     "${TRANSFORMER_ENTROPY_1GPU}" "transformer_entropy_1gpu" \
     "${TRANSFORMER_TOPK_1GPU}"    "transformer_top_k_1gpu" \
+    "${EXACT_GP_ENTROPY_2GPU}"    "exact_gp_entropy_2gpu" \
     "${EXACT_GP_TOPK_2GPU}"       "exact_gp_top_k_2gpu" \
     "${EXACT_GP_TOPK_1GPU}"       "exact_gp_top_k_1gpu" \
+    "${DEEP_GP_ENTROPY_2GPU}"     "deep_gp_entropy_2gpu" \
+    "${DEEP_GP_TOPK_2GPU}"        "deep_gp_top_k_2gpu" \
     "${DEEP_GP_TOPK_1GPU}"        "deep_gp_top_k_1gpu" \
-    "${TABPFN_ENTROPY_2GPU}"      "tabpfn_entropy_2gpu" \
-    "${TABPFN_ENTROPY_1GPU}"      "tabpfn_entropy_1gpu"
+    "${TABPFN_TOPK_2GPU}"         "tabpfn_top_k_2gpu" \
+    "${TABPFN_TOPK_1GPU}"         "tabpfn_top_k_1gpu"
 
 echo ""
 echo "All analyses complete.  Results in ${OUT_BASE}/"

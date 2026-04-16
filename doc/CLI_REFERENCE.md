@@ -1,6 +1,6 @@
 # CLI Reference
 
-Complete command-line interface reference for both active learning pipelines.
+Complete command-line interface reference for all active learning pipelines and analysis tools.
 
 ## Quick Reference
 
@@ -16,6 +16,12 @@ python active_learning_gp.py --testing
 
 # GP AL - Production
 python active_learning_gp.py --n-iterations 40 --generate-data --epochs 2000
+
+# TabPFN AL - Production (requires TABPFN_TOKEN)
+python active_learning_tabpfn.py --n-iterations 40 --generate-data --n-candidates 1000000
+
+# Cross-run analysis
+python analyse_runs.py --run-dirs run_a/ run_b/ --mcmc-data-dir /path/to/mcmc --output-dir analysis/
 ```
 
 ## Common Options
@@ -413,9 +419,45 @@ mc_samples: [20, 30, 50]       # 3 values
 - `--sweep-index` selects which combination to run
 - Perfect for SLURM array jobs
 
+## TabPFN-Specific Options
+
+Options only available in `active_learning_tabpfn.py`:
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `--n-ensemble-samples` | int | 16 | Number of TabPFN ensemble forward passes for uncertainty |
+| `--selection-strategy` | str | top_k | Point selection: `top_k` (default), `entropy_batch` |
+| `--proximity-sampling` | float | 0.1 | Proximity weighting width (0 = disabled) |
+| `--tolerance-sampling` | float | 1.0 | Threshold filter width (entropy_batch only) |
+| `--gpu-id` | int | 0 | Single GPU device ID (TabPFN uses one GPU) |
+
+TabPFN is a pre-trained model -- `--warm-starting`, `--early-stopping`, and `--epochs` do not apply.
+Requires `TABPFN_TOKEN` environment variable (get key at https://ux.priorlabs.ai/account).
+
+## Cross-Run Analysis
+
+`analyse_runs.py` computes quality, physical property, and diversity metrics across completed runs.
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `--run-dirs` | str+ | required | Run output directories (must contain state.pt) |
+| `--labels` | str+ | auto | Human-readable labels for each run |
+| `--mcmc-data-dir` | str | None | MCMC ROOT files for MMD and cluster coverage |
+| `--output-dir` | str | analysis_output | Where to write plots and summary.csv |
+| `--target` | str | DMRD | Target variable: `DMRD`, `CrossSection`, `CLs` |
+| `--n-bootstrap` | int | 500 | Bootstrap resamples (0 = skip) |
+| `--n-permutations` | int | 200 | Permutation resamples for MMD CI |
+| `--n-clusters` | int | 20 | K-means clusters for coverage metric |
+| `--knn-k` | int | 5 | Nearest neighbours for k-NN distance |
+| `--include-baseline` | flag | off | Also plot baseline model curves |
+| `--seed` | int | 0 | RNG seed for reproducibility |
+
+See [ANALYSIS_METRICS.md](ANALYSIS_METRICS.md) for detailed metric descriptions.
+
 ## See Also
 
 - [active_learning_plan.md](active_learning_plan.md) - Transformer AL design and algorithms
 - [gp_pipeline_comparison.md](gp_pipeline_comparison.md) - GP pipeline features and comparison
+- [ANALYSIS_METRICS.md](ANALYSIS_METRICS.md) - Cross-run analysis metrics reference
 - [PACKAGE_STRUCTURE.md](PACKAGE_STRUCTURE.md) - Code organization and architecture
 - [README.md](../README.md) - Quick start guide

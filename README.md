@@ -10,7 +10,10 @@ Machine learning models for predicting pMSSM (phenomenological Minimal Supersymm
 - [Models](#models)
 - [Active Learning Pipeline](#active-learning-pipeline)
 - [GP Active Learning Pipeline](#gp-active-learning-pipeline)
+- [TabPFN Active Learning Pipeline](#tabpfn-active-learning-pipeline)
 - [Batch Acquisition Strategy](#batch-acquisition-strategy)
+- [Cross-Run Analysis](#cross-run-analysis)
+- [Slurm Submission](#slurm-submission)
 - [Project Structure](#project-structure)
 - [Output](#output)
 - [Multi-GPU Training](#multi-gpu-training)
@@ -46,8 +49,8 @@ pixi install
 ```
 
 ### Requirements
-- CUDA 12.6+
-- Python 3.13+
+- CUDA 12.6+ or ROCm 6.x (AMD MI300A tested)
+- Python 3.12+
 - PyTorch (GPU)
 
 ## Quick Start
@@ -374,6 +377,35 @@ active_learning_gp_output/
 
 See [doc/gp_integration_plan.md](doc/gp_integration_plan.md) for progress tracking and [doc/gp_pipeline_comparison.md](doc/gp_pipeline_comparison.md) for full feature reference and CLI options.
 
+## TabPFN Active Learning Pipeline
+
+A third pipeline using [TabPFN](https://github.com/PriorLabs/TabPFN) (Tabular Prior-Fitted Network), a pre-trained foundation model for tabular data. Unlike the transformer and GP pipelines, TabPFN requires no per-iteration training -- it performs in-context learning at inference time.
+
+### Key Differences from GP/Transformer
+
+| Aspect | TabPFN | Transformer / GP |
+|--------|--------|-----------------|
+| Training | None (pre-trained) | Per-iteration training with early stopping |
+| Uncertainty | Ensemble of 16 forward passes | MC Dropout / GP posterior |
+| GPU usage | Single GPU | 1-2 GPUs (parallel AL + baseline) |
+| Warm starting | N/A | Enabled by default |
+
+### Quick Start
+
+```bash
+# Production run (requires TABPFN_TOKEN)
+export TABPFN_TOKEN="<your-api-key>"
+python active_learning_tabpfn.py \
+    --n-iterations 40 \
+    --n-candidates 1000000 \
+    --n-select 500 \
+    --generate-data
+```
+
+### Documentation
+
+See [doc/CLI_REFERENCE.md](doc/CLI_REFERENCE.md) for TabPFN-specific options.
+
 ## Batch Acquisition Strategy
 
 Both pipelines use **entropy-based batch selection** (default) to choose informative, diverse batches of points for simulation. The strategy has three stages.
@@ -446,11 +478,50 @@ The core algorithm selects `n_select` points that are jointly informative — no
 
 See [Implementation Details](doc/IMPLEMENTATION_DETAILS.md) for proximity weighting analysis and pre-filtering strategy comparison.
 
+## Cross-Run Analysis
+
+`analyse_runs.py` loads completed run checkpoints (`state.pt`) and computes quality, physical property, and diversity metrics across multiple runs. The wrapper script `run_analysis.sh` orchestrates predefined comparisons (strategy, model type, parallelism).
+
+```bash
+# Run all predefined comparisons
+bash run_analysis.sh
+
+# Or run a custom comparison directly
+python analyse_runs.py \
+    --run-dirs /path/to/run_a /path/to/run_b \
+    --labels "Run A" "Run B" \
+    --mcmc-data-dir /path/to/mcmc_data \
+    --output-dir my_analysis
+```
+
+**Outputs**: 8 PNG plots (R² trajectories, hit rate, diversity summary, parameter heatmaps, pairwise scatter) and a `summary.csv` with all scalar metrics and bootstrap uncertainties.
+
+See [doc/ANALYSIS_METRICS.md](doc/ANALYSIS_METRICS.md) for a full description of all metrics, their interpretation, and CLI options.
+
+## Slurm Submission
+
+Slurm job scripts live in `slurm/` and read cluster-specific settings (partition, GPU gres) from `slurm/cluster.conf`:
+
+```bash
+# One-time setup
+cp slurm/cluster.conf.template slurm/cluster.conf
+# Edit cluster.conf for your cluster
+
+# Submit a 2-GPU GP job
+source slurm/cluster.conf
+sbatch --partition="${CLUSTER_PARTITION}" --gres="${CLUSTER_GPU_GRES_2}" slurm/submit_al_gp_exact.sh
+
+# Resume a timed-out run (+24 more iterations)
+bash resume_slurm.sh slurm/submit_al_transformer_top_k_20k.sh /ptmp/output/previous_run 24
+```
+
+Available job scripts: `submit_al_transformer.sh`, `submit_al_transformer_top_k.sh`, `submit_al_transformer_top_k_20k.sh`, `submit_al_gp_exact.sh`, `submit_al_gp_exact_top_k.sh`, `submit_al_gp_deep.sh`, `submit_al_gp_deep_top_k.sh`, `submit_al_tabpfn.sh`, `submit_al_tabpfn_entropy.sh`. All parameters can be overridden via environment variables (see script headers for details).
+
 ## Project Structure
 
 ```
 pMSSM-trafo/
-├── pmssm/                      # 🆕 Unified package (13 modules, ~5500 lines)
+├── pmssm/                      # Unified package (13 modules)
 │   ├── __init__.py             # Package exports
 │   ├── config.py               # Constants, parameter ranges
 │   ├── data.py                 # Data loading & normalization
@@ -464,36 +535,39 @@ pMSSM-trafo/
 │   ├── evaluation.py           # R², metrics, lengthscales
 │   ├── visualization.py        # Plotting utilities
 │   ├── logging_utils.py        # Structured logging
+│   ├── resume.py               # Checkpoint loading for state.pt
 │   └── model_generation.py     # Run3ModelGen interface
-├── pmssm.py                    # Backward compatibility wrapper (re-exports from pmssm/)
 ├── train_pmssm.py              # Transformer training script
-├── active_learning.py          # Transformer AL pipeline (~760 lines)
-├── active_learning_gp.py       # GP AL pipeline (~990 lines)
-├── plot_progress.py            # Visualization utility for AL progress
-├── Shell Scripts:
-│   ├── run_active_learning.sh                    # Transformer AL production run
-│   ├── run_active_learning_medium_test.sh        # Transformer AL test run
-│   ├── run_active_learning_with_config.sh        # 🆕 Config file & sweep example
-│   ├── run_active_learning_with_eval.sh          # 🆕 External evaluation example
-│   ├── run_active_learning_gp.sh                 # GP AL production run (DeepGP)
-│   ├── run_active_learning_gp_2h.sh              # 🆕 GP AL 2-hour test run
-│   └── run_active_learning_gp_medium_test.sh     # GP AL medium test
+├── active_learning.py          # Transformer AL pipeline (MC Dropout)
+├── active_learning_gp.py       # GP AL pipeline (ExactGP, DeepGP, SparseGP)
+├── active_learning_tabpfn.py   # TabPFN AL pipeline (pre-trained foundation model)
+├── analyse_runs.py             # Cross-run quality & diversity analysis
+├── run_analysis.sh             # Wrapper for analyse_runs.py comparisons
+├── resume_slurm.sh             # Resume timed-out Slurm jobs from checkpoint
+├── slurm/                      # Slurm job submission scripts
+│   ├── cluster.conf.template   # Cluster config template (partition, GPU gres)
+│   ├── resume_args.sh          # Resume flag builder for slurm scripts
+│   ├── submit_al_transformer.sh        # Transformer entropy 2-GPU
+│   ├── submit_al_transformer_top_k.sh  # Transformer top-k 2-GPU
+│   ├── submit_al_gp_exact.sh           # ExactGP entropy 2-GPU
+│   ├── submit_al_gp_exact_top_k.sh     # ExactGP top-k 2-GPU
+│   ├── submit_al_gp_deep.sh            # DeepGP entropy 2-GPU
+│   ├── submit_al_gp_deep_top_k.sh      # DeepGP top-k 2-GPU
+│   ├── submit_al_tabpfn.sh             # TabPFN top-k 1-GPU
+│   └── submit_al_tabpfn_entropy.sh     # TabPFN entropy 1-GPU
 ├── pixi.toml                   # Dependency configuration
 ├── data/                       # ROOT files with pMSSM data
-├── logs/                       # Training logs (timestamped)
-├── plots/                      # Output plots (organized by run)
-├── al_pmssmwithgp/             # GP models submodule (ExactGP, DeepGP, SparseGP, MLP)
+├── logs/                       # Slurm job logs (timestamped)
+├── al_pmssmwithgp/             # GP models submodule (ExactGP, DeepGP, SparseGP)
 ├── Run3ModelGen/               # Submodule for pMSSM model generation
 ├── tests/                      # Unit tests
 └── doc/                        # Documentation
-    ├── SUMMARY.md              # Project overview
-    ├── IMPLEMENTATION_DETAILS.md  # Advanced topics & performance analysis
-    ├── TRAINING_GUIDE.md       # Transformer training guide
+    ├── ANALYSIS_METRICS.md     # Cross-run analysis metrics reference
+    ├── CLI_REFERENCE.md        # Complete CLI options
+    ├── IMPLEMENTATION_DETAILS.md  # Uncertainty, proximity weighting, normalization
     ├── PARALLEL_TRAINING.md    # Multi-GPU setup
-    ├── active_learning_plan.md # Transformer AL design
-    ├── gp_integration_plan.md  # GP AL integration & progress
-    ├── gp_pipeline_comparison.md  # GP pipeline features & CLI
-    └── CLI_REFERENCE.md        # Complete CLI options
+    ├── SUMMARY.md              # Project overview
+    └── ...                     # Additional guides
 ```
 
 ## Output
@@ -520,26 +594,19 @@ See [doc/PARALLEL_TRAINING.md](doc/PARALLEL_TRAINING.md) for details.
 - **[README.md](README.md)** - This file (quick start, overview)
 - [Project Summary](doc/SUMMARY.md) - Overview of all pipelines and status
 
-### Architecture & Code Organization
-- [HARMONIZATION_SUMMARY.md](doc/HARMONIZATION_SUMMARY.md) - Feb 2026 refactoring details ⭐
-- **pmssm/ package** - Unified codebase (13 modules replacing monolithic pmssm.py)
-
-### Training Guides
-- [Training Guide](doc/TRAINING_GUIDE.md) - Transformer training with train_pmssm.py
-- [Parallel Training](doc/PARALLEL_TRAINING.md) - Multi-GPU setup and configuration
-
 ### Active Learning Pipelines
-- [Transformer AL Plan](doc/active_learning_plan.md) - Detailed design and algorithms ⭐
-- [GP Pipeline Reference](doc/gp_pipeline_comparison.md) - GP features, CLI options, models ⭐
-- [GP Integration](doc/gp_integration_plan.md) - GP integration progress (completed)
+- [Transformer AL Plan](doc/active_learning_plan.md) - Detailed design and algorithms
+- [GP Pipeline Reference](doc/gp_pipeline_comparison.md) - GP features, CLI options, models
+- [Implementation Details](doc/IMPLEMENTATION_DETAILS.md) - Uncertainty computation, proximity weighting, normalization differences
+
+### Analysis
+- [Analysis Metrics](doc/ANALYSIS_METRICS.md) - Cross-run quality & diversity metrics reference
 
 ### Reference
-- [Implementation Details](doc/IMPLEMENTATION_DETAILS.md) - Advanced topics: uncertainty computation, warm starting impact, proximity weighting ⭐
-- [CLI Reference](doc/CLI_REFERENCE.md) - Complete command-line options for both pipelines
+- [CLI Reference](doc/CLI_REFERENCE.md) - Complete command-line options for all pipelines
+- [Parallel Training](doc/PARALLEL_TRAINING.md) - Multi-GPU setup and configuration
 - [Logging Info](doc/LOGGING_INFO.md) - Structured logging with structlog
 - [Plot Organization](doc/PLOT_ORGANIZATION.md) - Output plot structure
-
-⭐ = Recommended for new users
 
 ## License
 
