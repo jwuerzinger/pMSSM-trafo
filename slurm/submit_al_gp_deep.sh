@@ -92,7 +92,7 @@ source "${REPO_ROOT}/slurm/resume_args.sh"
     --n-samples 2000 \
     --n-iterations 40 \
     --n-select 500 \
-    --n-candidates 500000 \
+    --n-candidates 1000000 \
     --entropy-pool-size 5000 \
     --tolerance-sampling 1.0 \
     --gen-workers 20 \

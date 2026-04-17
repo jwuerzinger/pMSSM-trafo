@@ -408,38 +408,55 @@ See [doc/CLI_REFERENCE.md](doc/CLI_REFERENCE.md) for TabPFN-specific options.
 
 ## Batch Acquisition Strategy
 
-Both pipelines use **entropy-based batch selection** (default) to choose informative, diverse batches of points for simulation. The strategy has three stages.
+Both pipelines choose informative points for simulation via a shared pre-filter stack, then pick via one of two selection strategies: `top_k` (greedy) or `entropy_batch` (diverse). The default is `entropy_batch` for the Transformer and GP pipelines, and `top_k` for the TabPFN pipeline — see the note under Stage 3 for why.
 
 ### Stage 1: Uncertainty Estimation
 
 | Pipeline | Method | How It Works |
 |----------|--------|-------------|
 | **Transformer** | MC Dropout | Run T stochastic forward passes (default T=30) with dropout active; uncertainty = variance across passes |
+| **TabPFN** | Native predictive variance | Variance of TabPFN's Bayesian in-context predictive distribution |
 | **GP** | Posterior variance | Single forward pass through the GP likelihood gives analytical mean and variance |
 
-### Stage 2: Candidate Scoring and Pool Pre-filtering
+### Stage 2: Candidate Pre-filtering (applied by **both** selection strategies)
 
-1. **Candidate generation**: A pool of `n_candidates` points (default 20,000) is generated via Latin Hypercube Sampling across the 19D parameter space for uniform coverage.
+1. **Candidate generation**: A pool of `n_candidates` points (default 20,000) is generated via Latin Hypercube Sampling across the 19D parameter space.
 
-2. **Proximity weighting** (optional, enabled by default): Candidates are weighted by proximity to the decision boundary (observed relic density threshold, 0.12):
+2. **Tolerance cut** (`--tolerance-sampling`, default 1.0): A **hard cut** that keeps only candidates whose predicted target lies within `[threshold − tol, threshold + tol]` in transformed space. With the default `log(Y/0.12)` transform and `tol=1.0`, this keeps candidates predicted to give `Y ∈ [0.044, 0.326]` — i.e. within a factor ~3 of the observed relic density. Candidates the model extrapolates as overclosing (Y ≫ 0.12) or far-sub-dominant are dropped outright. Set to 0 to disable.
+
+   > **Note:** applied by *both* `top_k` and `entropy_batch` as of the current version. Previously only `entropy_batch` honored it.
+
+3. **Proximity weighting** (`--proximity-sampling`, default 0.1): A **soft** Gaussian weight on the surviving candidates' variances:
 
    ```
    proximity = exp(-((pred_mean - threshold)^2) / sigma)
    weighted_variance = proximity * variance
    ```
 
-   This focuses acquisition on the physically relevant region rather than uninformative high-variance areas far from the target.
+   Candidates further from the target get down-weighted but not eliminated. Set to 0 to disable.
 
-3. **Pool pre-filtering**: The top candidates by weighted variance are retained to reduce the covariance computation:
+4. **Focused pool** (entropy_batch only, `--entropy-pool-size`): The top `n_pool` candidates by weighted variance are retained to reduce the downstream covariance computation:
 
-   | Pipeline | Strategy | Default Pool Size | Reason |
-   |----------|----------|-------------------|--------|
-   | **GP** | Value-based (`--tolerance-sampling`) | 1M candidates evaluated, filtered near threshold | Single forward pass per point (cheap) |
-   | **Transformer** | Variance-based (`--entropy-pool-size`) | 1,500 | MC Dropout requires T forward passes (expensive) |
+   | Pipeline | Default pool size | Reason |
+   |----------|-------------------|--------|
+   | **GP** | 1M candidates evaluated, filtered near threshold | Single forward pass per point (cheap) |
+   | **Transformer / TabPFN** | 1,500–5,000 | MC Dropout / ensemble requires multiple forward passes (expensive) |
 
-### Stage 3: Iterative Entropy-Based Batch Selection
+### Stage 3: Selection Strategy
 
-The core algorithm selects `n_select` points that are jointly informative — not just individually uncertain, but diverse relative to each other.
+Two strategies operate on the pre-filtered pool from Stage 2. Both honor the tolerance cut and proximity weighting; they differ only in the batch-construction step.
+
+#### `top_k` — greedy variance ranking
+
+After tolerance + proximity, sort survivors by weighted variance and take the top `n_select`. No diversity: if several high-uncertainty candidates cluster in one region, they all get picked. Cheap and simple; appropriate when the filters have already narrowed the pool well.
+
+Implemented in `select_top_uncertain_filtered` ([pmssm/selection.py](pmssm/selection.py)).
+
+#### `entropy_batch` — iterative diverse batch (default for Transformer and GP)
+
+Selects `n_select` points that are jointly informative — not just individually uncertain, but diverse relative to each other.
+
+> **Note on TabPFN**: The TabPFN pipeline defaults to `top_k`, not `entropy_batch`. `entropy_batch` needs a full `T × n_pool` MC-dropout / ensemble prediction tensor to build the sample covariance, which is prohibitively expensive with TabPFN's in-context ensembles — in practice only a handful of iterations complete within a reasonable wall-clock budget. Use `--selection-strategy entropy_batch` explicitly if you want to pay the cost; otherwise the `top_k` path (which still applies the shared tolerance cut and proximity weighting) is recommended.
 
 **Building the covariance matrix** over the focused pool:
 - *Transformer*: Sample covariance from T MC Dropout predictions: `C = (X - X̄)^T (X - X̄) / (T - 1)`
@@ -466,7 +483,7 @@ The core algorithm selects `n_select` points that are jointly informative — no
 
 | Parameter | Default | CLI Flag | Description |
 |-----------|---------|----------|-------------|
-| Selection strategy | `entropy_batch` | `--selection-strategy` | `entropy_batch` (diverse) or `top_k` (greedy) |
+| Selection strategy | `entropy_batch` (Transformer, GP); `top_k` (TabPFN, for cost reasons) | `--selection-strategy` | `entropy_batch` (diverse) or `top_k` (greedy) |
 | MC samples | 30 | `--mc-samples` | Forward passes for MC Dropout uncertainty |
 | Candidates | 20,000 | `--n-candidates` | LHS candidate pool size |
 | Points per iteration | 10 | `--n-select` | Batch size to select |
@@ -474,7 +491,7 @@ The core algorithm selects `n_select` points that are jointly informative — no
 | Proximity sampling | 0.1 | `--proximity-sampling` | Gaussian width for threshold focus (0 = disabled) |
 | Entropy blur | 0.15 | `--entropy-blur` | Smoothing for numerical stability |
 | Entropy beta | 50.0 | `--entropy-beta` | Gibbs temperature (higher = more deterministic) |
-| Tolerance sampling | 1.0 | `--tolerance-sampling` | Value-based pre-filter width (GP only) |
+| Tolerance sampling | 1.0 | `--tolerance-sampling` | Value-based hard pre-filter width (both `top_k` and `entropy_batch`; 0 = disabled) |
 
 See [Implementation Details](doc/IMPLEMENTATION_DETAILS.md) for proximity weighting analysis and pre-filtering strategy comparison.
 

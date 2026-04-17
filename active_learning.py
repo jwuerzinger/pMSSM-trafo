@@ -48,6 +48,7 @@ from pmssm import (
     # Selection
     generate_candidate_pool,
     select_top_uncertain,
+    select_top_uncertain_filtered,
     select_entropy_batch_mc,
     # Uncertainty
     compute_uncertainty_mc_dropout,
@@ -1011,14 +1012,13 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
             pred_mean, pred_var = compute_uncertainty_mc_dropout(
                 model, candidates, stats, mc_samples, device, logger
             )
-            if proximity_sampling > 0:
-                # Apply proximity weighting to variance for top_k selection
-                proximity = torch.exp(-((pred_mean.squeeze() - threshold_transformed) ** 2) / proximity_sampling)
-                weighted_var = proximity.unsqueeze(1) * pred_var
-                top_indices = select_top_uncertain(candidates, weighted_var, n_select)
-                logger.info(f"Applied proximity weighting (σ={proximity_sampling:.3f}) around target={target_value:.3f}")
-            else:
-                top_indices = select_top_uncertain(candidates, pred_var, n_select)
+            top_indices = select_top_uncertain_filtered(
+                candidates, pred_mean, pred_var, n_select,
+                threshold=threshold_transformed,
+                tolerance_sampling=tolerance_sampling,
+                proximity_sampling=proximity_sampling,
+                logger=logger,
+            )
 
         logger.info(f"Selected {len(top_indices)} points via {selection_strategy} (requested: {n_select}, available: {len(candidates)})")
 
@@ -1093,12 +1093,13 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
                         attempt_mean, attempt_pred_var = compute_uncertainty_mc_dropout(
                             model, attempt_candidates, stats, mc_samples, device, logger
                         )
-                        if proximity_sampling > 0:
-                            proximity = torch.exp(-((attempt_mean.squeeze() - threshold_transformed) ** 2) / proximity_sampling)
-                            weighted_var = proximity.unsqueeze(1) * attempt_pred_var
-                            attempt_indices = select_top_uncertain(attempt_candidates, weighted_var, n_select)
-                        else:
-                            attempt_indices = select_top_uncertain(attempt_candidates, attempt_pred_var, n_select)
+                        attempt_indices = select_top_uncertain_filtered(
+                            attempt_candidates, attempt_mean, attempt_pred_var, n_select,
+                            threshold=threshold_transformed,
+                            tolerance_sampling=tolerance_sampling,
+                            proximity_sampling=proximity_sampling,
+                            logger=logger,
+                        )
 
                     param_names = [p.replace("IN_", "") for p in PARAM_ORDER]
                     df = pd.DataFrame(attempt_candidates[attempt_indices].numpy(), columns=param_names)

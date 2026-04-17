@@ -85,6 +85,7 @@ from .models import (
 from .selection import (
     generate_candidate_pool,
     select_top_uncertain,
+    select_top_uncertain_filtered,
     select_entropy_batch_mc,
     select_points,
 )
@@ -182,6 +183,7 @@ __all__ = [
     # Selection functions
     'generate_candidate_pool',
     'select_top_uncertain',
+    'select_top_uncertain_filtered',
     'select_entropy_batch_mc',
     'select_points',
 

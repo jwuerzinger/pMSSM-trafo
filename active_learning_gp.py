@@ -35,6 +35,7 @@ from pmssm import (
     # Selection
     generate_candidate_pool,
     select_top_uncertain,
+    select_top_uncertain_filtered,
     # Uncertainty
     compute_uncertainty_gp,
     # Training
@@ -449,7 +450,7 @@ def load_config_with_sweep(config_file, sweep_index=None):
               help="Hard cut: keep only candidates within ±tolerance of threshold in transformed space (0 to disable, default: 1.0).")
 @click.option('--proximity-sampling', default=0.1, type=float,
               help="Gaussian proximity weighting width around target value (0 to disable, default: 0.1).")
-@click.option('--entropy-pool-size', default=10_000, type=int, help="Focused pool size for entropy_batch pre-filtering.")
+@click.option('--entropy-pool-size', default=5_000, type=int, help="Focused pool size for entropy_batch pre-filtering.")
 # Evaluation options
 @click.option('--compute-full-metrics/--no-compute-full-metrics', default=False,
               help="Compute comprehensive GoF metrics (accuracy, chi2, pulls, etc.).")
@@ -1203,7 +1204,13 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, v
                 logger=logger,
             )
 
-            top_indices = select_top_uncertain(candidates, pred_var.unsqueeze(1), n_select)
+            top_indices = select_top_uncertain_filtered(
+                candidates, _pred_mean, pred_var.unsqueeze(1), n_select,
+                threshold=threshold,
+                tolerance_sampling=tolerance_sampling,
+                proximity_sampling=proximity_sampling,
+                logger=logger,
+            )
 
         logger.info(f"Selected {len(top_indices)} most uncertain points")
 
@@ -1292,13 +1299,17 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, v
 
                     attempt_seed = iteration * 1000 + attempt
                     attempt_candidates = generate_candidate_pool(n_candidates, seed=attempt_seed)
-                    _, attempt_pred_var = compute_uncertainty_gp(
+                    attempt_mean, attempt_pred_var = compute_uncertainty_gp(
                         al_model, attempt_candidates, data_min, data_max,
                         model_type=model_type, jitter=jitter, num_samples=gp_num_samples,
                         logger=logger,
                     )
-                    attempt_indices = select_top_uncertain(
-                        attempt_candidates, attempt_pred_var.unsqueeze(1), n_select
+                    attempt_indices = select_top_uncertain_filtered(
+                        attempt_candidates, attempt_mean, attempt_pred_var.unsqueeze(1), n_select,
+                        threshold=threshold,
+                        tolerance_sampling=tolerance_sampling,
+                        proximity_sampling=proximity_sampling,
+                        logger=logger,
                     )
 
                     param_names = [p.replace("IN_", "") for p in PARAM_ORDER]

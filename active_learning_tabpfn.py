@@ -36,6 +36,7 @@ from pmssm import (
     # Selection
     generate_candidate_pool,
     select_top_uncertain,
+    select_top_uncertain_filtered,
     select_entropy_batch_mc,
     # Visualization
     plot_data_histograms,
@@ -308,7 +309,7 @@ def load_config_with_sweep(config_file, sweep_index=None):
 @click.option('--min-gen-fraction', default=0.6, type=float, help="Minimum fraction of n-select that must be generated successfully before stopping retries (default: 0.6).")
 @click.option('--max-gen-attempts', default=10, type=int, help="Maximum number of generation attempts per iteration (default: 10).")
 @click.option('--gen-workers', default=1, type=int, help="Number of parallel genModels.py workers per generation attempt (default: 1).")
-@click.option('--selection-strategy', default='top_k', type=click.Choice(['top_k', 'entropy_batch']), help="Selection strategy: top_k (default) or entropy_batch.")
+@click.option('--selection-strategy', default='top_k', type=click.Choice(['top_k', 'entropy_batch']), help="Selection strategy: top_k (default for TabPFN — entropy_batch is prohibitively expensive) or entropy_batch.")
 @click.option('--entropy-blur', default=0.15, type=float, help="Entropy smoothing parameter (entropy_batch only).")
 @click.option('--entropy-beta', default=50.0, type=float, help="Gibbs sampling temperature (entropy_batch only).")
 @click.option('--entropy-pool-size', default=5000, type=int, help="Focused pool size for entropy_batch pre-filtering.")
@@ -850,13 +851,13 @@ def main(testing, n_iterations, n_candidates, n_select, n_ensemble_samples, n_da
             pred_var = torch.from_numpy(var_cand).float().unsqueeze(1)
             logger.info(f"Uncertainty stats: mean={pred_var.mean():.6f}, max={pred_var.max():.6f}")
 
-            if proximity_sampling > 0:
-                proximity = torch.exp(-((pred_mean.squeeze() - threshold_transformed) ** 2) / proximity_sampling)
-                weighted_var = proximity.unsqueeze(1) * pred_var
-                top_indices = select_top_uncertain(candidates, weighted_var, n_select)
-                logger.info(f"Applied proximity weighting (σ={proximity_sampling:.3f}) around target={target_value:.3f}")
-            else:
-                top_indices = select_top_uncertain(candidates, pred_var, n_select)
+            top_indices = select_top_uncertain_filtered(
+                candidates, pred_mean, pred_var, n_select,
+                threshold=threshold_transformed,
+                tolerance_sampling=tolerance_sampling,
+                proximity_sampling=proximity_sampling,
+                logger=logger,
+            )
 
         logger.info(f"Selected {len(top_indices)} points via {selection_strategy} (requested: {n_select}, available: {len(candidates)})")
 
@@ -928,12 +929,13 @@ def main(testing, n_iterations, n_candidates, n_select, n_ensemble_samples, n_da
                         attempt_y_pred, attempt_var = tabpfn_predict_with_variance(al_model, attempt_candidates)
                         attempt_mean = torch.from_numpy(attempt_y_pred).float().unsqueeze(1)
                         attempt_pred_var = torch.from_numpy(attempt_var).float().unsqueeze(1)
-                        if proximity_sampling > 0:
-                            proximity = torch.exp(-((attempt_mean.squeeze() - threshold_transformed) ** 2) / proximity_sampling)
-                            weighted_var = proximity.unsqueeze(1) * attempt_pred_var
-                            attempt_indices = select_top_uncertain(attempt_candidates, weighted_var, n_select)
-                        else:
-                            attempt_indices = select_top_uncertain(attempt_candidates, attempt_pred_var, n_select)
+                        attempt_indices = select_top_uncertain_filtered(
+                            attempt_candidates, attempt_mean, attempt_pred_var, n_select,
+                            threshold=threshold_transformed,
+                            tolerance_sampling=tolerance_sampling,
+                            proximity_sampling=proximity_sampling,
+                            logger=logger,
+                        )
 
                     param_names = [p.replace("IN_", "") for p in PARAM_ORDER]
                     df = pd.DataFrame(attempt_candidates[attempt_indices].numpy(), columns=param_names)

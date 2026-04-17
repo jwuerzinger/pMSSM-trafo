@@ -85,6 +85,76 @@ def select_top_uncertain(X_candidates, uncertainties, n_select):
     return all_sorted[:n_select].copy()
 
 
+def select_top_uncertain_filtered(X_candidates, pred_mean, pred_var, n_select,
+                                  threshold=0.0, tolerance_sampling=0.0,
+                                  proximity_sampling=0.0, logger=None):
+    """
+    Variance-based top-k selection with optional tolerance and proximity filters.
+
+    Mirrors the pre-filter stages of :func:`select_entropy_batch_mc` so both
+    strategies honor the same pre-filtering semantics.
+
+    Stages:
+      1. Hard tolerance cut: keep candidates with ``pred_mean`` in
+         ``[threshold - tolerance_sampling, threshold + tolerance_sampling]``.
+      2. Proximity-weighted variance:
+         ``weighted_var = var * exp(-(pred_mean - threshold)^2 / proximity_sampling)``.
+      3. Return the top ``n_select`` by (weighted) variance.
+
+    Args:
+        X_candidates: Candidate pool tensor (N, D)
+        pred_mean: Predicted mean in transformed space (N, 1) or (N,)
+        pred_var: Prediction variance (N, 1) or (N,)
+        n_select: Number to select
+        threshold: Decision threshold in transformed space
+        tolerance_sampling: ± width around threshold for hard cut (0 to disable)
+        proximity_sampling: Gaussian proximity width (0 to disable)
+        logger: Logger instance
+
+    Returns:
+        Numpy array of indices into ``X_candidates`` (len ≤ ``n_select``).
+    """
+    N = X_candidates.shape[0]
+    mean_flat = pred_mean.squeeze()
+
+    # Step 1: hard tolerance cut
+    if tolerance_sampling > 0.0:
+        mask = ((mean_flat > threshold - tolerance_sampling) &
+                (mean_flat < threshold + tolerance_sampling))
+        surviving_indices = torch.where(mask)[0]
+        if logger:
+            logger.info(f"Tolerance filter (±{tolerance_sampling:.2f}): "
+                       f"{len(surviving_indices)}/{N} candidates survive")
+        if len(surviving_indices) == 0:
+            if logger:
+                logger.warning("No candidates survived tolerance filter, "
+                              "falling back to all candidates")
+            surviving_indices = torch.arange(N)
+    else:
+        surviving_indices = torch.arange(N)
+
+    # Step 2: proximity-weighted variance on survivors
+    surv_var = pred_var[surviving_indices]
+    if proximity_sampling > 0.0:
+        surv_mean = mean_flat[surviving_indices]
+        proximity = torch.exp(-((surv_mean - threshold) ** 2) / proximity_sampling)
+        if surv_var.dim() == 2:
+            weighted_var = proximity.unsqueeze(1) * surv_var
+        else:
+            weighted_var = proximity * surv_var
+        if logger:
+            logger.info(f"Proximity weighting (σ={proximity_sampling:.3f}): "
+                       f"mean={proximity.mean():.4f}, max={proximity.max():.4f}")
+    else:
+        weighted_var = surv_var
+
+    # Step 3: top-k by (weighted) variance
+    var_flat = weighted_var.squeeze().numpy()
+    k = min(n_select, len(surviving_indices))
+    topk_in_surv = np.argsort(var_flat)[::-1][:k].copy()
+    return surviving_indices.numpy()[topk_in_surv]
+
+
 # ===== Entropy-Based Selection with Proximity Weighting =====
 
 def select_entropy_batch_mc(X_candidates, predictions, pred_mean, pred_var,
@@ -248,6 +318,19 @@ def select_points(strategy='top_k', **kwargs):
         selected_indices: Indices of selected points
     """
     if strategy == 'top_k':
+        # Prefer the filtered variant when pred_mean is supplied so tolerance
+        # and proximity filters can be applied consistently with entropy_batch.
+        if 'pred_mean' in kwargs and 'pred_var' in kwargs:
+            return select_top_uncertain_filtered(
+                kwargs['X_candidates'],
+                kwargs['pred_mean'],
+                kwargs['pred_var'],
+                kwargs['n_select'],
+                threshold=kwargs.get('threshold', 0.0),
+                tolerance_sampling=kwargs.get('tolerance_sampling', 0.0),
+                proximity_sampling=kwargs.get('proximity_sampling', 0.0),
+                logger=kwargs.get('logger', None),
+            )
         return select_top_uncertain(
             kwargs['X_candidates'],
             kwargs['uncertainties'],
