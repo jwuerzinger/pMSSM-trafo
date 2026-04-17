@@ -910,11 +910,16 @@ def plot_hit_rate_trajectories(
                 ax.plot(iters, rates, color=color, lw=2, marker="o", ms=4, label=run.label)
         ax.set_xlabel("Iteration")
         ax.set_ylabel("Hit rate")
-        ax.set_ylim(0, 1)
-        ax.legend(fontsize=8)
+        ax.set_ylim(0, 0.4)
         ax.grid(True, alpha=0.3)
 
-    fig.tight_layout()
+    # Single shared legend outside the rightmost axis
+    handles, lbls = axes[-1].get_legend_handles_labels()
+    if handles:
+        fig.legend(handles, lbls, fontsize=8, loc="center left",
+                   bbox_to_anchor=(1.0, 0.5), borderaxespad=0.)
+
+    fig.tight_layout(rect=(0, 0, 0.88, 1))
     _save(fig, out_dir / "hit_rate_trajectories.png")
 
 
@@ -953,7 +958,7 @@ def plot_quality_summary(
     ax.set_xticks(x)
     ax.set_xticklabels(labels, rotation=20, ha="right", fontsize=8)
     ax.set_ylabel("Hit rate")
-    ax.set_ylim(0, 1)
+    ax.set_ylim(0, 0.4)
     ax.set_title("Hit rate at different tolerances (final)")
     ax.legend()
     ax.grid(axis="y", alpha=0.3)
@@ -966,13 +971,21 @@ def plot_quality_summary(
         ("final_al_val_r2",       "AL val R²"),
     ]
     offsets = np.linspace(-w, w, len(r2_keys))
+    r2_clip = -10.0
     for (key, lbl), off in zip(r2_keys, offsets):
         vals = [m[key] for m in quality_metrics]
-        ax.bar(x + off, vals, width=w, label=lbl, alpha=0.8)
+        clipped = [max(v, r2_clip) for v in vals]
+        bars = ax.bar(x + off, clipped, width=w, label=lbl, alpha=0.8)
+        # Annotate bars whose true value was clipped so no information is lost.
+        for xi, v_true, v_clip in zip(x + off, vals, clipped):
+            if v_true < r2_clip:
+                ax.text(xi, v_clip + 0.1, f"{v_true:.0f}",
+                        ha="center", va="bottom", fontsize=6, rotation=90)
     ax.set_xticks(x)
     ax.set_xticklabels(labels, rotation=20, ha="right", fontsize=8)
     ax.set_ylabel("R²")
-    ax.set_title("Final R² scores")
+    ax.set_ylim(r2_clip, 1.0)
+    ax.set_title("Final R² scores (clipped at R²=−10)")
     ax.legend(fontsize=8)
     ax.grid(axis="y", alpha=0.3)
     ax.axhline(0, color="k", lw=0.5)
@@ -1212,6 +1225,78 @@ def plot_pairwise_scatter(
     _save(fig, out_dir / "pairwise_scatter.png")
 
 
+def plot_pairwise_scatter_per_run(
+    runs: list[RunData],
+    mcmc_X_free_norm: np.ndarray,
+    out_dir: Path,
+    max_pts: int = 5000,
+) -> None:
+    """Same panels as :func:`plot_pairwise_scatter`, but one figure per run.
+
+    Avoids the overplotting mess that results from stacking all runs on the
+    same axes. MCMC samples remain the grey background; each figure shows
+    exactly one run's training data on top.
+    """
+    name_to_col = {n: i for i, n in enumerate(FREE_PARAM_NAMES)}
+    valid_pairs = [(a, b) for a, b in SCATTER_PAIRS if a in name_to_col and b in name_to_col]
+    if not valid_pairs:
+        return
+
+    sub_dir = out_dir / "pairwise_scatter_per_run"
+    sub_dir.mkdir(parents=True, exist_ok=True)
+
+    ncols = min(3, len(valid_pairs))
+    nrows = (len(valid_pairs) + ncols - 1) // ncols
+    rng = np.random.default_rng(42)
+
+    # Pre-subsample MCMC once
+    mcmc_plot = mcmc_X_free_norm
+    if len(mcmc_plot) > 5000:
+        mcmc_plot = mcmc_plot[rng.choice(len(mcmc_plot), 5000, replace=False)]
+
+    for idx, run in enumerate(runs):
+        fig, axes = plt.subplots(nrows, ncols, figsize=(5 * ncols, 4 * nrows))
+        axes_flat = np.array(axes).ravel()
+        colour = PALETTE[idx % len(PALETTE)]
+
+        for ax, (xname, yname) in zip(axes_flat, valid_pairs):
+            xi = name_to_col[xname]
+            yi = name_to_col[yname]
+
+            if len(mcmc_plot):
+                ax.scatter(mcmc_plot[:, xi], mcmc_plot[:, yi],
+                           c="lightgrey", s=2, alpha=0.4, label="MCMC",
+                           zorder=1, rasterized=True)
+
+            pts = run.X_free_norm[:, [xi, yi]]
+            if len(pts) > max_pts:
+                pts = pts[rng.choice(len(pts), max_pts, replace=False)]
+            ax.scatter(pts[:, 0], pts[:, 1],
+                       c=[colour], s=10, alpha=0.6, label=run.label,
+                       zorder=2, rasterized=True)
+
+            ax.set_xlabel(xname)
+            ax.set_ylabel(yname)
+            ax.set_xlim(0, 1)
+            ax.set_ylim(0, 1)
+            ax.grid(True, alpha=0.2)
+
+        handles, lbls = axes_flat[0].get_legend_handles_labels()
+        axes_flat[0].legend(handles, lbls, fontsize=9, loc="upper right")
+
+        for ax in axes_flat[len(valid_pairs):]:
+            ax.set_visible(False)
+
+        fig.suptitle(
+            f"Training data vs MCMC posterior — {run.label} "
+            f"(N={len(run.X_free_norm)})",
+            y=1.01,
+        )
+        fig.tight_layout()
+        safe_label = "".join(c if c.isalnum() or c in "._-" else "_" for c in run.label)
+        _save(fig, sub_dir / f"pairwise_scatter_{safe_label}.png")
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Summary CSV
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1433,10 +1518,12 @@ def main() -> None:  # noqa: C901
     plot_param_variance_heatmap(runs, physical_metrics, out_dir)
     if mcmc_X_free_norm is not None:
         plot_pairwise_scatter(runs, mcmc_X_free_norm, out_dir)
+        plot_pairwise_scatter_per_run(runs, mcmc_X_free_norm, out_dir)
     else:
         # Still plot scatter without MCMC background
         dummy_mcmc = np.empty((0, len(FREE_PARAM_INDICES)))
         plot_pairwise_scatter(runs, dummy_mcmc, out_dir)
+        plot_pairwise_scatter_per_run(runs, dummy_mcmc, out_dir)
 
     # ── summary CSV ────────────────────────────────────────────────────────────
     save_summary_csv(runs, quality_metrics, physical_metrics, diversity_metrics, out_dir)
