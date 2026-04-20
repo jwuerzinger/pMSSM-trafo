@@ -25,7 +25,8 @@
 #   diversity_summary.png     — mean entropy, k-NN distance, MMD, cluster coverage
 #   param_entropy_heatmap.png — per-parameter Shannon entropy per run
 #   param_variance_heatmap.png— per-parameter variance per run
-#   pairwise_scatter.png      — 2-D parameter projections overlaid with MCMC
+#   pairwise_scatter_per_run/ — 2-D parameter projections overlaid with MCMC,
+#                               one PNG per run (avoids overplotting)
 #   summary.csv               — one row per run, all scalar metrics ± uncertainties
 #
 # Key flags

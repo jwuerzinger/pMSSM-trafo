@@ -53,7 +53,7 @@ The analysis loads `state.pt` checkpoints from completed active learning runs an
 | `diversity_summary.png` | Bar chart of mean entropy, k-NN distance, MMD, cluster coverage |
 | `param_entropy_heatmap.png` | Heatmap of per-parameter Shannon entropy for each run |
 | `param_variance_heatmap.png` | Heatmap of per-parameter variance for each run |
-| `pairwise_scatter.png` | 2-D projections of training data overlaid with MCMC samples |
+| `pairwise_scatter_per_run/pairwise_scatter_<label>.png` | 2-D projections of training data overlaid with MCMC samples, one figure per run |
 
 ### CSV
 

@@ -1152,90 +1152,18 @@ def plot_param_variance_heatmap(
     _save(fig, out_dir / "param_variance_heatmap.png")
 
 
-def plot_pairwise_scatter(
-    runs: list[RunData],
-    mcmc_X_free_norm: np.ndarray,
-    out_dir: Path,
-    max_pts: int = 2000,
-) -> None:
-    """2-D scatter plots of selected training points overlaid with MCMC samples.
-
-    One panel per parameter pair defined in ``SCATTER_PAIRS``.  MCMC samples
-    are shown as a grey background density; each run's training data is
-    overlaid in colour.
-
-    Parameters
-    ----------
-    runs : list[RunData]
-    mcmc_X_free_norm : np.ndarray, shape (M, n_free)
-    out_dir : Path
-    max_pts : int
-        Cap on the number of points plotted per run to avoid overplotting.
-    """
-    # Build index: free param name → column index in X_free_norm
-    name_to_col = {n: i for i, n in enumerate(FREE_PARAM_NAMES)}
-    valid_pairs = [(a, b) for a, b in SCATTER_PAIRS if a in name_to_col and b in name_to_col]
-    if not valid_pairs:
-        return
-
-    ncols = min(3, len(valid_pairs))
-    nrows = (len(valid_pairs) + ncols - 1) // ncols
-    fig, axes = plt.subplots(nrows, ncols, figsize=(5 * ncols, 4 * nrows))
-    axes_flat = np.array(axes).ravel()
-
-    rng = np.random.default_rng(42)
-
-    for ax, (xname, yname) in zip(axes_flat, valid_pairs):
-        xi = name_to_col[xname]
-        yi = name_to_col[yname]
-
-        # MCMC background
-        m_sub = mcmc_X_free_norm[:, [xi, yi]]
-        if len(m_sub) > 5000:
-            m_sub = m_sub[rng.choice(len(m_sub), 5000, replace=False)]
-        ax.scatter(m_sub[:, 0], m_sub[:, 1], c="lightgrey", s=2, alpha=0.4,
-                   label="MCMC", zorder=1, rasterized=True)
-
-        # AL training data per run
-        for idx, run in enumerate(runs):
-            pts = run.X_free_norm[:, [xi, yi]]
-            if len(pts) > max_pts:
-                pts = pts[rng.choice(len(pts), max_pts, replace=False)]
-            ax.scatter(pts[:, 0], pts[:, 1],
-                       c=[PALETTE[idx % len(PALETTE)]],
-                       s=10, alpha=0.6, label=run.label, zorder=2 + idx,
-                       rasterized=True)
-
-        ax.set_xlabel(xname)
-        ax.set_ylabel(yname)
-        ax.set_xlim(0, 1)
-        ax.set_ylim(0, 1)
-        ax.grid(True, alpha=0.2)
-
-    # Shared legend on first axis
-    handles, lbls = axes_flat[0].get_legend_handles_labels()
-    axes_flat[0].legend(handles, lbls, fontsize=7, loc="upper right")
-
-    # Hide unused panels
-    for ax in axes_flat[len(valid_pairs):]:
-        ax.set_visible(False)
-
-    fig.suptitle("Training data vs MCMC posterior (normalised parameter space)", y=1.01)
-    fig.tight_layout()
-    _save(fig, out_dir / "pairwise_scatter.png")
-
-
 def plot_pairwise_scatter_per_run(
     runs: list[RunData],
     mcmc_X_free_norm: np.ndarray,
     out_dir: Path,
     max_pts: int = 5000,
 ) -> None:
-    """Same panels as :func:`plot_pairwise_scatter`, but one figure per run.
+    """2-D scatter plots of selected training points overlaid with MCMC samples,
+    one figure per run.
 
-    Avoids the overplotting mess that results from stacking all runs on the
-    same axes. MCMC samples remain the grey background; each figure shows
-    exactly one run's training data on top.
+    One panel per parameter pair defined in ``SCATTER_PAIRS``. MCMC samples
+    are shown as a grey background density; each figure shows exactly one
+    run's training data on top.
     """
     name_to_col = {n: i for i, n in enumerate(FREE_PARAM_NAMES)}
     valid_pairs = [(a, b) for a, b in SCATTER_PAIRS if a in name_to_col and b in name_to_col]
@@ -1517,12 +1445,9 @@ def main() -> None:  # noqa: C901
     plot_param_entropy_heatmap(runs, diversity_metrics, out_dir)
     plot_param_variance_heatmap(runs, physical_metrics, out_dir)
     if mcmc_X_free_norm is not None:
-        plot_pairwise_scatter(runs, mcmc_X_free_norm, out_dir)
         plot_pairwise_scatter_per_run(runs, mcmc_X_free_norm, out_dir)
     else:
-        # Still plot scatter without MCMC background
         dummy_mcmc = np.empty((0, len(FREE_PARAM_INDICES)))
-        plot_pairwise_scatter(runs, dummy_mcmc, out_dir)
         plot_pairwise_scatter_per_run(runs, dummy_mcmc, out_dir)
 
     # ── summary CSV ────────────────────────────────────────────────────────────
