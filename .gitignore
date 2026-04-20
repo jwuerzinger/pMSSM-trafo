@@ -16,5 +16,3 @@ active_learning_exact_gp_output*
 active_learning_tabpfn_output*
 pipeline_analysis*
 slurm/cluster.conf
-analysis/*.md
-analysis/*.png
