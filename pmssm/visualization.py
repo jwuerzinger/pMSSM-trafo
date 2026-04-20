@@ -72,7 +72,7 @@ def gp_predict(model, X_norm, model_type, jitter=1e-3, num_samples=8):
         batch_size = 1024
         all_means = []
         with torch.no_grad(), \
-             gpytorch.settings.fast_pred_var(False), \
+             gpytorch.settings.fast_pred_var(), \
              gpytorch.settings.cholesky_jitter(float_value=jitter, double_value=jitter):
             for start in range(0, len(X_norm), batch_size):
                 x_batch = X_norm[start:start + batch_size].to(device)
@@ -743,7 +743,7 @@ def plot_advanced_diagnostics(model, X_eval_norm, Y_eval_true, X_train_norm,
         # exact_gp, sparse_gp
         model.likelihood.eval()
         with torch.no_grad(), \
-             gpytorch.settings.fast_pred_var(False), \
+             gpytorch.settings.fast_pred_var(), \
              gpytorch.settings.cholesky_jitter(float_value=jitter, double_value=jitter):
             preds = model.likelihood(model(X_eval_norm))
             mean = preds.mean.detach().cpu()
