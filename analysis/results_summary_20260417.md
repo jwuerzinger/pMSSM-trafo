@@ -1,6 +1,6 @@
 # pMSSM active-learning results — summary for slides
 
-*Compiled 2026-04-17. Covers runs completed 2026-04-14 through 2026-04-17 and the investigation that drove the 2026-04-17 re-submissions.*
+*Compiled 2026-04-17, rolled forward 2026-04-20 (added §§9–12). Covers runs completed 2026-04-14 through 2026-04-18, the 2026-04-17 re-submissions, the warm-start × strategy × model analysis, and the MC Dropout covariance investigation.*
 
 ---
 
@@ -193,6 +193,8 @@ MMD² vs MCMC with Gaussian kernel (median-heuristic bandwidth, shared across al
 4. **TabPFN entropy_batch feasibility.** Could we build a smaller-pool or amortized variant that reduces the covariance cost? Currently it's a hard blocker.
 5. **An exact_gp entropy_batch 1-GPU run** is missing from the 1v2 grid — would need ≳ 26 h of walltime with a resume-logic workflow.
 6. **Breaking the TabPFN bootstrap trap** (new, raised by §9). Options: (a) stop filtering overclosing labels out of the training set; (b) add an explicit confidence/OOD gate on top of the predicted-mean tolerance; (c) seed with synthetic high-|M_2| labels from a cheaper physics proxy.
+7. **MC Dropout covariance quality for entropy_batch** (new, raised by §10 + §11). T = 20 samples over n_pool = 5000 gives a rank-deficient covariance that may explain why entropy_batch underperforms top_k on the transformer. Diagnostic plan in [mc_dropout_covariance_discussion.md](mc_dropout_covariance_discussion.md).
+8. **Transformer warm-start divergence** (new, §10). Warm R² drops 0.2–0.36 below cold across both strategies; loss trajectories suggest divergence from ≈iter 3–7 onwards. Needs a reseed before claiming it in the talk.
 
 ---
 
@@ -250,10 +252,73 @@ All five comparisons are n = 1 per cell. R² swings of 0.10–0.15 are plausible
 
 ---
 
-## 10. Files and artifacts
+## 10. Warm-start × acquisition-strategy interaction (analysis 2026-04-20)
+
+Extracted per-iteration metrics from paired warm-start and cold-start runs (warm = default, cold = `--no-warm-starting`) for all three models × both strategies. All cells are 40/40 iterations. **ΔR² = warm − cold** sign convention (positive = warm better).
+
+### 10.1 Warm vs cold, per (model × strategy)
+
+| Model | Strategy | Warm R² | Cold R² | ΔR² | Warm val-loss | Cold val-loss | Δloss | Epoch speedup |
+|---|---|---|---|---|---|---|---|---|
+| Transformer | entropy | 0.230 | 0.438 | **−0.208** | 1.52 | 1.02 | +0.51 | 1.5× |
+| Transformer | top_k | 0.258 | **0.620** | **−0.363** | 1.86 | 0.88 | +0.98 | 1.55× |
+| ExactGP † | entropy | **0.466** | 0.196 | **+0.270** | 0.94 | 2.30 | −1.37 | 6.7× |
+| ExactGP † | top_k | 0.423 | 0.264 | +0.159 | 0.87 | 2.49 | −1.62 | ≈ |
+| DeepGP | entropy | 0.445 | 0.446 | −0.001 | 0.81 | 0.92 | −0.12 | 5.6× |
+| DeepGP | top_k | 0.301 | **0.537** | **−0.236** | 1.21 | 0.92 | +0.29 | ≈ |
+
+† ExactGP row uses the `20260416_171932/171841` pair (N ≈ 3.2k), matched to the cold baseline. Not the production `20260415_113302` (N ≈ 10.6k, R² = 0.558) — they are different configs. See also [resubmission_20260420.md](resubmission_20260420.md) for the concurrent LOVE-disable investigation.
+
+### 10.2 What this changes about the story
+
+- **"Entropy always wins" does not survive dropping warm-start.** With warm-start on, entropy beats top-k for DeepGP (+0.14) and ExactGP (+0.04); with warm-start off, top-k wins for Transformer (+0.18) and DeepGP (+0.09). Only ExactGP keeps the entropy advantage in both regimes.
+- **Warm-start helps GPs, hurts the transformer.** For ExactGP/DeepGP warm-start is neutral-to-positive on R² *and* 5.6–6.7× faster. For the transformer warm-start is only 1.5× faster *and* costs 0.2–0.36 R². The transformer warm run visibly diverges from iteration 3–7 onward (val-loss trajectory in both strategies climbs after early convergence).
+- **Strategy × warm-start is not separable.** Warm-start damages top-k more than entropy for the transformer (ΔR²_gain 0.36 vs 0.21) and for DeepGP (ΔR²_gain 0.24 vs ≈0). Plausible mechanism: warm-start locks the model in an earlier basin; top-k's concentrated queries keep re-selecting neighbourhoods the stuck model can't improve on; entropy's forced diversity partially rescues it. ExactGP is the odd one out because its "warm start" is kernel-hyperparameter reuse, not a network-weight basin.
+
+### 10.3 Confounders
+
+- **Training-set size differs within rows.** Final N for DeepGP warm: top-k = 7,513 vs entropy = 11,778. Top-k + warm concentrates queries in high-variance regions that fail physics validity more often → starvation. The entropy > top-k advantage for DeepGP warm is partly a data-volume effect, not purely an acquisition-rule effect. Top-k cold yields *more* points than entropy cold for Transformer (14k vs 12.7k) and DeepGP (12.5k vs 12k), so this confound runs in both directions and does not alone reconstruct the R² pattern.
+- **n = 1 per cell.** These are single-seed comparisons. R² swings of 0.10–0.15 are plausible from seed noise alone; the > 0.20 swings in §10.1 exceed that band but should still be confirmed before committing to the talk.
+
+### 10.4 Follow-up tests
+
+1. **Reseed the transformer warm-start runs** (both strategies). If R² ≈ 0.23–0.26 reproduces, warm-start divergence is real; if it regresses toward the cold baseline, it was seed noise.
+2. **Per-iteration R² trajectory plot** for Transformer warm vs cold. Expected from the hypothesis: warm tracks cold until ≈ iter 7, then diverges. If the divergence is gradual from iter 1, the story is different.
+3. **Per-iteration validity-rate trajectory** for top-k warm vs cold across models. Expected: top-k warm rate crashes faster than top-k cold because stale weights keep re-selecting uncertain-but-invalid regions.
+4. **Same-N comparison.** Truncate each run to a fixed N (say 5,000 selected points) and recompute R². Would separate "better acquisition" from "more data".
+
+---
+
+## 11. MC Dropout covariance quality and entropy-batch (analysis 2026-04-20)
+
+Transformer entropy_batch underperforms top_k in the cold-start regime (ΔR² = −0.18, see §10). Hypothesis developed in [mc_dropout_covariance_discussion.md](mc_dropout_covariance_discussion.md): the sample covariance the entropy-batch strategy consumes is estimated from T = 20 MC Dropout forward passes over a pool of n_pool = 5,000 candidates, making it rank-deficient by construction (rank ≤ T − 1 = 19) with a `1e-4·I` regulariser drowning the 4,980 null-space directions in isotropic noise.
+
+Top-k uses only the diagonal (an ordinal ranking of marginal variances) and is insensitive to this. Entropy-batch's diversity signal is a log-det of a batch submatrix — explicitly a function of the off-diagonals — and inherits the full estimation noise.
+
+Prediction: entropy-batch should degrade gracefully with covariance quality. ExactGP (analytic, full-rank, calibrated) shows entropy ≥ top-k (§10.1 entropy ΔR² +0.04). DeepGP (variational, better than MC Dropout) shows entropy > top-k in warm mode. Transformer (rank-20 MC covariance) shows top-k > entropy in the cold regime where calibration is worst. The ordering is consistent with the hypothesis but n = 1 per cell.
+
+See [mc_dropout_covariance_discussion.md](mc_dropout_covariance_discussion.md) for the full mechanism and 7 prioritised diagnostic tests. Cheapest three (no retraining, no code changes beyond logging): batch stability under re-sampling, eigenvalue spectrum of the sample covariance, and sweeping T ∈ {20, 50, 100, 200} on a fixed checkpoint.
+
+---
+
+## 12. Pending jobs as of 2026-04-20
+
+Two exact_gp re-submissions to validate the LOVE re-enable patch ([resubmission_20260420.md](resubmission_20260420.md)):
+
+| JobID | Name | State | Reason |
+|---|---|---|---|
+| 8102247 | al_gp_exact_top_k | PENDING | ReqNodeNotAvail, Reserved for maintenance |
+| 8102248 | al_gp_exact | PENDING | ReqNodeNotAvail, Reserved for maintenance |
+
+Blocked by `test-image` reservation on apu (ends 2026-04-24 11:00). Site-wide `maint` reservation runs 2026-04-21 07:00 → 2026-04-26 07:00, so realistic start time is after 2026-04-26.
+
+---
+
+## 13. Files and artifacts
 
 - **Analysis plots**: [/ptmp/jwuerzin/analysis/all_runs/](/ptmp/jwuerzin/analysis/all_runs/)
 - **Run output dirs**: `/ptmp/jwuerzin/output/active_learning_*`
-- **Resubmission log**: [resubmission_20260417.md](resubmission_20260417.md)
+- **Resubmission logs**: [resubmission_20260417.md](resubmission_20260417.md) · [resubmission_20260420.md](resubmission_20260420.md)
+- **MC Dropout covariance discussion**: [mc_dropout_covariance_discussion.md](mc_dropout_covariance_discussion.md)
 - **M_2 investigation scripts & plots**: [m2_multimodality.py](m2_multimodality.py) · [m2_logspace.py](m2_logspace.py) · [m2_lsp_type.py](m2_lsp_type.py) (+ `.png` companions in this directory)
 - **Code documentation**: [README.md](../README.md) §"Batch Acquisition Strategy" covers the pre-filter stack and strategy tradeoffs.
