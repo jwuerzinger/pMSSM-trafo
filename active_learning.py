@@ -16,6 +16,8 @@ import logging
 import structlog
 import json
 import multiprocessing as mp
+import random
+import re
 
 import click
 import numpy as np
@@ -49,6 +51,7 @@ from pmssm import (
     generate_candidate_pool,
     select_top_uncertain,
     select_top_uncertain_filtered,
+    select_top_uncertain_tol_only,
     select_entropy_batch_mc,
     # Uncertainty
     compute_uncertainty_mc_dropout,
@@ -256,7 +259,7 @@ def load_config_with_sweep(config_file, sweep_index=None):
 @click.option('--min-gen-fraction', default=0.6, type=float, help="Minimum fraction of n-select that must be generated successfully before stopping retries (default: 0.6).")
 @click.option('--max-gen-attempts', default=10, type=int, help="Maximum number of generation attempts per iteration (default: 10).")
 @click.option('--gen-workers', default=1, type=int, help="Number of parallel genModels.py workers per generation attempt (default: 1).")
-@click.option('--selection-strategy', default='entropy_batch', type=click.Choice(['top_k', 'entropy_batch']), help="Selection strategy: top_k or entropy_batch (default).")
+@click.option('--selection-strategy', default='entropy_batch', type=click.Choice(['top_k', 'top_k_tol_only', 'entropy_batch']), help="Selection strategy: top_k, top_k_tol_only (short-circuit, no proximity weighting), or entropy_batch (default).")
 @click.option('--entropy-blur', default=0.15, type=float, help="Entropy smoothing parameter (entropy_batch only).")
 @click.option('--entropy-beta', default=50.0, type=float, help="Gibbs sampling temperature (entropy_batch only).")
 @click.option('--entropy-pool-size', default=5000, type=int, help="Focused pool size for entropy_batch pre-filtering.")
@@ -296,7 +299,9 @@ def load_config_with_sweep(config_file, sweep_index=None):
               help="If --resume-from given, run this many more iterations.")
 @click.option('--gpu-ids', default='2,3', type=str,
               help="Comma-separated GPU IDs for AL and baseline models (default: 2,3).")
-def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, dropout, n_datasets, n_samples, val_fraction, output_dir, generate_data, min_gen_fraction, max_gen_attempts, gen_workers, selection_strategy, entropy_blur, entropy_beta, entropy_pool_size, candidate_generation, proximity_sampling, tolerance_sampling, target_value, config_file, sweep_index, early_stopping, patience, warm_starting, eval_data_path, compute_full_metrics, y_transform, mcmc_data_dir, static_eval_size, data_dir, resume_from, n_additional_iterations, gpu_ids):
+@click.option('--seed', default=42, type=int,
+              help="Master random seed propagated to torch / numpy / candidate pool (default: 42).")
+def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, dropout, n_datasets, n_samples, val_fraction, output_dir, generate_data, min_gen_fraction, max_gen_attempts, gen_workers, selection_strategy, entropy_blur, entropy_beta, entropy_pool_size, candidate_generation, proximity_sampling, tolerance_sampling, target_value, config_file, sweep_index, early_stopping, patience, warm_starting, eval_data_path, compute_full_metrics, y_transform, mcmc_data_dir, static_eval_size, data_dir, resume_from, n_additional_iterations, gpu_ids, seed):
     """
     Active learning pipeline for pMSSM relic density prediction.
 
@@ -365,12 +370,26 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
         compute_full_metrics = locals().get('compute_full_metrics', compute_full_metrics)
         y_transform = locals().get('y_transform', y_transform)
 
+    # Propagate master seed to torch / numpy / python-random
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    random.seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     # Increase n_candidates if needed:
     if n_candidates < n_select: n_candidates = n_select
 
     output_dir = Path(output_dir)
+    # Collision-free dir suffix: only append when caller did not already
+    # include a timestamp. This is the code path used by both manual runs and
+    # the strategy-sweep launcher (slurm/submit_strategy_sweep.sh).
+    warm_tag = "warm" if warm_starting else "cold"
+    auto_suffix = f"_{selection_strategy}_{warm_tag}_seed{seed}_{timestamp}"
+    if not re.search(r"_\d{8}_\d{6}$", output_dir.name):
+        output_dir = output_dir.with_name(output_dir.name + auto_suffix)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Set up main logging to output_dir/active_learning.log
@@ -466,8 +485,8 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
     n_val_init = max(1, int(n_total_init * val_fraction))
     n_train_init = n_total_init - n_val_init
 
-    # Use a fixed permutation so the split is reproducible
-    perm = torch.randperm(n_total_init, generator=torch.Generator().manual_seed(42))
+    # Reproducible permutation, driven by the master seed
+    perm = torch.randperm(n_total_init, generator=torch.Generator().manual_seed(seed))
     idx_train_perm = perm[:n_train_init]
     idx_val_perm = perm[n_train_init:]
 
@@ -983,7 +1002,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
 
         # Generate candidate pool and select uncertain points
         logger.info(f"Generating {n_candidates} candidate points using {candidate_generation} sampling...")
-        candidates = generate_candidate_pool(n_candidates, method=candidate_generation, seed=iteration)
+        candidates = generate_candidate_pool(n_candidates, method=candidate_generation, seed=seed * 10_000 + iteration)
 
         # Convert target value to transformed space for threshold
         mean_X, std_X, mean_Y, std_Y = stats
@@ -1007,6 +1026,16 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
                 threshold=threshold_transformed, tolerance_sampling=tolerance_sampling,
                 proximity_sampling=proximity_sampling,
                 device=device, logger=logger
+            )
+        elif selection_strategy == 'top_k_tol_only':
+            pred_mean, pred_var = compute_uncertainty_mc_dropout(
+                model, candidates, stats, mc_samples, device, logger
+            )
+            top_indices = select_top_uncertain_tol_only(
+                candidates, pred_mean, pred_var, n_select,
+                threshold=threshold_transformed,
+                tolerance_sampling=tolerance_sampling,
+                logger=logger,
             )
         else:
             pred_mean, pred_var = compute_uncertainty_mc_dropout(
@@ -1074,7 +1103,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
                     attempt_dir = iter_dir / f"retry_{attempt:03d}"
                     attempt_dir.mkdir(parents=True, exist_ok=True)
 
-                    attempt_seed = iteration * 1000 + attempt
+                    attempt_seed = seed * 10_000 + iteration * 1000 + attempt
                     attempt_candidates = generate_candidate_pool(n_candidates, method=candidate_generation, seed=attempt_seed)
 
                     if selection_strategy == 'entropy_batch':
@@ -1088,6 +1117,16 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
                             threshold=threshold_transformed, tolerance_sampling=tolerance_sampling,
                             proximity_sampling=proximity_sampling,
                             device=device, logger=logger
+                        )
+                    elif selection_strategy == 'top_k_tol_only':
+                        attempt_mean, attempt_pred_var = compute_uncertainty_mc_dropout(
+                            model, attempt_candidates, stats, mc_samples, device, logger
+                        )
+                        attempt_indices = select_top_uncertain_tol_only(
+                            attempt_candidates, attempt_mean, attempt_pred_var, n_select,
+                            threshold=threshold_transformed,
+                            tolerance_sampling=tolerance_sampling,
+                            logger=logger,
                         )
                     else:
                         attempt_mean, attempt_pred_var = compute_uncertainty_mc_dropout(
@@ -1275,6 +1314,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
             "patience": patience,
             "warm_starting": warm_starting,
             "compute_full_metrics": compute_full_metrics,
+            "seed": seed,
         },
         "iterations": all_selected_points,
         "final_dataset_size": len(X),

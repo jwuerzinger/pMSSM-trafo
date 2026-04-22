@@ -14,6 +14,7 @@ Machine learning models for predicting pMSSM (phenomenological Minimal Supersymm
 - [Batch Acquisition Strategy](#batch-acquisition-strategy)
 - [Cross-Run Analysis](#cross-run-analysis)
 - [Slurm Submission](#slurm-submission)
+- [Multi-Seed Strategy Sweep](#multi-seed-strategy-sweep)
 - [Project Structure](#project-structure)
 - [Output](#output)
 - [Multi-GPU Training](#multi-gpu-training)
@@ -534,6 +535,86 @@ bash resume_slurm.sh slurm/submit_al_transformer_top_k_20k.sh /ptmp/output/previ
 
 Available job scripts: `submit_al_transformer.sh`, `submit_al_transformer_top_k.sh`, `submit_al_transformer_top_k_20k.sh`, `submit_al_gp_exact.sh`, `submit_al_gp_exact_top_k.sh`, `submit_al_gp_deep.sh`, `submit_al_gp_deep_top_k.sh`, `submit_al_tabpfn.sh`, `submit_al_tabpfn_entropy.sh`. All parameters can be overridden via environment variables (see script headers for details).
 
+## Multi-Seed Strategy Sweep
+
+For multi-seed comparisons of `(model × selection_strategy × warm/cold)` configurations, use `slurm/submit_strategy_sweep.sh`. This meta-launcher submits one `sbatch` per `(config, seed)`, appends a row to a manifest CSV at submit time, and produces collision-free output directory names that encode the config.
+
+### Selection strategies
+
+A third "short-circuit" strategy, `top_k_tol_only`, complements the existing `top_k` and `entropy_batch`:
+
+| Strategy | Tolerance cut | Proximity weighting | DPP-style covariance pick |
+|---|---|---|---|
+| `top_k_tol_only` | ✓ | ✗ | ✗ |
+| `top_k` | ✓ | ✓ | ✗ |
+| `entropy_batch` | ✓ | ✓ | ✓ |
+
+All three apply the same tolerance pre-filter; they differ only in how far through the selection pipeline they continue. Every driver (`active_learning.py`, `active_learning_gp.py`, `active_learning_tabpfn.py`) accepts `--selection-strategy top_k_tol_only` and a new `--seed INT` flag for reproducibility.
+
+### Running the sweep
+
+```bash
+# Full grid (100 jobs): 3 models × 3 strategies × 2 warm/cold × 5 seeds + tabpfn (2 × 1 × 5)
+bash slurm/submit_strategy_sweep.sh
+
+# Preview without submitting
+DRY_RUN=1 bash slurm/submit_strategy_sweep.sh
+
+# Partial sweeps (env-var filters)
+MODELS=transformer STRATEGIES=top_k_tol_only WARM_MODES=warm SEEDS=1,2,3 \
+    bash slurm/submit_strategy_sweep.sh
+
+# Include the (expensive) tabpfn + entropy_batch combination
+TABPFN_ALLOW_ENTROPY=1 bash slurm/submit_strategy_sweep.sh
+```
+
+**Defaults** (override via env vars): `SEEDS=1,2,3,4,5`, `MODELS=transformer,deep_gp,exact_gp,tabpfn`, `STRATEGIES=top_k,top_k_tol_only,entropy_batch`, `WARM_MODES=warm,cold`. TabPFN auto-skips the warm/cold axis (no training, no warm-start to apply) and skips `entropy_batch` unless `TABPFN_ALLOW_ENTROPY=1`.
+
+### Output directory convention
+
+Each job writes to `/ptmp/jwuerzin/output/active_learning_{model}_{strategy}_{warm}_seed{N}_{YYYYMMDD_HHMMSS}/`, where `warm` is `warm`, `cold`, or `tabpfn` (sentinel). The driver only appends this suffix if the caller's `--output-dir` does not already end with a timestamp — manual runs work as before.
+
+### Manifest CSV
+
+The launcher writes `/ptmp/jwuerzin/analysis/all_runs/sweep_manifest.csv` (header on first run, appended thereafter). One row per submitted job:
+
+| column | content |
+|---|---|
+| `sweep_id` | timestamp of the whole grid — filters "this sweep" from older ones |
+| `submit_time` | per-job `sbatch` time |
+| `model`, `strategy`, `warm_start`, `seed` | the config key |
+| `job_id` | returned by `sbatch --parsable` |
+| `expected_run_dir` | absolute path the driver will write to |
+| `status` | `submitted` → `pending`/`running`/`completed`/`missing`/`failed`/`timeout`/... |
+| `slurm_log` | stdout path |
+
+### Refreshing status
+
+```bash
+# Update `status` in place by consulting sacct + checking for state.pt on disk
+python scripts/update_sweep_manifest.py
+
+# Refresh only one sweep
+python scripts/update_sweep_manifest.py --sweep-id 20260422_154733
+```
+
+Idempotent — safe to re-run or cron. A job is marked `completed` only when `summary.json` appears on disk — the driver writes it once, at the very end of the AL loop, so this is the true end-of-run marker. (`state.pt` is overwritten after every iteration and is *not* sufficient evidence of completion; its presence flips the row to `running`.) If sacct reports `COMPLETED` but `summary.json` is missing, the row becomes `missing` (finalise step crashed or output dir mis-pointed).
+
+### Multi-seed hit-rate plot
+
+```bash
+# Read manifest, group by (model, strategy, warm_start), plot mean ± SEM
+python scripts/plot_hit_rate_trajectories_multiseed.py
+
+# Filter to one sweep, require >=3 completed seeds, use ±1 SD bands instead
+python scripts/plot_hit_rate_trajectories_multiseed.py \
+    --sweep-id 20260422_154733 \
+    --min-seeds 3 \
+    --uncertainty sd
+```
+
+Default output: `/ptmp/jwuerzin/analysis/all_runs/hit_rate_trajectories.png` (3 panels: 10%, 20%, 50% relative tolerance). Visual encoding: colour = model, linestyle = strategy, marker = warm/cold/tabpfn. Groups with fewer than `--min-seeds` completed seeds are silently skipped, so a partially-finished sweep still produces a readable figure.
+
 ## Project Structure
 
 ```
@@ -571,7 +652,11 @@ pMSSM-trafo/
 │   ├── submit_al_gp_deep.sh            # DeepGP entropy 2-GPU
 │   ├── submit_al_gp_deep_top_k.sh      # DeepGP top-k 2-GPU
 │   ├── submit_al_tabpfn.sh             # TabPFN top-k 1-GPU
-│   └── submit_al_tabpfn_entropy.sh     # TabPFN entropy 1-GPU
+│   ├── submit_al_tabpfn_entropy.sh     # TabPFN entropy 1-GPU
+│   └── submit_strategy_sweep.sh        # Multi-seed grid launcher (5 seeds × grid)
+├── scripts/
+│   ├── update_sweep_manifest.py        # Refresh sweep manifest status from sacct + state.pt
+│   └── plot_hit_rate_trajectories_multiseed.py  # Mean ± SEM hit-rate plot across seeds
 ├── pixi.toml                   # Dependency configuration
 ├── data/                       # ROOT files with pMSSM data
 ├── logs/                       # Slurm job logs (timestamped)

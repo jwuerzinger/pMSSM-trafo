@@ -8,6 +8,8 @@ Harmonized with active_learning.py to use the unified pmssm package.
 """
 
 import warnings
+import random
+import re
 warnings.filterwarnings('ignore', message='.*enable_nested_tensor.*')
 
 import sys
@@ -36,6 +38,7 @@ from pmssm import (
     generate_candidate_pool,
     select_top_uncertain,
     select_top_uncertain_filtered,
+    select_top_uncertain_tol_only,
     # Uncertainty
     compute_uncertainty_gp,
     # Training
@@ -442,7 +445,7 @@ def load_config_with_sweep(config_file, sweep_index=None):
 @click.option('--m-nu', default=1.5, type=float, help="Matern nu parameter.")
 @click.option('--num-mixtures', default=4, type=int, help="Number of mixtures for SpectralMixture kernel.")
 # Selection strategy options
-@click.option('--selection-strategy', default='entropy_batch', type=click.Choice(['top_k', 'entropy_batch']),
+@click.option('--selection-strategy', default='entropy_batch', type=click.Choice(['top_k', 'top_k_tol_only', 'entropy_batch']),
               help="Selection strategy: top_k or entropy_batch (default).")
 @click.option('--entropy-blur', default=0.15, type=float, help="Entropy smoothing parameter (entropy_batch only).")
 @click.option('--entropy-beta', default=50.0, type=float, help="Gibbs sampling temperature (entropy_batch only).")
@@ -475,6 +478,8 @@ def load_config_with_sweep(config_file, sweep_index=None):
               help="If --resume-from given, run this many more iterations.")
 @click.option('--gpu-ids', default='0,1', type=str,
               help="Comma-separated GPU IDs for AL and baseline models (default: 0,1).")
+@click.option('--seed', default=42, type=int,
+              help="Master random seed propagated to torch / numpy / candidate pool (default: 42).")
 def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, val_fraction,
          output_dir, generate_data, min_gen_fraction, max_gen_attempts, gen_workers,
          target, model_type, kernel, lengthscale, noise, jitter, learning_rate,
@@ -486,7 +491,7 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, v
          tolerance_sampling, proximity_sampling, entropy_pool_size,
          compute_full_metrics, eval_data_path, mcmc_data_dir, static_eval_size,
          track_lengthscales, advanced_plots,
-         config_file, sweep_index, data_dir, resume_from, n_additional_iterations, gpu_ids):
+         config_file, sweep_index, data_dir, resume_from, n_additional_iterations, gpu_ids, seed):
     """
     Active learning pipeline for pMSSM relic density prediction using GP models.
 
@@ -529,6 +534,13 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, v
         tolerance_sampling = float(_locals.get('tolerance_sampling', tolerance_sampling))
         proximity_sampling = float(_locals.get('proximity_sampling', proximity_sampling))
 
+    # Propagate master seed to torch / numpy / python-random
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    random.seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     threshold = TARGET_CONFIG[target]["threshold"]
 
@@ -536,6 +548,11 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, v
         n_candidates = n_select
 
     output_dir = Path(output_dir)
+    # Collision-free dir suffix (same contract as active_learning.py).
+    warm_tag = "warm" if warm_starting else "cold"
+    auto_suffix = f"_{selection_strategy}_{warm_tag}_seed{seed}_{timestamp}"
+    if not re.search(r"_\d{8}_\d{6}$", output_dir.name):
+        output_dir = output_dir.with_name(output_dir.name + auto_suffix)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     log_file, logger = setup_logging(timestamp, output_dir=output_dir)
@@ -659,7 +676,7 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, v
     n_train_init = n_total_init - n_val_init
 
     # Use a fixed permutation so the split is reproducible
-    perm = torch.randperm(n_total_init, generator=torch.Generator().manual_seed(42))
+    perm = torch.randperm(n_total_init, generator=torch.Generator().manual_seed(seed))
     idx_train_perm = perm[:n_train_init]
     idx_val_perm = perm[n_train_init:]
 
@@ -1168,7 +1185,7 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, v
         if selection_strategy == "entropy_batch" and model_has_likelihood(model_type):
             logger.info("Using entropy-based batch selection...")
             candidates_norm = normalize_x(
-                generate_candidate_pool(n_candidates, seed=iteration),
+                generate_candidate_pool(n_candidates, seed=seed * 10_000 + iteration),
                 data_min, data_max,
             ).to(device)
             selected_points_norm, per_point_entropy, _ent_mean_all, _ent_var_all = select_entropy_batch(
@@ -1195,7 +1212,7 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, v
                 logger.warning(f"entropy_batch not supported for {model_type}; "
                               "falling back to top_k")
 
-            candidates = generate_candidate_pool(n_candidates, seed=iteration)
+            candidates = generate_candidate_pool(n_candidates, seed=seed * 10_000 + iteration)
             logger.info(f"Generating {n_candidates} candidate points...")
 
             _pred_mean, pred_var = compute_uncertainty_gp(
@@ -1204,13 +1221,21 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, v
                 logger=logger,
             )
 
-            top_indices = select_top_uncertain_filtered(
-                candidates, _pred_mean, pred_var.unsqueeze(1), n_select,
-                threshold=threshold,
-                tolerance_sampling=tolerance_sampling,
-                proximity_sampling=proximity_sampling,
-                logger=logger,
-            )
+            if selection_strategy == "top_k_tol_only":
+                top_indices = select_top_uncertain_tol_only(
+                    candidates, _pred_mean, pred_var.unsqueeze(1), n_select,
+                    threshold=threshold,
+                    tolerance_sampling=tolerance_sampling,
+                    logger=logger,
+                )
+            else:
+                top_indices = select_top_uncertain_filtered(
+                    candidates, _pred_mean, pred_var.unsqueeze(1), n_select,
+                    threshold=threshold,
+                    tolerance_sampling=tolerance_sampling,
+                    proximity_sampling=proximity_sampling,
+                    logger=logger,
+                )
 
         logger.info(f"Selected {len(top_indices)} most uncertain points")
 
@@ -1297,20 +1322,28 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, v
                     attempt_dir = iter_dir / f"retry_{attempt:03d}"
                     attempt_dir.mkdir(parents=True, exist_ok=True)
 
-                    attempt_seed = iteration * 1000 + attempt
+                    attempt_seed = seed * 10_000 + iteration * 1000 + attempt
                     attempt_candidates = generate_candidate_pool(n_candidates, seed=attempt_seed)
                     attempt_mean, attempt_pred_var = compute_uncertainty_gp(
                         al_model, attempt_candidates, data_min, data_max,
                         model_type=model_type, jitter=jitter, num_samples=gp_num_samples,
                         logger=logger,
                     )
-                    attempt_indices = select_top_uncertain_filtered(
-                        attempt_candidates, attempt_mean, attempt_pred_var.unsqueeze(1), n_select,
-                        threshold=threshold,
-                        tolerance_sampling=tolerance_sampling,
-                        proximity_sampling=proximity_sampling,
-                        logger=logger,
-                    )
+                    if selection_strategy == "top_k_tol_only":
+                        attempt_indices = select_top_uncertain_tol_only(
+                            attempt_candidates, attempt_mean, attempt_pred_var.unsqueeze(1), n_select,
+                            threshold=threshold,
+                            tolerance_sampling=tolerance_sampling,
+                            logger=logger,
+                        )
+                    else:
+                        attempt_indices = select_top_uncertain_filtered(
+                            attempt_candidates, attempt_mean, attempt_pred_var.unsqueeze(1), n_select,
+                            threshold=threshold,
+                            tolerance_sampling=tolerance_sampling,
+                            proximity_sampling=proximity_sampling,
+                            logger=logger,
+                        )
 
                     param_names = [p.replace("IN_", "") for p in PARAM_ORDER]
                     df = pd.DataFrame(attempt_candidates[attempt_indices].numpy(),
@@ -1509,6 +1542,8 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, v
             "generate_data": generate_data,
             "compute_full_metrics": compute_full_metrics,
             "eval_data_path": eval_data_path,
+            "warm_starting": warm_starting,
+            "seed": seed,
         },
         "iterations": all_selected_points,
         "final_dataset_size": len(X),

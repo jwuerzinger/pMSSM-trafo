@@ -155,6 +155,23 @@ def select_top_uncertain_filtered(X_candidates, pred_mean, pred_var, n_select,
     return surviving_indices.numpy()[topk_in_surv]
 
 
+def select_top_uncertain_tol_only(X_candidates, pred_mean, pred_var, n_select,
+                                  threshold=0.0, tolerance_sampling=0.0, logger=None):
+    """Tolerance-filtered top-k by raw variance. No proximity weighting.
+
+    Short-circuit variant of :func:`select_top_uncertain_filtered` that stops
+    the selection pipeline after the tolerance cut — ranks survivors by raw
+    ``pred_var`` instead of proximity-weighted variance.
+    """
+    return select_top_uncertain_filtered(
+        X_candidates, pred_mean, pred_var, n_select,
+        threshold=threshold,
+        tolerance_sampling=tolerance_sampling,
+        proximity_sampling=0.0,
+        logger=logger,
+    )
+
+
 # ===== Entropy-Based Selection with Proximity Weighting =====
 
 def select_entropy_batch_mc(X_candidates, predictions, pred_mean, pred_var,
@@ -310,8 +327,9 @@ def select_points(strategy='top_k', **kwargs):
 
     Args:
         strategy: Selection strategy name
-            - 'top_k': Pure variance-based selection
-            - 'entropy_batch': Entropy-based selection with optional proximity weighting
+            - 'top_k': Tolerance + proximity-weighted variance + top-k
+            - 'top_k_tol_only': Tolerance cut + raw top-variance (short-circuit, no proximity)
+            - 'entropy_batch': Full DPP-style entropy pipeline with MC covariance
         **kwargs: Strategy-specific arguments
 
     Returns:
@@ -335,6 +353,16 @@ def select_points(strategy='top_k', **kwargs):
             kwargs['X_candidates'],
             kwargs['uncertainties'],
             kwargs['n_select']
+        )
+    elif strategy == 'top_k_tol_only':
+        return select_top_uncertain_tol_only(
+            kwargs['X_candidates'],
+            kwargs['pred_mean'],
+            kwargs['pred_var'],
+            kwargs['n_select'],
+            threshold=kwargs.get('threshold', 0.0),
+            tolerance_sampling=kwargs.get('tolerance_sampling', 0.0),
+            logger=kwargs.get('logger', None),
         )
     elif strategy == 'entropy_batch':
         return select_entropy_batch_mc(
