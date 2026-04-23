@@ -26,6 +26,9 @@
 #   DRY_RUN     (1 = do not sbatch, just preview and append DRY rows)
 #   MANIFEST    (default /ptmp/jwuerzin/analysis/all_runs/sweep_manifest.csv)
 #   SUBMIT_SLEEP_SEC (default 0; optional throttle between sbatch calls)
+#   BUNDLE_SEEDS (1 = submit one multi-node bundle per (model, strategy, warm)
+#                 cell that runs all requested seeds in parallel via srun;
+#                 default 0 = one sbatch per (cell, seed))
 #
 # Usage:
 #   bash slurm/submit_strategy_sweep.sh                     # full sweep
@@ -63,6 +66,7 @@ WARM_MODES="${WARM_MODES:-warm,cold}"
 SUBMIT_SLEEP_SEC="${SUBMIT_SLEEP_SEC:-0}"
 DRY_RUN="${DRY_RUN:-0}"
 TABPFN_ALLOW_ENTROPY="${TABPFN_ALLOW_ENTROPY:-0}"
+BUNDLE_SEEDS="${BUNDLE_SEEDS:-0}"
 
 echo "[sweep] sweep_id=${SWEEP_ID}"
 echo "[sweep] models=${MODELS}"
@@ -106,6 +110,58 @@ for model in ${MODELS//,/ }; do
                 tabpfn) WARM_FLAG="";;
                 *) echo "[error] unknown warm mode: ${warm}"; exit 1;;
             esac
+
+            if [[ "${BUNDLE_SEEDS}" == "1" ]]; then
+                # ---- Bundled submission: one multi-node sbatch per cell ---------
+                # All seeds of this (model, strategy, warm) cell run in parallel
+                # via srun inside a single N-node allocation. Manifest gets N
+                # rows sharing job_id (one per seed) so plotting/bookkeeping
+                # stays row-per-seed.
+                submit_time="$(date +%Y%m%d_%H%M%S)"
+                al_output_base="/ptmp/jwuerzin/output/active_learning_${model_tag}_${strategy}_${warm}"
+
+                # Per-model resource footprint. Note: multi-node allocations
+                # with --gres=gpu:1 are rejected on apu ("Access/permission
+                # denied"), so TabPFN bundles also request gpu:2 per node and
+                # let the second GPU idle (driver only binds to GPU 0).
+                # Mem stays lower for TabPFN — it never needs 128G.
+                n_seeds=$(echo "${SEEDS}" | tr ',' '\n' | wc -l)
+                gres="${CLUSTER_GPU_GRES_2:-gpu:2}"
+                if [[ "${model}" == "tabpfn" ]]; then
+                    mem="64G"
+                else
+                    mem="128G"
+                fi
+
+                bundle_env="AL_MODEL=${model_tag},AL_STRATEGY=${strategy},AL_WARM=${warm},AL_SEEDS=${SEEDS},AL_OUTPUT_BASE=${al_output_base},AL_SWEEP_ID=${SWEEP_ID}"
+
+                if [[ "${DRY_RUN}" == "1" ]]; then
+                    JOB_ID="DRY"
+                    echo "[dry-run bundle] ${model_tag}/${strategy}/${warm}  seeds=${SEEDS}"
+                    echo "                 nodes=${n_seeds} gres=${gres}  base=${al_output_base}"
+                else
+                    JOB_ID=$(sbatch --parsable \
+                        --partition="${CLUSTER_PARTITION}" \
+                        --nodes="${n_seeds}" \
+                        --gres="${gres}" \
+                        --mem="${mem}" \
+                        --exclusive \
+                        --export=ALL,${bundle_env} \
+                        slurm/submit_al_bundled.sh)
+                    echo "[bundled]   ${JOB_ID}  ${model_tag}/${strategy}/${warm} × ${n_seeds} seeds"
+                fi
+
+                # One manifest row per seed, sharing the bundle's job_id
+                slurm_log="logs/al_bundled_${JOB_ID}.out"
+                for seed in ${SEEDS//,/ }; do
+                    expected_dir="${al_output_base}_seed${seed}_${SWEEP_ID}"
+                    echo "${SWEEP_ID},${submit_time},${model_tag},${strategy},${warm},${seed},${JOB_ID},${expected_dir},submitted,${slurm_log}" >> "${MANIFEST}"
+                    N_SUBMITTED=$((N_SUBMITTED + 1))
+                done
+
+                sleep "${SUBMIT_SLEEP_SEC}"
+                continue
+            fi
 
             for seed in ${SEEDS//,/ }; do
                 # Dir name uses the shared sweep timestamp; seed already makes

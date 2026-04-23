@@ -566,9 +566,29 @@ MODELS=transformer STRATEGIES=top_k_tol_only WARM_MODES=warm SEEDS=1,2,3 \
 
 # Include the (expensive) tabpfn + entropy_batch combination
 TABPFN_ALLOW_ENTROPY=1 bash slurm/submit_strategy_sweep.sh
+
+# BUNDLED MODE: one multi-node sbatch per (model, strategy, warm) cell runs
+# all requested seeds in parallel via srun, reducing the job count from 100
+# to 20. Useful when AssocMaxJobsLimit caps you at 8 concurrent jobs.
+BUNDLE_SEEDS=1 bash slurm/submit_strategy_sweep.sh
 ```
 
 **Defaults** (override via env vars): `SEEDS=1,2,3,4,5`, `MODELS=transformer,deep_gp,exact_gp,tabpfn`, `STRATEGIES=top_k,top_k_tol_only,entropy_batch`, `WARM_MODES=warm,cold`. TabPFN auto-skips the warm/cold axis (no training, no warm-start to apply) and skips `entropy_batch` unless `TABPFN_ALLOW_ENTROPY=1`.
+
+### Bundled mode (`BUNDLE_SEEDS=1`)
+
+In default mode the launcher submits one sbatch per `(model, strategy, warm, seed)` — 100 independent jobs that compete for the `AssocMaxJobsLimit=8` concurrent-job cap. When this cap is the bottleneck, bundling lets you run ~5× more seeds in parallel without raising the cap:
+
+- One sbatch per `(model, strategy, warm)` cell (20 bundles total).
+- Each bundle allocates `n_seeds × 2-GPU nodes` and spawns one `srun` per seed in parallel via [slurm/submit_al_bundled.sh](slurm/submit_al_bundled.sh).
+- All `n_seeds` seeds of the cell train concurrently on their own node; bundle wall-clock = max(seed₁, ..., seed_N).
+- Manifest still gets one row per seed; the `job_id` column is shared across the seeds of a bundle, and `expected_run_dir` is unique per seed.
+
+Trade-offs:
+- Same per-seed compute — **total compute is unchanged**; only the scheduling shape differs.
+- Multi-node allocations may queue longer than single-node ones when the cluster is busy.
+- Multi-node `--gres=gpu:1` is rejected on apu, so TabPFN bundles also request `gpu:2` per node and let the second GPU idle.
+- With 8 concurrent bundles × 5 nodes each, the sweep uses up to 40 nodes simultaneously.
 
 ### Output directory convention
 
@@ -653,7 +673,8 @@ pMSSM-trafo/
 │   ├── submit_al_gp_deep_top_k.sh      # DeepGP top-k 2-GPU
 │   ├── submit_al_tabpfn.sh             # TabPFN top-k 1-GPU
 │   ├── submit_al_tabpfn_entropy.sh     # TabPFN entropy 1-GPU
-│   └── submit_strategy_sweep.sh        # Multi-seed grid launcher (5 seeds × grid)
+│   ├── submit_strategy_sweep.sh        # Multi-seed grid launcher (5 seeds × grid)
+│   └── submit_al_bundled.sh            # Multi-node bundled-seed worker (srun-fork one seed per node)
 ├── scripts/
 │   ├── update_sweep_manifest.py        # Refresh sweep manifest status from sacct + state.pt
 │   └── plot_hit_rate_trajectories_multiseed.py  # Mean ± SEM hit-rate plot across seeds

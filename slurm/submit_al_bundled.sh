@@ -1,0 +1,133 @@
+#!/bin/bash
+# =============================================================================
+# Bundled-seed active-learning job.
+#
+# Allocates N nodes × 2 GPUs and runs N seeds of the SAME (model, strategy,
+# warm) cell in parallel, one seed per node. Each seed is a full 2-GPU run
+# (AL + baseline) — identical to the single-seed per-model submit scripts —
+# just fired off via srun inside a larger sbatch allocation.
+#
+# Invoked by slurm/submit_strategy_sweep.sh in BUNDLE_SEEDS mode. Not intended
+# for direct use, but can be called manually with the right env vars set:
+#
+#   sbatch --partition=${CLUSTER_PARTITION} --nodes=5 --gres=gpu:2 --exclusive \
+#          --export=ALL,AL_MODEL=transformer,AL_STRATEGY=top_k,AL_WARM=warm,\
+#          AL_SEEDS=1,2,3,4,5,AL_OUTPUT_BASE=/ptmp/jwuerzin/output/active_learning_transformer_top_k_warm,\
+#          AL_SWEEP_ID=20260422_190000 \
+#          slurm/submit_al_bundled.sh
+#
+# Required env vars:
+#   AL_MODEL       : transformer | deep_gp | exact_gp | tabpfn
+#   AL_STRATEGY    : top_k | top_k_tol_only | entropy_batch
+#   AL_WARM        : warm | cold | tabpfn
+#   AL_SEEDS       : comma-separated integers, one per allocated node
+#   AL_OUTPUT_BASE : dir prefix; per-seed dirs are ${AL_OUTPUT_BASE}_seed${N}_${AL_SWEEP_ID}
+#   AL_SWEEP_ID    : timestamp string used in output dir names and manifest
+# =============================================================================
+#SBATCH --job-name=al_bundled
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=24
+#SBATCH --time=24:00:00
+#SBATCH --output=logs/%x_%j.out
+#SBATCH --error=logs/%x_%j.err
+# Note: --nodes, --gres, and --mem must be set by the sbatch caller, not here,
+# since they depend on AL_SEEDS count and per-model GPU+memory footprint.
+# (TabPFN uses gpu:1 and --mem=64G; transformer/GP use gpu:2 and --mem=128G.)
+
+set -euo pipefail
+
+REPO_ROOT="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
+cd "${REPO_ROOT}"
+
+# ---- Validate required env ---------------------------------------------------
+for required in AL_MODEL AL_STRATEGY AL_WARM AL_SEEDS AL_OUTPUT_BASE AL_SWEEP_ID; do
+    if [[ -z "${!required:-}" ]]; then
+        echo "[error] required env var ${required} is unset" >&2
+        exit 1
+    fi
+done
+
+# ---- Dispatch to per-model submit script ------------------------------------
+case "${AL_MODEL}" in
+    transformer) PER_MODEL_SCRIPT=slurm/submit_al_transformer.sh;;
+    deep_gp)     PER_MODEL_SCRIPT=slurm/submit_al_gp_deep.sh;;
+    exact_gp)    PER_MODEL_SCRIPT=slurm/submit_al_gp_exact.sh;;
+    tabpfn)      PER_MODEL_SCRIPT=slurm/submit_al_tabpfn.sh;;
+    *) echo "[error] unknown AL_MODEL: ${AL_MODEL}" >&2; exit 1;;
+esac
+
+# ---- Translate warm tag to Click flag ---------------------------------------
+case "${AL_WARM}" in
+    warm)   WARM_FLAG="--warm-starting";;
+    cold)   WARM_FLAG="--no-warm-starting";;
+    tabpfn) WARM_FLAG="";;
+    *) echo "[error] unknown AL_WARM: ${AL_WARM}" >&2; exit 1;;
+esac
+
+# ---- Parse seed list --------------------------------------------------------
+IFS=',' read -ra SEEDS_ARR <<< "${AL_SEEDS}"
+N_SEEDS=${#SEEDS_ARR[@]}
+
+echo "=========================================="
+echo "[bundle] job_id=${SLURM_JOB_ID} job_name=${SLURM_JOB_NAME}"
+echo "[bundle] model=${AL_MODEL} strategy=${AL_STRATEGY} warm=${AL_WARM}"
+echo "[bundle] seeds=${AL_SEEDS}  (${N_SEEDS} parallel sruns)"
+echo "[bundle] nodes=${SLURM_NNODES:-?} allocated"
+echo "[bundle] sweep_id=${AL_SWEEP_ID}"
+echo "[bundle] per_model_script=${PER_MODEL_SCRIPT}"
+echo "[bundle] started: $(date)"
+echo "=========================================="
+
+if [[ "${SLURM_NNODES:-0}" -lt "${N_SEEDS}" ]]; then
+    echo "[warn] allocated nodes (${SLURM_NNODES:-?}) < seeds (${N_SEEDS}); " \
+         "srun will serialise on the shared nodes" >&2
+fi
+
+# Always gpu:2 per srun to match the outer allocation. TabPFN driver only
+# binds to GPU 0; second GPU idles. This is a cluster-policy workaround:
+# multi-node --gres=gpu:1 is rejected on apu.
+PER_SEED_GRES="gpu:2"
+
+# ---- Fork one srun per seed on its own node -----------------------------------
+# Each srun inherits the exported AL_OUTPUT_DIR / AL_EXTRA_ARGS set on its line
+# (bash `VAR=val cmd &` applies VAR only to that command, per-iteration).
+# The per-model submit script then drives `python active_learning*.py` as usual.
+for seed in "${SEEDS_ARR[@]}"; do
+    per_seed_dir="${AL_OUTPUT_BASE}_seed${seed}_${AL_SWEEP_ID}"
+    per_seed_extra="--seed ${seed} --selection-strategy ${AL_STRATEGY}"
+    if [[ -n "${WARM_FLAG}" ]]; then
+        per_seed_extra="${per_seed_extra} ${WARM_FLAG}"
+    fi
+    # Preserve any extra args the caller passed (e.g. --use-mcmc-loader).
+    if [[ -n "${AL_EXTRA_ARGS_BASE:-}" ]]; then
+        per_seed_extra="${per_seed_extra} ${AL_EXTRA_ARGS_BASE}"
+    fi
+
+    # TabPFN driver reads AL_SELECTION_STRATEGY as a fallback; align it.
+    tabpfn_strategy_env=""
+    if [[ "${AL_MODEL}" == "tabpfn" ]]; then
+        tabpfn_strategy_env="AL_SELECTION_STRATEGY=${AL_STRATEGY}"
+    fi
+
+    echo "[bundle] launching seed=${seed} -> ${per_seed_dir}"
+
+    AL_OUTPUT_DIR="${per_seed_dir}" \
+    AL_EXTRA_ARGS="${per_seed_extra}" \
+    ${tabpfn_strategy_env} \
+    srun \
+        --nodes=1 \
+        --ntasks=1 \
+        --exclusive \
+        --gres="${PER_SEED_GRES}" \
+        --output="logs/al_bundled_${SLURM_JOB_ID}_seed${seed}.out" \
+        --error="logs/al_bundled_${SLURM_JOB_ID}_seed${seed}.err" \
+        bash "${PER_MODEL_SCRIPT}" &
+done
+
+wait
+RC=$?
+
+echo "=========================================="
+echo "[bundle] all sruns completed: $(date)  rc=${RC}"
+echo "=========================================="
+exit ${RC}
