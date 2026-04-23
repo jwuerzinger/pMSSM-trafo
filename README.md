@@ -611,11 +611,15 @@ The launcher writes `/ptmp/jwuerzin/analysis/all_runs/sweep_manifest.csv` (heade
 ### Refreshing status
 
 ```bash
-# Update `status` in place by consulting sacct + checking for state.pt on disk
+# Update `status` in place by consulting sacct + checking for state.pt on disk.
+# Defaults to refreshing only the latest sweep (lexicographically max sweep_id).
 python scripts/update_sweep_manifest.py
 
-# Refresh only one sweep
+# Refresh one specific sweep
 python scripts/update_sweep_manifest.py --sweep-id 20260422_154733
+
+# Refresh every row across all sweeps
+python scripts/update_sweep_manifest.py --all
 ```
 
 Idempotent — safe to re-run or cron. A job is marked `completed` only when `summary.json` appears on disk — the driver writes it once, at the very end of the AL loop, so this is the true end-of-run marker. (`state.pt` is overwritten after every iteration and is *not* sufficient evidence of completion; its presence flips the row to `running`.) If sacct reports `COMPLETED` but `summary.json` is missing, the row becomes `missing` (finalise step crashed or output dir mis-pointed).

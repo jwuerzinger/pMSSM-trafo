@@ -83,9 +83,10 @@ if [[ "${SLURM_NNODES:-0}" -lt "${N_SEEDS}" ]]; then
          "srun will serialise on the shared nodes" >&2
 fi
 
-# Always gpu:2 per srun to match the outer allocation. TabPFN driver only
-# binds to GPU 0; second GPU idles. This is a cluster-policy workaround:
-# multi-node --gres=gpu:1 is rejected on apu.
+# Always gpu:2 per srun to match the outer allocation. TabPFN now also uses
+# both GPUs (AL on cuda:0, Baseline on cuda:1 in parallel). Multi-node
+# --gres=gpu:1 is rejected on apu, so gpu:2 is both the useful and the only
+# allowed choice.
 PER_SEED_GRES="gpu:2"
 
 # ---- Fork one srun per seed on its own node -----------------------------------

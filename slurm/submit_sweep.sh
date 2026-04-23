@@ -118,12 +118,9 @@ BASE_OUTPUT_DIR="${AL_OUTPUT_DIR:-/ptmp/jwuerzin/output/sweep_output}"
 TASK_OUTPUT_DIR="${BASE_OUTPUT_DIR}/task_${SLURM_ARRAY_TASK_ID}"
 AL_DATA_DIR="${AL_DATA_DIR:-${CLUSTER_DATA_DIR}}"
 
-# TabPFN uses --gpu-id (singular); the other two use --gpu-ids
-if [[ "${SWEEP_SCRIPT}" == *tabpfn* ]]; then
-    GPU_FLAG="--gpu-id"
-else
-    GPU_FLAG="--gpu-ids"
-fi
+# All three scripts now accept --gpu-ids. Sweep array tasks only get 1 GPU
+# each, so we always pass --gpu-ids 0.
+GPU_FLAG="--gpu-ids"
 
 echo "[params] Script:     ${SWEEP_SCRIPT}"
 echo "[params] Output dir: ${TASK_OUTPUT_DIR}"

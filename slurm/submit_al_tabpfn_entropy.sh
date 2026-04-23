@@ -4,9 +4,10 @@
 #
 # Defaults mirror run_active_learning_tabpfn.sh (full production run).
 #
-# TabPFN is a single-GPU model (ensemble members run sequentially on one device).
-# This script requests 1 GPU. Pass --gpu-id 0 — Slurm always allocates the
-# device as cuda:0 inside the job via CUDA_VISIBLE_DEVICES.
+# AL and Baseline fit+eval can run in parallel on two GPUs — request 2 GPUs
+# via --gres=gpu:2 to halve the per-iteration wall-clock. With 1 GPU the run
+# falls back to sequential AL-then-Baseline on that device. GPU visibility is
+# auto-detected below and forwarded as --gpu-ids.
 #
 # Submit from repo root (partition/gres come from cluster.conf):
 #   sbatch $(slurm/cluster_flags.sh 1gpu) slurm/submit_al_tabpfn_entropy.sh
@@ -107,10 +108,25 @@ if [[ ! -x "${PYTHON}" ]]; then
 fi
 echo "[env] $(${PYTHON} --version)"
 
+# ---- Auto-detect visible GPUs -----------------------------------------------
+# Matches submit_al_transformer.sh / submit_al_gp_*.sh. If 2+ GPUs are visible,
+# pass --gpu-ids 0,1 to run AL and Baseline fit+eval in parallel.
+if [[ -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
+    N_GPUS=$(echo "${CUDA_VISIBLE_DEVICES}" | tr ',' '\n' | wc -l)
+elif [[ -n "${ROCR_VISIBLE_DEVICES:-}" ]]; then
+    N_GPUS=$(echo "${ROCR_VISIBLE_DEVICES}" | tr ',' '\n' | wc -l)
+elif [[ -n "${HIP_VISIBLE_DEVICES:-}" ]]; then
+    N_GPUS=$(echo "${HIP_VISIBLE_DEVICES}" | tr ',' '\n' | wc -l)
+else
+    N_GPUS=1
+fi
+GPU_IDS=$( [[ "${N_GPUS}" -ge 2 ]] && echo "0,1" || echo "0" )
+
 echo "[gpu] CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<not set>}"
 echo "[gpu] ROCR_VISIBLE_DEVICES=${ROCR_VISIBLE_DEVICES:-<not set>}"
+echo "[gpu] SLURM_GPUS_ON_NODE=${SLURM_GPUS_ON_NODE:-<not set>}"
 echo "[gpu] PIXI_ENV=${PIXI_ENV}"
-echo "[gpu] Using --gpu-id 0 (single GPU, Slurm-remapped)"
+echo "[gpu] Using --gpu-ids ${GPU_IDS} (${N_GPUS} GPU(s) detected)"
 
 # ---- Parameters (all overridable via environment variables) ------------------
 echo "[params] AL_N_SAMPLES=${AL_N_SAMPLES:-2000}"
@@ -139,7 +155,7 @@ source "${REPO_ROOT}/slurm/resume_args.sh"
     --static-eval-size "${AL_STATIC_EVAL_SIZE:-100000}" \
     --gen-workers "${AL_GEN_WORKERS:-20}" \
     --output-dir "${AL_OUTPUT_DIR:-/ptmp/jwuerzin/output/active_learning_tabpfn_entropy_output_slurm_${TIMESTAMP}}" \
-    --gpu-id 0 \
+    --gpu-ids "${GPU_IDS}" \
     ${AL_GENERATE_DATA:---generate-data} ${RESUME_ARGS} \
     ${AL_EXTRA_ARGS:-}
 

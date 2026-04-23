@@ -120,10 +120,9 @@ for model in ${MODELS//,/ }; do
                 submit_time="$(date +%Y%m%d_%H%M%S)"
                 al_output_base="/ptmp/jwuerzin/output/active_learning_${model_tag}_${strategy}_${warm}"
 
-                # Per-model resource footprint. Note: multi-node allocations
-                # with --gres=gpu:1 are rejected on apu ("Access/permission
-                # denied"), so TabPFN bundles also request gpu:2 per node and
-                # let the second GPU idle (driver only binds to GPU 0).
+                # Per-model resource footprint. All bundles request gpu:2 per
+                # node — the other models use both GPUs, and TabPFN now also
+                # parallelises AL/Baseline across both (cuda:0 and cuda:1).
                 # Mem stays lower for TabPFN — it never needs 128G.
                 n_seeds=$(echo "${SEEDS}" | tr ',' '\n' | wc -l)
                 gres="${CLUSTER_GPU_GRES_2:-gpu:2}"

@@ -58,6 +58,6 @@ if [[ -z "${TABPFN_TOKEN:-}" ]]; then
 fi
 export TABPFN_TOKEN
 
-# TabPFN (1 GPU)
-sub active_learning_tabpfn_output_slurm         "${CLUSTER_GPU_GRES_1}" "TABPFN_TOKEN=${TABPFN_TOKEN}" slurm/submit_al_tabpfn.sh
-sub active_learning_tabpfn_entropy_output_slurm "${CLUSTER_GPU_GRES_1}" "TABPFN_TOKEN=${TABPFN_TOKEN}" slurm/submit_al_tabpfn_entropy.sh
+# TabPFN (2 GPUs — AL and Baseline fit+eval run in parallel)
+sub active_learning_tabpfn_output_slurm         "${CLUSTER_GPU_GRES_2}" "TABPFN_TOKEN=${TABPFN_TOKEN}" slurm/submit_al_tabpfn.sh
+sub active_learning_tabpfn_entropy_output_slurm "${CLUSTER_GPU_GRES_2}" "TABPFN_TOKEN=${TABPFN_TOKEN}" slurm/submit_al_tabpfn_entropy.sh

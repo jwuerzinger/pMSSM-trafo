@@ -10,10 +10,12 @@ Based on active_learning.py — same loop structure, data generation, and evalua
 from pathlib import Path
 from datetime import datetime
 import logging
+import multiprocessing as mp
 import structlog
 import json
 import random
 import re
+import time
 
 import click
 import numpy as np
@@ -183,6 +185,55 @@ def cross_evaluate_tabpfn(model, X_other, Y_other,
     return mse, r2
 
 
+def _tabpfn_eval_worker(gpu_id, X_train, Y_train, eval_sets, candidates,
+                        target, name, out_queue):
+    """Fit a TabPFN model on its training set and evaluate on N held-out sets.
+
+    Runs entirely in a child process so the GPU binding is local. Returns all
+    results through ``out_queue`` as a dict keyed by eval-set name, each
+    holding loss / r2 / Y_true / Y_pred. ``train_loss`` / ``train_r2`` is
+    the self-eval on the training set.
+
+    eval_sets: list of ``(name, X, Y)`` tuples. Entries with X/Y == None are
+    skipped — convenient for optional MCMC / static-random sets.
+
+    candidates: optional tensor of candidate points. If provided, the worker
+    also returns native-variance predictions on them, so the main process
+    doesn't have to re-fit the model and re-run inference.
+    """
+    import torch as _torch
+    from tabpfn import TabPFNRegressor as _TabPFNRegressor  # noqa: F401 (ensures import happens in child)
+
+    device = f"cuda:{gpu_id}" if _torch.cuda.is_available() else "cpu"
+    t0 = time.time()
+    model, _ = fit_tabpfn(X_train, Y_train, device=device)
+    fit_time = time.time() - t0
+
+    result = {
+        '_name': name, '_fit_time': fit_time, '_device': device,
+    }
+    # Self-eval (no predictions needed; loss + r2 only)
+    tr_loss, tr_r2 = cross_evaluate_tabpfn(model, X_train, Y_train, target=target)
+    result['train'] = {'loss': tr_loss, 'r2': tr_r2}
+
+    for set_name, X_eval, Y_eval in eval_sets:
+        if X_eval is None or Y_eval is None:
+            result[set_name] = None
+            continue
+        loss, r2, yt, yp = cross_evaluate_tabpfn(
+            model, X_eval, Y_eval, target=target, return_predictions=True
+        )
+        result[set_name] = {'loss': loss, 'r2': r2, 'yt': yt, 'yp': yp}
+
+    if candidates is not None:
+        cand_mean, cand_var = tabpfn_predict_with_variance(model, candidates)
+        result['candidates'] = {'mean': cand_mean, 'var': cand_var}
+    else:
+        result['candidates'] = None
+
+    out_queue.put(result)
+
+
 def plot_eval_scatterplots(eval_results, iteration, plot_dir, logger, max_points=10_000):
     """Plot a grid of true-vs-predicted scatterplots for all model/dataset combinations.
 
@@ -338,8 +389,10 @@ def load_config_with_sweep(config_file, sweep_index=None):
               help="Path to previous output dir to resume from (loads state.pt).")
 @click.option('--n-additional-iterations', default=None, type=int,
               help="If --resume-from given, run this many more iterations.")
-@click.option('--gpu-id', default='0', type=str,
-              help="GPU ID for TabPFN inference (default: 0).")
+@click.option('--gpu-ids', '--gpu-id', 'gpu_id', default='0', type=str,
+              help="Comma-separated GPU IDs. One: sequential AL+baseline on that GPU. "
+                   "Two: AL on the first, baseline on the second, in parallel (default: 0). "
+                   "--gpu-id is kept as an alias for backward compatibility.")
 @click.option('--seed', default=42, type=int,
               help="Master random seed propagated to torch / numpy / candidate pool (default: 42).")
 def main(testing, n_iterations, n_candidates, n_select, n_ensemble_samples, n_datasets, n_samples, val_fraction, output_dir, generate_data, min_gen_fraction, max_gen_attempts, gen_workers, selection_strategy, entropy_blur, entropy_beta, entropy_pool_size, candidate_generation, proximity_sampling, tolerance_sampling, target_value, config_file, sweep_index, mcmc_data_dir, static_eval_size, data_dir, resume_from, n_additional_iterations, gpu_id, seed):
@@ -454,11 +507,28 @@ def main(testing, n_iterations, n_candidates, n_select, n_ensemble_samples, n_da
         logger.info(f"  max_gen_attempts: {max_gen_attempts}")
         logger.info(f"  gen_workers: {gen_workers}")
 
-    gpu_id_int = int(gpu_id.strip())
-    device = f"cuda:{gpu_id_int}" if torch.cuda.is_available() else "cpu"
+    gpu_id_list = [int(s.strip()) for s in gpu_id.split(',') if s.strip()]
+    if not gpu_id_list:
+        gpu_id_list = [0]
+    AL_GPU_ID = gpu_id_list[0]
+    BASELINE_GPU_ID = gpu_id_list[1] if len(gpu_id_list) > 1 else gpu_id_list[0]
+    device = f"cuda:{AL_GPU_ID}" if torch.cuda.is_available() else "cpu"
     logger.info(f"Device: {device}")
     if torch.cuda.is_available():
-        logger.info(f"GPU: {torch.cuda.get_device_name(gpu_id_int)}")
+        logger.info(f"GPU: {torch.cuda.get_device_name(AL_GPU_ID)}")
+
+    # Parallel fit+eval only when 2+ distinct GPUs are visible (otherwise fall
+    # back to sequential on the single device).
+    use_parallel = (
+        torch.cuda.is_available()
+        and torch.cuda.device_count() >= 2
+        and AL_GPU_ID != BASELINE_GPU_ID
+    )
+    if use_parallel:
+        logger.info(f"Parallel TabPFN enabled: AL on cuda:{AL_GPU_ID}, Baseline on cuda:{BASELINE_GPU_ID}")
+        mp.set_start_method('spawn', force=True)
+    else:
+        logger.info(f"Sequential TabPFN: both models on {device}")
 
     # Load initial data
     logger.info("Loading data...")
@@ -621,6 +691,9 @@ def main(testing, n_iterations, n_candidates, n_select, n_ensemble_samples, n_da
     for iteration in range(start_iteration, n_iterations + 1):
         logger.info(f"=== Global Iteration {iteration} ===")
 
+        # Reset any per-iteration lazy state (see retry block for details).
+        al_model_retry = None
+
         # Create iteration directory for logs and plots
         iter_dir = output_dir / f"iteration_{iteration:03d}"
         iter_dir.mkdir(parents=True, exist_ok=True)
@@ -724,27 +797,98 @@ def main(testing, n_iterations, n_candidates, n_select, n_ensemble_samples, n_da
                                  baseline_hist_dir, "Baseline_new", iteration, logger,
                                  fixed_axes=True)
 
-        # Fit TabPFN models (instant — no training loop)
-        import time
-        logger.info("Fitting TabPFN AL model...")
-        t0 = time.time()
-        al_model, _ = fit_tabpfn(X, Y, device=device)
-        logger.info(f"TabPFN AL fit complete ({time.time() - t0:.1f}s)")
+        # Generate candidate pool BEFORE the parallel fit+eval phase, so each
+        # worker can also predict (mean, var) on the candidates in the same
+        # subprocess. This avoids re-fitting either model in the main process
+        # just to run inference for selection and uncertainty plots.
+        logger.info(f"Generating {n_candidates} candidate points using {candidate_generation} sampling...")
+        candidates = generate_candidate_pool(n_candidates, method=candidate_generation, seed=seed * 10_000 + iteration)
 
-        logger.info("Fitting TabPFN Baseline model...")
-        t0 = time.time()
-        baseline_model, _ = fit_tabpfn(X_baseline_train, Y_baseline_train, device=device)
-        logger.info(f"TabPFN Baseline fit complete ({time.time() - t0:.1f}s)")
+        if proximity_sampling > 0 or tolerance_sampling > 0:
+            threshold_transformed = transform_y(torch.tensor([target_value]), target="DMRD").item()
+        else:
+            threshold_transformed = 0.0
 
-        # Evaluate AL model on its own train + val sets
-        al_train_loss, al_train_r2_val = cross_evaluate_tabpfn(al_model, X, Y, target='DMRD')
-        al_val_loss_val, al_r2_val, al_own_yt, al_own_yp = cross_evaluate_tabpfn(
-            al_model, X_val, Y_val, target='DMRD', return_predictions=True)
+        # Only request candidate variance predictions from the AL worker when
+        # the selection strategy needs them. entropy_batch generates its own
+        # ensemble predictions from scratch, so skipping here saves one
+        # inference pass on the candidate pool.
+        al_needs_cand = selection_strategy in ('top_k', 'top_k_tol_only')
+        al_candidates = candidates if al_needs_cand else None
 
-        # Evaluate Baseline on its own train + val sets
-        base_train_loss, base_train_r2_val = cross_evaluate_tabpfn(baseline_model, X_baseline_train, Y_baseline_train, target='DMRD')
-        base_val_loss_val, base_r2_val, base_own_yt, base_own_yp = cross_evaluate_tabpfn(
-            baseline_model, X_baseline_val, Y_baseline_val, target='DMRD', return_predictions=True)
+        # Fit + evaluate AL and Baseline TabPFN models. In parallel on 2 GPUs
+        # when available; otherwise sequentially on the same GPU. Each worker
+        # returns: train (self-eval) + own_val + cross_val + optional mcmc +
+        # optional static + candidate predictions — the same set the sequential
+        # path computes, plus the candidate inference.
+        al_eval_sets = [
+            ('own_val',   X_val,            Y_val),
+            ('cross_val', X_baseline_val,   Y_baseline_val),
+            ('mcmc',      X_mcmc,           Y_mcmc),
+            ('static',    X_static_random,  Y_static_random),
+        ]
+        base_eval_sets = [
+            ('own_val',   X_baseline_val,   Y_baseline_val),
+            ('cross_val', X_val,            Y_val),
+            ('mcmc',      X_mcmc,           Y_mcmc),
+            ('static',    X_static_random,  Y_static_random),
+        ]
+
+        t_fit0 = time.time()
+        if use_parallel:
+            logger.info(f"Fitting+evaluating TabPFN AL on cuda:{AL_GPU_ID} and Baseline on cuda:{BASELINE_GPU_ID} in parallel...")
+            al_queue = mp.Queue()
+            base_queue = mp.Queue()
+            al_proc = mp.Process(
+                target=_tabpfn_eval_worker,
+                args=(AL_GPU_ID, X, Y, al_eval_sets, al_candidates, 'DMRD', 'AL', al_queue),
+            )
+            base_proc = mp.Process(
+                target=_tabpfn_eval_worker,
+                args=(BASELINE_GPU_ID, X_baseline_train, Y_baseline_train, base_eval_sets,
+                      candidates, 'DMRD', 'Baseline', base_queue),
+            )
+            al_proc.start()
+            base_proc.start()
+            # Drain queues before join to avoid pipe-buffer deadlocks.
+            al_res = al_queue.get()
+            base_res = base_queue.get()
+            al_proc.join()
+            base_proc.join()
+        else:
+            logger.info(f"Fitting+evaluating TabPFN AL then Baseline sequentially on {device}...")
+            al_queue = mp.Queue()
+            _tabpfn_eval_worker(AL_GPU_ID, X, Y, al_eval_sets, al_candidates, 'DMRD', 'AL', al_queue)
+            al_res = al_queue.get()
+            base_queue = mp.Queue()
+            _tabpfn_eval_worker(BASELINE_GPU_ID, X_baseline_train, Y_baseline_train, base_eval_sets,
+                               candidates, 'DMRD', 'Baseline', base_queue)
+            base_res = base_queue.get()
+        logger.info(f"TabPFN fit+eval wall-clock: {time.time() - t_fit0:.1f}s  "
+                   f"(AL fit {al_res['_fit_time']:.1f}s, Baseline fit {base_res['_fit_time']:.1f}s)")
+
+        # Unpack worker results into the flat names the rest of the loop expects.
+        al_train_loss        = al_res['train']['loss']
+        al_train_r2_val      = al_res['train']['r2']
+        al_val_loss_val      = al_res['own_val']['loss']
+        al_r2_val            = al_res['own_val']['r2']
+        al_own_yt            = al_res['own_val']['yt']
+        al_own_yp            = al_res['own_val']['yp']
+        al_cross_loss        = al_res['cross_val']['loss']
+        al_cross_r2          = al_res['cross_val']['r2']
+        al_cross_yt          = al_res['cross_val']['yt']
+        al_cross_yp          = al_res['cross_val']['yp']
+
+        base_train_loss      = base_res['train']['loss']
+        base_train_r2_val    = base_res['train']['r2']
+        base_val_loss_val    = base_res['own_val']['loss']
+        base_r2_val          = base_res['own_val']['r2']
+        base_own_yt          = base_res['own_val']['yt']
+        base_own_yp          = base_res['own_val']['yp']
+        base_cross_loss      = base_res['cross_val']['loss']
+        base_cross_r2        = base_res['cross_val']['r2']
+        base_cross_yt        = base_res['cross_val']['yt']
+        base_cross_yp        = base_res['cross_val']['yp']
 
         logger.info(f"AL metrics: train_loss={al_train_loss:.6f}, val_loss={al_val_loss_val:.6f}, R²={al_r2_val:.4f}, train_R²={al_train_r2_val:.4f}")
         logger.info(f"Baseline metrics: train_loss={base_train_loss:.6f}, val_loss={base_val_loss_val:.6f}, R²={base_r2_val:.4f}, train_R²={base_train_r2_val:.4f}")
@@ -764,49 +908,33 @@ def main(testing, n_iterations, n_candidates, n_select, n_ensemble_samples, n_da
         baseline_n_train.append(len(X_baseline_train))
         baseline_n_val.append(len(X_baseline_val))
 
-        # Cross-evaluation: each model on the other's validation set
-        al_cross_loss, al_cross_r2, al_cross_yt, al_cross_yp = cross_evaluate_tabpfn(
-            al_model, X_baseline_val, Y_baseline_val,
-            target='DMRD', return_predictions=True)
-
-        base_cross_loss, base_cross_r2, base_cross_yt, base_cross_yp = cross_evaluate_tabpfn(
-            baseline_model, X_val, Y_val,
-            target='DMRD', return_predictions=True)
-
         logger.info(f"Cross-eval: AL_on_base_val_loss={al_cross_loss:.6f}, AL_on_base_val_R²={al_cross_r2:.4f}, base_on_al_val_loss={base_cross_loss:.6f}, base_on_al_val_R²={base_cross_r2:.4f}")
         al_on_base_val_losses.append(al_cross_loss)
         al_on_base_val_r2.append(al_cross_r2)
         base_on_al_val_losses.append(base_cross_loss)
         base_on_al_val_r2.append(base_cross_r2)
 
-        # Collect scatterplot data: AL model on AL val, Baseline model on Base val
-        # (own-val predictions via cross_evaluate for consistency)
-        al_own_loss, al_own_r2, al_own_yt, al_own_yp = cross_evaluate_tabpfn(
-            al_model, X_val, Y_val,
-            target='DMRD', return_predictions=True)
-        base_own_loss, base_own_r2, base_own_yt, base_own_yp = cross_evaluate_tabpfn(
-            baseline_model, X_baseline_val, Y_baseline_val,
-            target='DMRD', return_predictions=True)
-
         scatter_results = [
             dict(model_name="AL", dataset_name="AL Val", y_true=al_own_yt, y_pred=al_own_yp,
-                 loss=al_own_loss, r2=al_own_r2, n=len(X_val)),
+                 loss=al_val_loss_val, r2=al_r2_val, n=len(X_val)),
             dict(model_name="AL", dataset_name="Base Val", y_true=al_cross_yt, y_pred=al_cross_yp,
                  loss=al_cross_loss, r2=al_cross_r2, n=len(X_baseline_val)),
             dict(model_name="Baseline", dataset_name="AL Val", y_true=base_cross_yt, y_pred=base_cross_yp,
                  loss=base_cross_loss, r2=base_cross_r2, n=len(X_val)),
             dict(model_name="Baseline", dataset_name="Base Val", y_true=base_own_yt, y_pred=base_own_yp,
-                 loss=base_own_loss, r2=base_own_r2, n=len(X_baseline_val)),
+                 loss=base_val_loss_val, r2=base_r2_val, n=len(X_baseline_val)),
         ]
 
-        # Evaluate on MCMC static dataset
-        if X_mcmc is not None:
-            mcmc_loss_al, mcmc_r2_al, mcmc_yt_al, mcmc_yp_al = cross_evaluate_tabpfn(
-                al_model, X_mcmc, Y_mcmc,
-                target='DMRD', return_predictions=True)
-            mcmc_loss_base, mcmc_r2_base, mcmc_yt_base, mcmc_yp_base = cross_evaluate_tabpfn(
-                baseline_model, X_mcmc, Y_mcmc,
-                target='DMRD', return_predictions=True)
+        # MCMC eval (optional — present only if mcmc_data_dir was provided)
+        if al_res.get('mcmc') is not None:
+            mcmc_loss_al  = al_res['mcmc']['loss']
+            mcmc_r2_al    = al_res['mcmc']['r2']
+            mcmc_yt_al    = al_res['mcmc']['yt']
+            mcmc_yp_al    = al_res['mcmc']['yp']
+            mcmc_loss_base = base_res['mcmc']['loss']
+            mcmc_r2_base   = base_res['mcmc']['r2']
+            mcmc_yt_base   = base_res['mcmc']['yt']
+            mcmc_yp_base   = base_res['mcmc']['yp']
             al_on_mcmc_losses.append(mcmc_loss_al)
             al_on_mcmc_r2.append(mcmc_r2_al)
             baseline_on_mcmc_losses.append(mcmc_loss_base)
@@ -818,14 +946,16 @@ def main(testing, n_iterations, n_candidates, n_select, n_ensemble_samples, n_da
             scatter_results.append(dict(model_name="Baseline", dataset_name="MCMC",
                 y_true=mcmc_yt_base, y_pred=mcmc_yp_base, loss=mcmc_loss_base, r2=mcmc_r2_base, n=len(X_mcmc)))
 
-        # Evaluate on static random dataset
-        if X_static_random is not None:
-            static_loss_al, static_r2_al, static_yt_al, static_yp_al = cross_evaluate_tabpfn(
-                al_model, X_static_random, Y_static_random,
-                target='DMRD', return_predictions=True)
-            static_loss_base, static_r2_base, static_yt_base, static_yp_base = cross_evaluate_tabpfn(
-                baseline_model, X_static_random, Y_static_random,
-                target='DMRD', return_predictions=True)
+        # Static-random eval (optional)
+        if al_res.get('static') is not None:
+            static_loss_al  = al_res['static']['loss']
+            static_r2_al    = al_res['static']['r2']
+            static_yt_al    = al_res['static']['yt']
+            static_yp_al    = al_res['static']['yp']
+            static_loss_base = base_res['static']['loss']
+            static_r2_base   = base_res['static']['r2']
+            static_yt_base   = base_res['static']['yt']
+            static_yp_base   = base_res['static']['yp']
             al_on_static_random_losses.append(static_loss_al)
             al_on_static_random_r2.append(static_r2_al)
             baseline_on_static_random_losses.append(static_loss_base)
@@ -839,16 +969,9 @@ def main(testing, n_iterations, n_candidates, n_select, n_ensemble_samples, n_da
 
         plot_eval_scatterplots(scatter_results, iteration, iter_plots_dir, logger)
 
-        # Generate candidate pool and select uncertain points
-        logger.info(f"Generating {n_candidates} candidate points using {candidate_generation} sampling...")
-        candidates = generate_candidate_pool(n_candidates, method=candidate_generation, seed=seed * 10_000 + iteration)
-
-        # Convert target value to transformed space for threshold
-        if proximity_sampling > 0 or tolerance_sampling > 0:
-            threshold_transformed = transform_y(torch.tensor([target_value]), target="DMRD").item()
-        else:
-            threshold_transformed = 0.0
-
+        # Selection. entropy_batch still runs its own ensemble (independent of
+        # the fitted models). top_k / top_k_tol_only reuse the AL worker's
+        # candidate predictions — no re-fit, no extra inference in main.
         if selection_strategy == 'entropy_batch':
             pred_mean, pred_var, predictions = tabpfn_ensemble_predictions(
                 X, Y, candidates, n_ensemble_samples, device, logger
@@ -862,9 +985,8 @@ def main(testing, n_iterations, n_candidates, n_select, n_ensemble_samples, n_da
                 device=device, logger=logger
             )
         elif selection_strategy == 'top_k_tol_only':
-            y_pred_cand, var_cand = tabpfn_predict_with_variance(al_model, candidates)
-            pred_mean = torch.from_numpy(y_pred_cand).float().unsqueeze(1)
-            pred_var = torch.from_numpy(var_cand).float().unsqueeze(1)
+            pred_mean = torch.from_numpy(al_res['candidates']['mean']).float().unsqueeze(1)
+            pred_var = torch.from_numpy(al_res['candidates']['var']).float().unsqueeze(1)
             logger.info(f"Uncertainty stats: mean={pred_var.mean():.6f}, max={pred_var.max():.6f}")
             top_indices = select_top_uncertain_tol_only(
                 candidates, pred_mean, pred_var, n_select,
@@ -873,10 +995,8 @@ def main(testing, n_iterations, n_candidates, n_select, n_ensemble_samples, n_da
                 logger=logger,
             )
         else:
-            # Use TabPFN's native variance for top_k selection
-            y_pred_cand, var_cand = tabpfn_predict_with_variance(al_model, candidates)
-            pred_mean = torch.from_numpy(y_pred_cand).float().unsqueeze(1)
-            pred_var = torch.from_numpy(var_cand).float().unsqueeze(1)
+            pred_mean = torch.from_numpy(al_res['candidates']['mean']).float().unsqueeze(1)
+            pred_var = torch.from_numpy(al_res['candidates']['var']).float().unsqueeze(1)
             logger.info(f"Uncertainty stats: mean={pred_var.mean():.6f}, max={pred_var.max():.6f}")
 
             top_indices = select_top_uncertain_filtered(
@@ -890,6 +1010,9 @@ def main(testing, n_iterations, n_candidates, n_select, n_ensemble_samples, n_da
         logger.info(f"Selected {len(top_indices)} points via {selection_strategy} (requested: {n_select}, available: {len(candidates)})")
 
         # ---- Candidate uncertainty plots (AL + Baseline) ----
+        # Baseline variance comes from the baseline worker's candidate pass.
+        # AL variance comes from `pred_var` above (ensemble for entropy_batch,
+        # native for top_k).
         try:
             _plot_pool_size = min(len(candidates), 20_000)
             _plot_idx = torch.randperm(len(candidates))[:_plot_pool_size]
@@ -897,8 +1020,8 @@ def main(testing, n_iterations, n_candidates, n_select, n_ensemble_samples, n_da
             _plot_al_var = pred_var[_plot_idx]
             plot_candidate_uncertainty(_plot_cands, _plot_al_var, al_hist_dir,
                                        "AL", iteration, logger)
-            _, _base_var_np = tabpfn_predict_with_variance(baseline_model, _plot_cands)
-            _base_pred_var = torch.from_numpy(_base_var_np).float().unsqueeze(1)
+            _base_pred_var = torch.from_numpy(base_res['candidates']['var']).float().unsqueeze(1)
+            _base_pred_var = _base_pred_var[_plot_idx]
             plot_candidate_uncertainty(_plot_cands, _base_pred_var, baseline_hist_dir,
                                        "Baseline", iteration, logger)
         except Exception as e:
@@ -953,27 +1076,32 @@ def main(testing, n_iterations, n_candidates, n_select, n_ensemble_samples, n_da
                             proximity_sampling=proximity_sampling,
                             device=device, logger=logger
                         )
-                    elif selection_strategy == 'top_k_tol_only':
-                        attempt_y_pred, attempt_var = tabpfn_predict_with_variance(al_model, attempt_candidates)
-                        attempt_mean = torch.from_numpy(attempt_y_pred).float().unsqueeze(1)
-                        attempt_pred_var = torch.from_numpy(attempt_var).float().unsqueeze(1)
-                        attempt_indices = select_top_uncertain_tol_only(
-                            attempt_candidates, attempt_mean, attempt_pred_var, n_select,
-                            threshold=threshold_transformed,
-                            tolerance_sampling=tolerance_sampling,
-                            logger=logger,
-                        )
                     else:
-                        attempt_y_pred, attempt_var = tabpfn_predict_with_variance(al_model, attempt_candidates)
+                        # Retry path for top_k variants: parallel worker only
+                        # predicted on the original candidate pool, so we need
+                        # a local AL model here. Lazy-fit once per iteration
+                        # (al_model_retry is reset to None at the top of the
+                        # iteration loop).
+                        if al_model_retry is None:
+                            al_model_retry, _ = fit_tabpfn(X, Y, device=device)
+                        attempt_y_pred, attempt_var = tabpfn_predict_with_variance(al_model_retry, attempt_candidates)
                         attempt_mean = torch.from_numpy(attempt_y_pred).float().unsqueeze(1)
                         attempt_pred_var = torch.from_numpy(attempt_var).float().unsqueeze(1)
-                        attempt_indices = select_top_uncertain_filtered(
-                            attempt_candidates, attempt_mean, attempt_pred_var, n_select,
-                            threshold=threshold_transformed,
-                            tolerance_sampling=tolerance_sampling,
-                            proximity_sampling=proximity_sampling,
-                            logger=logger,
-                        )
+                        if selection_strategy == 'top_k_tol_only':
+                            attempt_indices = select_top_uncertain_tol_only(
+                                attempt_candidates, attempt_mean, attempt_pred_var, n_select,
+                                threshold=threshold_transformed,
+                                tolerance_sampling=tolerance_sampling,
+                                logger=logger,
+                            )
+                        else:
+                            attempt_indices = select_top_uncertain_filtered(
+                                attempt_candidates, attempt_mean, attempt_pred_var, n_select,
+                                threshold=threshold_transformed,
+                                tolerance_sampling=tolerance_sampling,
+                                proximity_sampling=proximity_sampling,
+                                logger=logger,
+                            )
 
                     param_names = [p.replace("IN_", "") for p in PARAM_ORDER]
                     df = pd.DataFrame(attempt_candidates[attempt_indices].numpy(), columns=param_names)
