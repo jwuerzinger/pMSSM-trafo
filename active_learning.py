@@ -293,6 +293,10 @@ def load_config_with_sweep(config_file, sweep_index=None):
               help="Number of models to reserve from the random pool as a static evaluation set (default: 100000).")
 @click.option('--data-dir', default='data/18387358', type=str,
               help="Directory containing training ROOT files (default: data/18387358).")
+@click.option('--use-mcmc-loader/--no-use-mcmc-loader', default=False,
+              help="Load initial training data via load_mcmc_data (MCMC-specific filters: straddle-0.12, exclude <0.04). Default: load_pmssm_data via --data-dir.")
+@click.option('--train-baseline/--no-train-baseline', default=True,
+              help="Also train a random-sampling baseline model each iteration (default: enabled). Disable for pure capacity tests.")
 @click.option('--resume-from', default=None, type=str,
               help="Path to previous output dir to resume from (loads state.pt).")
 @click.option('--n-additional-iterations', default=None, type=int,
@@ -301,7 +305,7 @@ def load_config_with_sweep(config_file, sweep_index=None):
               help="Comma-separated GPU IDs for AL and baseline models (default: 2,3).")
 @click.option('--seed', default=42, type=int,
               help="Master random seed propagated to torch / numpy / candidate pool (default: 42).")
-def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, dropout, n_datasets, n_samples, val_fraction, output_dir, generate_data, min_gen_fraction, max_gen_attempts, gen_workers, selection_strategy, entropy_blur, entropy_beta, entropy_pool_size, candidate_generation, proximity_sampling, tolerance_sampling, target_value, config_file, sweep_index, early_stopping, patience, warm_starting, eval_data_path, compute_full_metrics, y_transform, mcmc_data_dir, static_eval_size, data_dir, resume_from, n_additional_iterations, gpu_ids, seed):
+def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, dropout, n_datasets, n_samples, val_fraction, output_dir, generate_data, min_gen_fraction, max_gen_attempts, gen_workers, selection_strategy, entropy_blur, entropy_beta, entropy_pool_size, candidate_generation, proximity_sampling, tolerance_sampling, target_value, config_file, sweep_index, early_stopping, patience, warm_starting, eval_data_path, compute_full_metrics, y_transform, mcmc_data_dir, static_eval_size, data_dir, use_mcmc_loader, train_baseline, resume_from, n_additional_iterations, gpu_ids, seed):
     """
     Active learning pipeline for pMSSM relic density prediction.
 
@@ -459,7 +463,11 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
     logger.info("Loading data...")
     plots_dir = output_dir / "plots"
     plots_dir.mkdir(parents=True, exist_ok=True)
-    X, Y = load_pmssm_data(n_datasets=n_datasets, logger=logger, plot_dir=str(plots_dir), data_dir=data_dir)
+    if use_mcmc_loader:
+        logger.info(f"Using load_mcmc_data (MCMC-specific filters) on {data_dir}")
+        X, Y = load_mcmc_data(data_dir=data_dir, logger=logger)
+    else:
+        X, Y = load_pmssm_data(n_datasets=n_datasets, logger=logger, plot_dir=str(plots_dir), data_dir=data_dir)
 
     # Load MCMC evaluation dataset if provided
     X_mcmc, Y_mcmc = None, None
@@ -652,7 +660,14 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
 
         # Build baseline dataset (train + val).
         # Baseline validation grows in parallel with AL validation.
-        if iteration == 1:
+        if not train_baseline:
+            # Capacity-test mode: no baseline, point at empty tensors so
+            # downstream tensor concat logic still works but trains nothing.
+            X_baseline_train = X[:0].clone()
+            Y_baseline_train = Y[:0].clone()
+            X_baseline_val = X_val[:0].clone()
+            Y_baseline_val = Y_val[:0].clone()
+        elif iteration == 1:
             # First iteration: Baseline is an exact copy of AL (same train/val split).
             X_baseline_train = X.clone()
             Y_baseline_train = Y.clone()
@@ -756,7 +771,24 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
         al_warm_start = prev_al_checkpoint if (iteration > 1 and warm_starting) else None
         baseline_warm_start = prev_baseline_checkpoint if (iteration > 1 and warm_starting) else None
 
-        if use_parallel:
+        nan_baseline_results = {
+            'best_train_loss': float('nan'),
+            'best_val_loss':   float('nan'),
+            'r2_score':        float('nan'),
+            'train_r2_score':  float('nan'),
+        }
+
+        if not train_baseline:
+            # Capacity-test mode: train AL only. NaN baseline metrics propagate
+            # through logs / summary / plots without breaking anything.
+            logger.info("Training Active Learning model (baseline disabled)...")
+            al_queue = mp.Queue()
+            train_model_worker(device, X_combined, Y_combined, idx_train_al, idx_val_al, epochs, dropout,
+                             al_queue, "AL", iter_dir, iter_plots_dir, al_checkpoint_path,
+                             al_warm_start, early_stopping, patience, y_transform, "DMRD")
+            al_results = al_queue.get()
+            baseline_results = dict(nan_baseline_results)
+        elif use_parallel:
             # Train AL and Baseline in parallel on different GPUs
             al_queue = mp.Queue()
             baseline_queue = mp.Queue()

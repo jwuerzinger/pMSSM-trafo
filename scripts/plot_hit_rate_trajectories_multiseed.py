@@ -110,7 +110,6 @@ def main(manifest, sweep_id, output, uncertainty, target, tolerances,
         ax.set_xlabel("Iteration")
         ax.set_ylabel("Hit rate")
         ax.grid(alpha=0.3)
-        ax.set_ylim(0, None)
 
         for (model, strat, warm), sub in groups:
             trajs = []
@@ -143,20 +142,29 @@ def main(manifest, sweep_id, output, uncertainty, target, tolerances,
             ax.fill_between(iters_ax, lo, hi, color=color, alpha=0.15)
             plotted += 1
 
-    handles, labels = axes[-1].get_legend_handles_labels()
-    if handles:
-        # De-duplicate labels — same (model, strategy, warm) gets one legend entry.
-        seen = {}
-        for h, l in zip(handles, labels):
+    # Tighten y-axis AFTER plotting so autoscale has run; add 5% headroom.
+    for ax in axes:
+        _, ymax = ax.get_ylim()
+        ax.set_ylim(0, max(ymax, 0.05) * 1.05)
+
+    # Collect deduped handles/labels from all axes (any panel has the full set).
+    seen = {}
+    for ax in axes:
+        for h, l in zip(*ax.get_legend_handles_labels()):
             seen.setdefault(l, h)
+
+    fig.tight_layout()
+    if seen:
+        # Reserve explicit real-estate for a single external legend; no
+        # bbox_inches='tight' to avoid fighting with tight_layout.
+        fig.subplots_adjust(right=0.84)
         fig.legend(seen.values(), seen.keys(),
-                   fontsize=6, loc="center left",
-                   bbox_to_anchor=(1.0, 0.5), borderaxespad=0.)
-    fig.tight_layout(rect=(0, 0, 0.82, 1))
+                   loc="center left", bbox_to_anchor=(0.85, 0.5),
+                   fontsize=8, frameon=True, borderaxespad=0.)
 
     out_path = Path(output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    fig.savefig(out_path, dpi=150)
     plt.close(fig)
 
     # plotted counts per panel (so divide by n_tols)
