@@ -469,6 +469,13 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
     else:
         X, Y = load_pmssm_data(n_datasets=n_datasets, logger=logger, plot_dir=str(plots_dir), data_dir=data_dir)
 
+    # Shuffle once up-front: loaders concatenate ROOT files (= MCMC chains)
+    # in file order, so X[:n_samples] would otherwise draw from a single chain.
+    _load_perm = torch.randperm(len(X), generator=torch.Generator().manual_seed(seed))
+    X = X[_load_perm]
+    Y = Y[_load_perm]
+    logger.info(f"Shuffled loaded dataset ({len(X)} samples, seed={seed})")
+
     # Load MCMC evaluation dataset if provided
     X_mcmc, Y_mcmc = None, None
     if mcmc_data_dir is not None:
