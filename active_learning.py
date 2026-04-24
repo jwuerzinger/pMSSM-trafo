@@ -733,12 +733,15 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
                              reference_X=X_mcmc, reference_Y=Y_mcmc, reference_label="MCMC")
         plot_parallel_coordinates(X_combined, idx_train_al, idx_val_al, al_hist_dir, "AL", iteration, logger)
 
-        # Plot data distribution histograms and parallel coordinates for Baseline
-        baseline_hist_dir = iter_plots_dir / "baseline"
-        baseline_hist_dir.mkdir(parents=True, exist_ok=True)
-        plot_data_histograms(X_baseline_combined, Y_baseline_combined, idx_train_base, idx_val_base, baseline_hist_dir, "Baseline", iteration, logger,
-                             reference_X=X_static_random, reference_Y=Y_static_random, reference_label="Static Random")
-        plot_parallel_coordinates(X_baseline_combined, idx_train_base, idx_val_base, baseline_hist_dir, "Baseline", iteration, logger)
+        # Skip baseline plots when the baseline pool is empty (e.g.
+        # --no-train-baseline capacity tests) — plot_data_histograms uses a
+        # log-scaled axis and crashes on empty data.
+        if len(X_baseline_combined) > 0:
+            baseline_hist_dir = iter_plots_dir / "baseline"
+            baseline_hist_dir.mkdir(parents=True, exist_ok=True)
+            plot_data_histograms(X_baseline_combined, Y_baseline_combined, idx_train_base, idx_val_base, baseline_hist_dir, "Baseline", iteration, logger,
+                                 reference_X=X_static_random, reference_Y=Y_static_random, reference_label="Static Random")
+            plot_parallel_coordinates(X_baseline_combined, idx_train_base, idx_val_base, baseline_hist_dir, "Baseline", iteration, logger)
 
         # Plot new-points-only histograms for baseline (iteration 2+). `new_idx`
         # is only assigned in the grow-baseline branch above, which is skipped
