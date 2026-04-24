@@ -132,7 +132,17 @@ for model in ${MODELS//,/ }; do
                     mem="128G"
                 fi
 
-                bundle_env="AL_MODEL=${model_tag},AL_STRATEGY=${strategy},AL_WARM=${warm},AL_SEEDS=${SEEDS},AL_OUTPUT_BASE=${al_output_base},AL_SWEEP_ID=${SWEEP_ID}"
+                # Pre-export every bundle var rather than threading them through
+                # --export=KEY=VAL,... — SLURM's --export uses commas as entry
+                # separators with no escape mechanism, so a comma in AL_SEEDS
+                # (e.g. "1,2,3,4,5") would be parsed as multiple entries and
+                # AL_SEEDS would arrive as just "1" on the compute node.
+                export AL_MODEL="${model_tag}"
+                export AL_STRATEGY="${strategy}"
+                export AL_WARM="${warm}"
+                export AL_SEEDS="${SEEDS}"
+                export AL_OUTPUT_BASE="${al_output_base}"
+                export AL_SWEEP_ID="${SWEEP_ID}"
 
                 if [[ "${DRY_RUN}" == "1" ]]; then
                     JOB_ID="DRY"
@@ -145,7 +155,7 @@ for model in ${MODELS//,/ }; do
                         --gres="${gres}" \
                         --mem="${mem}" \
                         --exclusive \
-                        --export=ALL,${bundle_env} \
+                        --export=ALL \
                         slurm/submit_al_bundled.sh)
                     echo "[bundled]   ${JOB_ID}  ${model_tag}/${strategy}/${warm} × ${n_seeds} seeds"
                 fi

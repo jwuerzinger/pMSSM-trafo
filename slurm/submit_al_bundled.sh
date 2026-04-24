@@ -8,13 +8,20 @@
 # just fired off via srun inside a larger sbatch allocation.
 #
 # Invoked by slurm/submit_strategy_sweep.sh in BUNDLE_SEEDS mode. Not intended
-# for direct use, but can be called manually with the right env vars set:
+# for direct use, but can be called manually by PRE-EXPORTING the env vars
+# (never via --export=KEY=VAL,...; see note below):
 #
+#   export AL_MODEL=transformer AL_STRATEGY=top_k AL_WARM=warm \
+#          AL_SEEDS=1,2,3,4,5 \
+#          AL_OUTPUT_BASE=/ptmp/jwuerzin/output/active_learning_transformer_top_k_warm \
+#          AL_SWEEP_ID=20260422_190000
 #   sbatch --partition=${CLUSTER_PARTITION} --nodes=5 --gres=gpu:2 --exclusive \
-#          --export=ALL,AL_MODEL=transformer,AL_STRATEGY=top_k,AL_WARM=warm,\
-#          AL_SEEDS=1,2,3,4,5,AL_OUTPUT_BASE=/ptmp/jwuerzin/output/active_learning_transformer_top_k_warm,\
-#          AL_SWEEP_ID=20260422_190000 \
-#          slurm/submit_al_bundled.sh
+#          --export=ALL slurm/submit_al_bundled.sh
+#
+# Note: AL_SEEDS MUST be pre-exported. SLURM's --export uses commas as entry
+# separators with no escape mechanism, so passing `AL_SEEDS=1,2,3,4,5` inline
+# would be parsed as AL_SEEDS=1 plus four bare-name entries (2,3,4,5), and the
+# job would silently only run seed 1.
 #
 # Required env vars:
 #   AL_MODEL       : transformer | deep_gp | exact_gp | tabpfn
@@ -67,6 +74,18 @@ esac
 # ---- Parse seed list --------------------------------------------------------
 IFS=',' read -ra SEEDS_ARR <<< "${AL_SEEDS}"
 N_SEEDS=${#SEEDS_ARR[@]}
+
+# Fail loudly if the seed count doesn't match the allocated nodes. This
+# catches the --export=...,AL_SEEDS=1,2,3,... comma-truncation footgun: if
+# the submit side accidentally passes AL_SEEDS inline through --export,
+# only the first seed survives and the job would otherwise silently run
+# one seed on a multi-node allocation and return rc=0.
+if [[ -n "${SLURM_NNODES:-}" && "${N_SEEDS}" -ne "${SLURM_NNODES}" ]]; then
+    echo "[error] AL_SEEDS count (${N_SEEDS}, value='${AL_SEEDS}') != allocated nodes (${SLURM_NNODES})." >&2
+    echo "        Did --export= truncate AL_SEEDS at its first comma?" >&2
+    echo "        Pre-export AL_SEEDS in the caller shell instead." >&2
+    exit 2
+fi
 
 echo "=========================================="
 echo "[bundle] job_id=${SLURM_JOB_ID} job_name=${SLURM_JOB_NAME}"
