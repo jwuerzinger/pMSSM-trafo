@@ -122,6 +122,8 @@ from .visualization import (
     plot_candidate_uncertainty,
     plot_iteration_metrics,
     plot_advanced_diagnostics,
+    plot_eval_scatterplots,
+    classify_lsp_type,
     gp_predict,
     running_in_notebook,
 )
@@ -217,6 +219,8 @@ __all__ = [
     'plot_candidate_uncertainty',
     'plot_iteration_metrics',
     'plot_advanced_diagnostics',
+    'plot_eval_scatterplots',
+    'classify_lsp_type',
     'gp_predict',
     'running_in_notebook',
 

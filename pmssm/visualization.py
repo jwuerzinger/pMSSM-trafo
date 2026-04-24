@@ -117,7 +117,66 @@ def plot_losses(train_losses, val_losses, model_name, plot_dir="plots"):
 
 # ===== Prediction Comparisons =====
 
-def scatter_true_vs_pred(y_true, y_pred, mode, model_name, plot_dir="plots"):
+# LSP neutralino composition is classified from the mixing-matrix fractions
+# (bino, wino, higgsino), computed by the ntupler as N_11^2, N_12^2, N_13^2+N_14^2.
+# The dominant fraction wins when it reaches LSP_PURITY_MIN; otherwise the row
+# is "mixed" (no single component dominates). Rows with NaN fractions
+# (non-neutralino LSP or missing branches) are labelled -1 and skipped in plots.
+LSP_TYPE_NAMES = {0: 'bino', 1: 'wino', 2: 'higgsino', 3: 'mixed'}
+LSP_TYPE_COLORS = {0: 'tab:blue', 1: 'tab:orange', 2: 'tab:green', 3: 'tab:red'}
+LSP_PURITY_MIN = 0.8
+
+
+def classify_lsp_type(lsp_fracs):
+    """Classify LSP type (0=bino, 1=wino, 2=higgsino, 3=mixed, -1=unknown).
+
+    Mixed when the dominant fraction is below LSP_PURITY_MIN (default 0.8).
+
+    Args:
+        lsp_fracs: (N, 3) tensor/array with columns
+            [bino_frac, wino_frac, higgsino_frac]. NaN rows (non-neutralino
+            LSP / missing branches) are labelled -1.
+
+    Returns:
+        numpy int array of shape (N,) with values in {-1, 0, 1, 2, 3}.
+    """
+    F = lsp_fracs.detach().cpu().numpy() if hasattr(lsp_fracs, 'detach') else np.asarray(lsp_fracs)
+    out = np.full(F.shape[0], -1, dtype=int)
+    valid = np.isfinite(F).all(axis=1)
+    if valid.any():
+        Fv = F[valid]
+        winner = np.argmax(Fv, axis=1)
+        top = np.take_along_axis(Fv, winner[:, None], axis=1).squeeze(1)
+        mixed = top < LSP_PURITY_MIN
+        out[valid] = np.where(mixed, 3, winner).astype(int)
+    return out
+
+
+def _scatter_colored_by_lsp(ax, y_true, y_pred, lsp_fracs, alpha=0.5, s=4,
+                            legend=True, **kwargs):
+    """Scatter y_pred vs y_true on `ax`, colored by LSP type from lsp_fracs.
+
+    Rows with NaN fractions (classified -1) are skipped.
+    """
+    labels = classify_lsp_type(lsp_fracs)
+    y_true = np.asarray(y_true)
+    y_pred = np.asarray(y_pred)
+    plotted = []
+    for k in (0, 1, 2, 3):
+        m = labels == k
+        if not m.any():
+            continue
+        ax.scatter(y_true[m], y_pred[m], color=LSP_TYPE_COLORS[k],
+                   label=f"{LSP_TYPE_NAMES[k]} (n={int(m.sum())})",
+                   alpha=alpha, s=s, **kwargs)
+        plotted.append(k)
+    if legend and plotted:
+        ax.legend(fontsize=8, loc='best', framealpha=0.8)
+    return plotted
+
+
+def scatter_true_vs_pred(y_true, y_pred, mode, model_name, plot_dir="plots",
+                          lsp_fracs=None):
     """
     Scatter plot of true vs predicted values.
 
@@ -127,9 +186,10 @@ def scatter_true_vs_pred(y_true, y_pred, mode, model_name, plot_dir="plots"):
         mode: 'validation' or 'train'
         model_name: Model name string for filename
         plot_dir: Directory to save plot
+        lsp_fracs: Optional (N, 3) tensor of [bino, wino, higgsino] fractions;
+            when provided, points are colored by dominant LSP component.
     """
     title = "Validation set" if mode == "validation" else "Training set"
-    color = 'orange' if mode == 'validation' else None
 
     # Convert to numpy if tensor
     if hasattr(y_true, 'numpy'):
@@ -137,24 +197,116 @@ def scatter_true_vs_pred(y_true, y_pred, mode, model_name, plot_dir="plots"):
     if hasattr(y_pred, 'numpy'):
         y_pred = y_pred.numpy()
 
-    plt.figure()
-    plt.scatter(y_true[:10_000], y_pred[:10_000], alpha=0.5, color=color)
-    plt.plot(
+    # Subsample consistently so LSP labels match plotted points
+    n = len(y_true)
+    if n > 10_000:
+        idx = np.random.default_rng(42).choice(n, 10_000, replace=False)
+        y_true = y_true[idx]
+        y_pred = y_pred[idx]
+        if lsp_fracs is not None:
+            F_sub = lsp_fracs.detach().cpu().numpy() if hasattr(lsp_fracs, 'detach') else np.asarray(lsp_fracs)
+            lsp_fracs = F_sub[idx]
+
+    fig, ax = plt.subplots()
+    if lsp_fracs is not None:
+        _scatter_colored_by_lsp(ax, y_true, y_pred, lsp_fracs, alpha=0.5, s=10)
+    else:
+        color = 'orange' if mode == 'validation' else None
+        ax.scatter(y_true, y_pred, alpha=0.5, color=color)
+    ax.plot(
         [min(y_true), max(y_true)],
         [min(y_true), max(y_true)],
         linestyle='--', color='grey'
     )
-    plt.xlabel("True Ωh²")
-    plt.ylabel("Predicted Ωh²")
-    plt.title(f"True vs Predicted Ωh² ({title})")
-    plt.tight_layout()
+    ax.set_xlabel("True Ωh²")
+    ax.set_ylabel("Predicted Ωh²")
+    ax.set_title(f"True vs Predicted Ωh² ({title})")
+    fig.tight_layout()
 
     if not running_in_notebook():
-        plt.savefig(f"{plot_dir}/{model_name}_true_vs_pred_{mode}.png",
+        fig.savefig(f"{plot_dir}/{model_name}_true_vs_pred_{mode}.png",
                     dpi=150, bbox_inches='tight')
-        plt.close()
+        plt.close(fig)
     else:
         plt.show()
+
+
+def plot_eval_scatterplots(eval_results, iteration, plot_dir, logger,
+                           max_points=10_000):
+    """Plot a grid of true-vs-predicted scatterplots for all model/dataset combinations.
+
+    Args:
+        eval_results: list of dicts with keys:
+            'model_name', 'dataset_name', 'y_true', 'y_pred', 'loss', 'r2', 'n'.
+            Optional 'lsp_fracs' (N, 3) → enables mixing-matrix LSP coloring.
+        iteration: current iteration number
+        plot_dir: directory to save the plot
+        logger: logger instance
+        max_points: max points to plot per panel (subsampled for speed)
+    """
+    if not eval_results:
+        return
+
+    model_names = list(dict.fromkeys(r['model_name'] for r in eval_results))
+    dataset_names = list(dict.fromkeys(r['dataset_name'] for r in eval_results))
+    n_rows = len(model_names)
+    n_cols = len(dataset_names)
+    lookup = {(r['model_name'], r['dataset_name']): r for r in eval_results}
+
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 5 * n_rows), squeeze=False)
+
+    for row, model_name in enumerate(model_names):
+        for col, dataset_name in enumerate(dataset_names):
+            ax = axes[row, col]
+            key = (model_name, dataset_name)
+            if key not in lookup:
+                ax.text(0.5, 0.5, "N/A", ha="center", va="center",
+                        fontsize=14, color="gray", transform=ax.transAxes)
+                ax.set_xlabel("True")
+                ax.set_ylabel("Predicted")
+                ax.set_title(f"{model_name} on {dataset_name}", fontsize=10)
+                continue
+
+            r = lookup[key]
+            y_true = r['y_true'].detach().numpy() if hasattr(r['y_true'], 'numpy') else r['y_true']
+            y_pred = r['y_pred'].detach().numpy() if hasattr(r['y_pred'], 'numpy') else r['y_pred']
+            fracs = r.get('lsp_fracs', None)
+            if fracs is not None and hasattr(fracs, 'detach'):
+                fracs = fracs.detach().cpu().numpy()
+            elif fracs is not None:
+                fracs = np.asarray(fracs)
+
+            if len(y_true) > max_points:
+                idx = np.random.default_rng(42).choice(len(y_true), max_points, replace=False)
+                y_true = y_true[idx]
+                y_pred = y_pred[idx]
+                if fracs is not None:
+                    fracs = fracs[idx]
+
+            if fracs is not None:
+                _scatter_colored_by_lsp(ax, y_true, y_pred, fracs,
+                                        alpha=0.3, s=4, rasterized=True)
+            else:
+                ax.scatter(y_true, y_pred, alpha=0.3, s=4, rasterized=True)
+            vmin = min(y_true.min(), y_pred.min())
+            vmax = max(y_true.max(), y_pred.max())
+            ax.plot([vmin, vmax], [vmin, vmax], '--', color='grey', lw=1)
+            ax.set_xlabel("True Omega h^2", fontsize=9)
+            ax.set_ylabel("Predicted Omega h^2", fontsize=9)
+            ax.set_title(
+                f"{model_name} on {dataset_name}\n"
+                f"MSE={r['loss']:.4f}, R2={r['r2']:.4f}, n={r['n']}",
+                fontsize=10
+            )
+            ax.grid(True, alpha=0.2)
+
+    fig.suptitle(f"Iteration {iteration} — True vs Predicted", fontsize=14, y=1.01)
+    plt.tight_layout()
+    out_path = plot_dir / f"scatterplots_iter_{iteration:03d}.png"
+    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    if logger is not None:
+        logger.info(f"Saved evaluation scatterplots to {out_path}")
 
 
 def hist_true_vs_pred(y_true, y_pred, mode, model_name, plot_dir="plots"):
@@ -701,7 +853,8 @@ def plot_iteration_metrics(iterations, al_metrics, baseline_metrics, output_dir,
 def plot_advanced_diagnostics(model, X_eval_norm, Y_eval_true, X_train_norm,
                               model_type, threshold, n_dim,
                               plots_dir, iteration, new_points_norm=None,
-                              jitter=1e-3, num_samples=8, logger=None):
+                              jitter=1e-3, num_samples=8, logger=None,
+                              lsp_fracs_eval=None):
     """
     Generate advanced diagnostic plots for GP models.
 
@@ -757,7 +910,11 @@ def plot_advanced_diagnostics(model, X_eval_norm, Y_eval_true, X_train_norm,
     fig, axes = plt.subplots(1, 3, figsize=(18, 5))
 
     # True vs predicted
-    axes[0].scatter(y_true.numpy(), mean.numpy(), alpha=0.3, s=5)
+    if lsp_fracs_eval is not None:
+        _scatter_colored_by_lsp(axes[0], y_true.numpy(), mean.numpy(),
+                                lsp_fracs_eval, alpha=0.3, s=5)
+    else:
+        axes[0].scatter(y_true.numpy(), mean.numpy(), alpha=0.3, s=5)
     lims = [min(y_true.min().item(), mean.min().item()),
             max(y_true.max().item(), mean.max().item())]
     axes[0].plot(lims, lims, 'r--', linewidth=1)
@@ -776,7 +933,11 @@ def plot_advanced_diagnostics(model, X_eval_norm, Y_eval_true, X_train_norm,
     axes[1].grid(True, alpha=0.3)
 
     # Residuals vs true
-    axes[2].scatter(y_true.numpy(), residuals, alpha=0.3, s=5)
+    if lsp_fracs_eval is not None:
+        _scatter_colored_by_lsp(axes[2], y_true.numpy(), residuals,
+                                lsp_fracs_eval, alpha=0.3, s=5, legend=False)
+    else:
+        axes[2].scatter(y_true.numpy(), residuals, alpha=0.3, s=5)
     axes[2].axhline(0, color='r', linestyle='--')
     axes[2].axhline(threshold, color='g', linestyle=':', label=f'threshold={threshold}')
     axes[2].set_xlabel('True (transformed)')

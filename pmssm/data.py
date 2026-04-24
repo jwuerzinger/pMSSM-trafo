@@ -33,7 +33,34 @@ def running_in_notebook():
 
 # ===== Data Loading =====
 
-def load_pmssm_data(n_datasets=-1, logger=None, plot_dir="plots", target="DMRD", data_dir="data/18387358"):
+LSP_FRAC_BRANCHES = ("SP_LSP_Bino_frac", "SP_LSP_Wino_frac", "SP_LSP_Higgsino_frac")
+
+
+def _load_lsp_fracs(trees, mask, logger=None):
+    """Read SP_LSP_{Bino,Wino,Higgsino}_frac for `trees` and apply `mask`.
+
+    When a branch is missing or the LSP is not a neutralino, the ntupler leaves
+    the entry at its initial value; we coerce to NaN so downstream coloring
+    can skip those rows cleanly.
+    """
+    cols = []
+    for b in LSP_FRAC_BRANCHES:
+        try:
+            arr = np.concatenate([t[b].array(library="np") for t in trees]).astype(np.float32)
+        except Exception as e:
+            if logger:
+                logger.warning(f"Missing LSP fraction branch '{b}' ({e}); filling with NaN")
+            arr = np.full(mask.shape, np.nan, dtype=np.float32)
+        cols.append(arr)
+    fracs = np.stack(cols, axis=1)[mask]
+    bad = (~np.isfinite(fracs).all(axis=1)) | (fracs < 0).any(axis=1)
+    if bad.any():
+        fracs[bad] = np.nan
+    return torch.from_numpy(fracs).float()
+
+
+def load_pmssm_data(n_datasets=-1, logger=None, plot_dir="plots", target="DMRD",
+                    data_dir="data/18387358", return_lsp_fracs=False):
     """
     Load pMSSM ROOT data with combined filter.
 
@@ -48,10 +75,13 @@ def load_pmssm_data(n_datasets=-1, logger=None, plot_dir="plots", target="DMRD",
         plot_dir: Directory to save histogram plot
         target: Target variable name (default: "DMRD")
         data_dir: Directory containing ROOT files (default: "data/18387358")
+        return_lsp_fracs: If True, also return (N, 3) tensor of neutralino
+            [bino, wino, higgsino] fractions from the mixing matrix.
 
     Returns:
         X: Input tensor (N, 19) in physical units
         Y: Target tensor (N, 1) in physical units
+        lsp_fracs: (N, 3) tensor (only if return_lsp_fracs=True)
     """
     import uproot
 
@@ -98,10 +128,13 @@ def load_pmssm_data(n_datasets=-1, logger=None, plot_dir="plots", target="DMRD",
     X = torch.from_numpy(X_raw[mask]).float()
     Y = torch.from_numpy(Y_raw[mask]).float().unsqueeze(1)
 
+    if return_lsp_fracs:
+        return X, Y, _load_lsp_fracs(trees, mask, logger=logger)
     return X, Y
 
 
-def load_mcmc_data(data_dir="data/19250082", target="DMRD", logger=None):
+def load_mcmc_data(data_dir="data/19250082", target="DMRD", logger=None,
+                   return_lsp_fracs=False):
     """
     Load MCMC ROOT data with the same filters as load_pmssm_data.
 
@@ -109,10 +142,13 @@ def load_mcmc_data(data_dir="data/19250082", target="DMRD", logger=None):
         data_dir: Directory containing MCMC ROOT files
         target: Target variable name (default: "DMRD")
         logger: Logger instance for output
+        return_lsp_fracs: If True, also return (N, 3) tensor of neutralino
+            [bino, wino, higgsino] fractions from the mixing matrix.
 
     Returns:
         X: Input tensor (N, 19) in physical units
         Y: Target tensor (N, 1) in physical units
+        lsp_fracs: (N, 3) tensor (only if return_lsp_fracs=True)
     """
     import uproot
 
@@ -165,6 +201,8 @@ def load_mcmc_data(data_dir="data/19250082", target="DMRD", logger=None):
     X = torch.from_numpy(X_raw[mask]).float()
     Y = torch.from_numpy(Y_raw[mask]).float().unsqueeze(1)
 
+    if return_lsp_fracs:
+        return X, Y, _load_lsp_fracs(trees, mask, logger=logger)
     return X, Y
 
 

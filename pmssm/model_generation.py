@@ -171,18 +171,25 @@ def generate_models_from_csv(csv_path, output_dir, logger, n_workers=1):
     return ntuple_paths
 
 
-def load_generated_data(ntuple_path, logger):
+def load_generated_data(ntuple_path, logger, return_lsp_fracs=False):
     """
     Load newly generated data from ROOT ntuple.
 
     Args:
         ntuple_path: Path to generated ROOT file
         logger: Logger instance
+        return_lsp_fracs: If True, also return (N, 3) tensor of neutralino
+            [bino, wino, higgsino] fractions; NaN rows when LSP is not a
+            neutralino or fraction branches are missing.
 
     Returns:
-        X, Y tensors or None, None if loading failed
+        (X, Y) tensors — or (X, Y, lsp_fracs) when return_lsp_fracs=True.
+        Returns (None, None[, None]) if loading failed.
     """
     import uproot
+
+    def _none_return():
+        return (None, None, None) if return_lsp_fracs else (None, None)
 
     try:
         root_file = uproot.open(str(ntuple_path))
@@ -194,7 +201,7 @@ def load_generated_data(ntuple_path, logger):
             if required not in tree.keys():
                 logger.warning(f"{required} not found in ntuple - SPheno or micromegas may have failed for all models")
                 logger.warning("No new training data available from this generation")
-                return None, None
+                return _none_return()
 
         # Extract input parameters (same order as PARAM_ORDER)
         branches = PARAM_ORDER
@@ -206,19 +213,32 @@ def load_generated_data(ntuple_path, logger):
         # Combined filter matching pmssm.load_pmssm_data:
         # valid relic density, sub-dominant DM, and valid Higgs mass
         mask = (Y > 0) & (Y < 1.0) & (sp_mh != -1)
-        X = torch.from_numpy(X[mask]).float()
-        Y = torch.from_numpy(Y[mask]).float().unsqueeze(1)
+        X_t = torch.from_numpy(X[mask]).float()
+        Y_t = torch.from_numpy(Y[mask]).float().unsqueeze(1)
 
-        if len(X) == 0:
+        if len(X_t) == 0:
             logger.warning("No valid models found after filtering (MO_Omega > 0 & < 1 & SP_m_h != -1)")
-            return None, None
+            return _none_return()
 
-        logger.info(f"Loaded {len(X)} valid models from ntuple (filtered from {len(mask)} total)")
-        return X, Y
+        logger.info(f"Loaded {len(X_t)} valid models from ntuple (filtered from {len(mask)} total)")
+
+        if return_lsp_fracs:
+            cols = []
+            for b in ("SP_LSP_Bino_frac", "SP_LSP_Wino_frac", "SP_LSP_Higgsino_frac"):
+                if b in tree.keys():
+                    cols.append(tree[b].array(library="np").astype(np.float32))
+                else:
+                    cols.append(np.full(mask.shape, np.nan, dtype=np.float32))
+            fracs = np.stack(cols, axis=1)[mask]
+            bad = (~np.isfinite(fracs).all(axis=1)) | (fracs < 0).any(axis=1)
+            if bad.any():
+                fracs[bad] = np.nan
+            return X_t, Y_t, torch.from_numpy(fracs).float()
+        return X_t, Y_t
 
     except Exception as e:
         logger.error(f"Failed to load generated data: {e}")
-        return None, None
+        return _none_return()
 
 
 def save_selected_points(X_candidates, uncertainties, indices, output_dir, iteration):

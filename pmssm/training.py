@@ -158,7 +158,7 @@ def train_model_worker(gpu_id, X, Y, idx_train, idx_val, epochs, dropout,
                       result_queue, model_name="model", log_dir=None,
                       plots_dir=None, checkpoint_path=None,
                       warm_start_path=None, early_stopping=True, patience=200,
-                      y_transform='zscore', target='DMRD'):
+                      y_transform='zscore', target='DMRD', lsp_fracs=None):
     """
     Worker function for multiprocessing transformer training.
 
@@ -348,14 +348,19 @@ def train_model_worker(gpu_id, X, Y, idx_train, idx_val, epochs, dropout,
             n_points=min(3, len(val_dataset)), logger=logger
         )
 
-        # Scatter plots
+        # Scatter plots — use mixing-matrix LSP fractions if the worker was
+        # given them, otherwise fall back to a single-color scatter.
+        _F_train = lsp_fracs[idx_train] if lsp_fracs is not None else None
+        _F_val = lsp_fracs[idx_val] if lsp_fracs is not None else None
         scatter_true_vs_pred(
             Y_train_true, Y_train_pred, mode='train',
-            model_name=get_model_name(model), plot_dir=str(plots_dir)
+            model_name=get_model_name(model), plot_dir=str(plots_dir),
+            lsp_fracs=_F_train,
         )
         scatter_true_vs_pred(
             Y_true, Y_pred, mode='validation',
-            model_name=get_model_name(model), plot_dir=str(plots_dir)
+            model_name=get_model_name(model), plot_dir=str(plots_dir),
+            lsp_fracs=_F_val,
         )
 
         # Histogram plots
@@ -543,7 +548,7 @@ def train_gp_worker(gpu_id, X, Y, X_val, Y_val, data_min, data_max,
                     log_dir=None, plots_dir=None,
                     checkpoint_path=None, num_samples=8,
                     warm_start_path=None, target="DMRD",
-                    patience=None):
+                    patience=None, lsp_fracs=None, lsp_fracs_val=None):
     """
     Worker function for GP training (multiprocessing).
 
@@ -692,9 +697,11 @@ def train_gp_worker(gpu_id, X, Y, X_val, Y_val, data_min, data_max,
 
         # Scatter: true vs predicted (train & validation)
         scatter_true_vs_pred(
-            y_true_train_phys, y_pred_train_phys, "train", model_type, str(plots_dir))
+            y_true_train_phys, y_pred_train_phys, "train", model_type, str(plots_dir),
+            lsp_fracs=lsp_fracs)
         scatter_true_vs_pred(
-            y_true_val_phys, y_pred_val_phys, "validation", model_type, str(plots_dir))
+            y_true_val_phys, y_pred_val_phys, "validation", model_type, str(plots_dir),
+            lsp_fracs=lsp_fracs_val)
 
         # 2D histogram: true vs predicted (train & validation)
         hist_true_vs_pred(

@@ -63,6 +63,7 @@ from pmssm import (
     plot_parallel_coordinates,
     plot_candidate_uncertainty,
     plot_iteration_metrics,
+    plot_eval_scatterplots,
     # Logging
     setup_logging,
     setup_worker_logging,
@@ -126,79 +127,6 @@ def cross_evaluate_transformer(model, stats, X_other, Y_other,
     if return_predictions:
         return mse, r2, Y_true_phys.squeeze(), Y_pred_phys.squeeze()
     return mse, r2
-
-
-def plot_eval_scatterplots(eval_results, iteration, plot_dir, logger, max_points=10_000):
-    """Plot a grid of true-vs-predicted scatterplots for all model/dataset combinations.
-
-    Args:
-        eval_results: list of dicts with keys:
-            'model_name', 'dataset_name', 'y_true', 'y_pred', 'loss', 'r2'
-        iteration: current iteration number
-        plot_dir: directory to save the plot
-        logger: logger instance
-        max_points: max points to plot per panel (subsampled for speed)
-    """
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    n = len(eval_results)
-    if n == 0:
-        return
-
-    # Layout: one row per model, one column per dataset
-    model_names = list(dict.fromkeys(r['model_name'] for r in eval_results))
-    dataset_names = list(dict.fromkeys(r['dataset_name'] for r in eval_results))
-    n_rows = len(model_names)
-    n_cols = len(dataset_names)
-
-    # Build lookup
-    lookup = {(r['model_name'], r['dataset_name']): r for r in eval_results}
-
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 5 * n_rows), squeeze=False)
-
-    for row, model_name in enumerate(model_names):
-        for col, dataset_name in enumerate(dataset_names):
-            ax = axes[row, col]
-            key = (model_name, dataset_name)
-            if key not in lookup:
-                ax.text(0.5, 0.5, "N/A", ha="center", va="center",
-                        fontsize=14, color="gray", transform=ax.transAxes)
-                ax.set_xlabel("True")
-                ax.set_ylabel("Predicted")
-                ax.set_title(f"{model_name} on {dataset_name}", fontsize=10)
-                continue
-
-            r = lookup[key]
-            y_true = r['y_true'].detach().numpy() if hasattr(r['y_true'], 'numpy') else r['y_true']
-            y_pred = r['y_pred'].detach().numpy() if hasattr(r['y_pred'], 'numpy') else r['y_pred']
-
-            # Subsample for plotting speed
-            if len(y_true) > max_points:
-                idx = np.random.default_rng(42).choice(len(y_true), max_points, replace=False)
-                y_true = y_true[idx]
-                y_pred = y_pred[idx]
-
-            ax.scatter(y_true, y_pred, alpha=0.3, s=4, rasterized=True)
-            vmin = min(y_true.min(), y_pred.min())
-            vmax = max(y_true.max(), y_pred.max())
-            ax.plot([vmin, vmax], [vmin, vmax], '--', color='grey', lw=1)
-            ax.set_xlabel("True Omega h^2", fontsize=9)
-            ax.set_ylabel("Predicted Omega h^2", fontsize=9)
-            ax.set_title(
-                f"{model_name} on {dataset_name}\n"
-                f"MSE={r['loss']:.4f}, R2={r['r2']:.4f}, n={r['n']}",
-                fontsize=10
-            )
-            ax.grid(True, alpha=0.2)
-
-    fig.suptitle(f"Iteration {iteration} — True vs Predicted", fontsize=14, y=1.01)
-    plt.tight_layout()
-    out_path = plot_dir / f"scatterplots_iter_{iteration:03d}.png"
-    plt.savefig(out_path, dpi=150, bbox_inches="tight")
-    plt.close()
-    logger.info(f"Saved evaluation scatterplots to {out_path}")
 
 
 def load_config_with_sweep(config_file, sweep_index=None):
@@ -465,25 +393,29 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
     plots_dir.mkdir(parents=True, exist_ok=True)
     if use_mcmc_loader:
         logger.info(f"Using load_mcmc_data (MCMC-specific filters) on {data_dir}")
-        X, Y = load_mcmc_data(data_dir=data_dir, logger=logger)
+        X, Y, F = load_mcmc_data(data_dir=data_dir, logger=logger, return_lsp_fracs=True)
     else:
-        X, Y = load_pmssm_data(n_datasets=n_datasets, logger=logger, plot_dir=str(plots_dir), data_dir=data_dir)
+        X, Y, F = load_pmssm_data(n_datasets=n_datasets, logger=logger,
+                                  plot_dir=str(plots_dir), data_dir=data_dir,
+                                  return_lsp_fracs=True)
 
     # Shuffle once up-front: loaders concatenate ROOT files (= MCMC chains)
     # in file order, so X[:n_samples] would otherwise draw from a single chain.
     _load_perm = torch.randperm(len(X), generator=torch.Generator().manual_seed(seed))
     X = X[_load_perm]
     Y = Y[_load_perm]
+    F = F[_load_perm]
     logger.info(f"Shuffled loaded dataset ({len(X)} samples, seed={seed})")
 
     # Load MCMC evaluation dataset if provided
-    X_mcmc, Y_mcmc = None, None
+    X_mcmc, Y_mcmc, F_mcmc = None, None, None
     if mcmc_data_dir is not None:
-        X_mcmc, Y_mcmc = load_mcmc_data(data_dir=mcmc_data_dir, logger=logger)
+        X_mcmc, Y_mcmc, F_mcmc = load_mcmc_data(data_dir=mcmc_data_dir, logger=logger,
+                                                return_lsp_fracs=True)
         logger.info(f"MCMC evaluation dataset: {len(X_mcmc)} samples from {mcmc_data_dir}")
 
     # Store full dataset for baseline random sampling (before any truncation)
-    X_full, Y_full = X.clone(), Y.clone()
+    X_full, Y_full, F_full = X.clone(), Y.clone(), F.clone()
 
     # Select n_samples from loaded data (or use all), then split 80/20 into train/val.
     if n_samples is not None:
@@ -491,9 +423,11 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
             raise ValueError(f"n_samples={n_samples} exceeds available data ({len(X)})")
         X = X[:n_samples].clone()
         Y = Y[:n_samples].clone()
+        F = F[:n_samples].clone()
     else:
         X = X.clone()
         Y = Y.clone()
+        F = F.clone()
 
     # Split initial data into train/val using val_fraction
     n_total_init = len(X)
@@ -507,8 +441,10 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
 
     X_val = X[idx_val_perm].clone()
     Y_val = Y[idx_val_perm].clone()
+    F_val = F[idx_val_perm].clone()
     X = X[idx_train_perm].clone()
     Y = Y[idx_train_perm].clone()
+    F = F[idx_train_perm].clone()
 
     logger.info(f"Initial split ({1-val_fraction:.0%} train / {val_fraction:.0%} val): "
                 f"{len(X)} train + {len(X_val)} val = {n_total_init} total")
@@ -521,7 +457,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
     logger.info(f"Baseline pool: X_full={X_full.shape}, reserved [0..{initial_reserved-1}] excluded from sampling")
 
     # Carve out static random evaluation set from X_full (after initial reserved block)
-    X_static_random, Y_static_random = None, None
+    X_static_random, Y_static_random, F_static_random = None, None, None
     static_random_indices = torch.tensor([], dtype=torch.long)
     if static_eval_size > 0:
         available_for_static = len(X_full) - initial_reserved
@@ -538,6 +474,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
             static_random_indices = perm_static[:actual_static_size] + initial_reserved
             X_static_random = X_full[static_random_indices].clone()
             Y_static_random = Y_full[static_random_indices].clone()
+            F_static_random = F_full[static_random_indices].clone()
             logger.info(
                 f"Static random evaluation set: {len(X_static_random)} samples "
                 f"(carved from indices {initial_reserved}..{len(X_full)-1})"
@@ -611,6 +548,11 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
         # Restore accumulated data
         X, Y = saved["X"], saved["Y"]
         X_val, Y_val = saved["X_val"], saved["Y_val"]
+        # Older checkpoints may predate LSP-fraction plumbing; fall back to NaN
+        # so scatter plots in the resumed run simply show one (uncolored) cluster
+        # until new fractions start arriving with generated data.
+        F = saved.get("F", torch.full((len(X), 3), float('nan')))
+        F_val = saved.get("F_val", torch.full((len(X_val), 3), float('nan')))
         baseline_add_indices = saved["baseline_add_indices"]
         prev_n_add_train = saved["prev_n_add_train"]
         prev_n_add_val = saved["prev_n_add_val"]
@@ -674,12 +616,16 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
             Y_baseline_train = Y[:0].clone()
             X_baseline_val = X_val[:0].clone()
             Y_baseline_val = Y_val[:0].clone()
+            F_baseline_train = F[:0].clone()
+            F_baseline_val = F_val[:0].clone()
         elif iteration == 1:
             # First iteration: Baseline is an exact copy of AL (same train/val split).
             X_baseline_train = X.clone()
             Y_baseline_train = Y.clone()
             X_baseline_val = X_val.clone()
             Y_baseline_val = Y_val.clone()
+            F_baseline_train = F.clone()
+            F_baseline_val = F_val.clone()
             logger.info(f"Iteration 1: Both models use identical data "
                         f"({len(X_baseline_train)} train + {len(X_baseline_val)} val)")
         else:
@@ -724,11 +670,14 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
 
             X_add = X_full[baseline_add_indices]
             Y_add = Y_full[baseline_add_indices]
+            F_add = F_full[baseline_add_indices]
 
             X_baseline_train = torch.cat([X[:n_train_init], X_add[:n_add_train]])
             Y_baseline_train = torch.cat([Y[:n_train_init], Y_add[:n_add_train]])
+            F_baseline_train = torch.cat([F[:n_train_init], F_add[:n_add_train]])
             X_baseline_val = torch.cat([X_val[:n_val_init], X_add[n_add_train:]])
             Y_baseline_val = torch.cat([Y_val[:n_val_init], Y_add[n_add_train:]])
+            F_baseline_val = torch.cat([F_val[:n_val_init], F_add[n_add_train:]])
             logger.info(f"Baseline dataset: {n_train_init}+{n_add_train}={len(X_baseline_train)} train, "
                         f"{n_val_init}+{n_add_val}={len(X_baseline_val)} val")
 
@@ -736,11 +685,13 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
         # Train indices come first, then val — contiguous and non-overlapping by construction.
         X_combined = torch.cat([X, X_val], dim=0)
         Y_combined = torch.cat([Y, Y_val], dim=0)
+        F_combined = torch.cat([F, F_val], dim=0)
         idx_train_al = torch.arange(len(X))
         idx_val_al = torch.arange(len(X), len(X_combined))
 
         X_baseline_combined = torch.cat([X_baseline_train, X_baseline_val], dim=0)
         Y_baseline_combined = torch.cat([Y_baseline_train, Y_baseline_val], dim=0)
+        F_baseline_combined = torch.cat([F_baseline_train, F_baseline_val], dim=0)
         idx_train_base = torch.arange(len(X_baseline_train))
         idx_val_base = torch.arange(len(X_baseline_train), len(X_baseline_combined))
 
@@ -792,7 +743,8 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
             al_queue = mp.Queue()
             train_model_worker(device, X_combined, Y_combined, idx_train_al, idx_val_al, epochs, dropout,
                              al_queue, "AL", iter_dir, iter_plots_dir, al_checkpoint_path,
-                             al_warm_start, early_stopping, patience, y_transform, "DMRD")
+                             al_warm_start, early_stopping, patience, y_transform, "DMRD",
+                             F_combined)
             al_results = al_queue.get()
             baseline_results = dict(nan_baseline_results)
         elif use_parallel:
@@ -804,14 +756,14 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
                 target=train_model_worker,
                 args=(AL_GPU_ID, X_combined, Y_combined, idx_train_al, idx_val_al, epochs, dropout, al_queue, "AL",
                       iter_dir, iter_plots_dir, al_checkpoint_path, al_warm_start,
-                      early_stopping, patience, y_transform, "DMRD")
+                      early_stopping, patience, y_transform, "DMRD", F_combined)
             )
             baseline_process = mp.Process(
                 target=train_model_worker,
                 args=(BASELINE_GPU_ID, X_baseline_combined, Y_baseline_combined, idx_train_base, idx_val_base, epochs,
                       dropout, baseline_queue, "Baseline", iter_dir, iter_plots_dir,
                       baseline_checkpoint_path, baseline_warm_start, early_stopping, patience,
-                      y_transform, "DMRD")
+                      y_transform, "DMRD", F_baseline_combined)
             )
 
             al_process.start()
@@ -830,7 +782,8 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
             al_queue = mp.Queue()
             train_model_worker(device, X_combined, Y_combined, idx_train_al, idx_val_al, epochs, dropout,
                              al_queue, "AL", iter_dir, iter_plots_dir, al_checkpoint_path,
-                             al_warm_start, early_stopping, patience, y_transform, "DMRD")
+                             al_warm_start, early_stopping, patience, y_transform, "DMRD",
+                             F_combined)
             al_results = al_queue.get()
 
             logger.info("Training Baseline model (random samples)...")
@@ -838,7 +791,8 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
             train_model_worker(device, X_baseline_combined, Y_baseline_combined, idx_train_base, idx_val_base,
                              epochs, dropout, baseline_queue, "Baseline", iter_dir,
                              iter_plots_dir, baseline_checkpoint_path, baseline_warm_start,
-                             early_stopping, patience, y_transform, "DMRD")
+                             early_stopping, patience, y_transform, "DMRD",
+                             F_baseline_combined)
             baseline_results = baseline_queue.get()
 
         # Log results
@@ -869,82 +823,105 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
         model.load_state_dict(torch.load(al_checkpoint_path, map_location=device))
         logger.info(f"Loaded AL model from {al_checkpoint_path} for MC Dropout uncertainty estimation")
 
-        # Cross-evaluation: each model on the other's validation set
-        al_cross_loss, al_cross_r2, al_cross_yt, al_cross_yp = cross_evaluate_transformer(
-            model, stats, X_baseline_val, Y_baseline_val,
-            y_transform=y_transform, target='DMRD', device=device, return_predictions=True)
-
-        baseline_stats = compute_stats(X_baseline_combined, Y_baseline_combined, idx_train_base)
-        baseline_model = PMSSMTransformerTabular(
-            d_model=128, nhead=4, num_layers=3, dim_feedforward=512, dropout=dropout)
-        baseline_model.load_state_dict(torch.load(baseline_checkpoint_path, map_location=device))
-        base_cross_loss, base_cross_r2, base_cross_yt, base_cross_yp = cross_evaluate_transformer(
-            baseline_model, baseline_stats, X_val, Y_val,
-            y_transform=y_transform, target='DMRD', device=device, return_predictions=True)
-
-        logger.info(f"Cross-eval: AL_on_base_val_loss={al_cross_loss:.6f}, AL_on_base_val_R²={al_cross_r2:.4f}, base_on_al_val_loss={base_cross_loss:.6f}, base_on_al_val_R²={base_cross_r2:.4f}")
-        al_on_base_val_losses.append(al_cross_loss)
-        al_on_base_val_r2.append(al_cross_r2)
-        base_on_al_val_losses.append(base_cross_loss)
-        base_on_al_val_r2.append(base_cross_r2)
-
-        # Collect scatterplot data: AL model on AL val, Baseline model on Base val
-        # (own-val predictions via cross_evaluate for consistency)
+        # AL own-val predictions (always computed — one scatter panel + metric).
         al_own_loss, al_own_r2, al_own_yt, al_own_yp = cross_evaluate_transformer(
             model, stats, X_val, Y_val,
-            y_transform=y_transform, target='DMRD', device=device, return_predictions=True)
-        base_own_loss, base_own_r2, base_own_yt, base_own_yp = cross_evaluate_transformer(
-            baseline_model, baseline_stats, X_baseline_val, Y_baseline_val,
             y_transform=y_transform, target='DMRD', device=device, return_predictions=True)
 
         scatter_results = [
             dict(model_name="AL", dataset_name="AL Val", y_true=al_own_yt, y_pred=al_own_yp,
-                 loss=al_own_loss, r2=al_own_r2, n=len(X_val)),
-            dict(model_name="AL", dataset_name="Base Val", y_true=al_cross_yt, y_pred=al_cross_yp,
-                 loss=al_cross_loss, r2=al_cross_r2, n=len(X_baseline_val)),
-            dict(model_name="Baseline", dataset_name="AL Val", y_true=base_cross_yt, y_pred=base_cross_yp,
-                 loss=base_cross_loss, r2=base_cross_r2, n=len(X_val)),
-            dict(model_name="Baseline", dataset_name="Base Val", y_true=base_own_yt, y_pred=base_own_yp,
-                 loss=base_own_loss, r2=base_own_r2, n=len(X_baseline_val)),
+                 loss=al_own_loss, r2=al_own_r2, n=len(X_val), lsp_fracs=F_val),
         ]
+
+        # Cross-eval and baseline-side scatter panels only when baseline was
+        # actually trained; otherwise X_baseline_val is empty and the baseline
+        # checkpoint doesn't exist. Metric lists get NaN-filled so row indices
+        # stay aligned across iterations.
+        baseline_model = None
+        baseline_stats = None
+        if train_baseline:
+            al_cross_loss, al_cross_r2, al_cross_yt, al_cross_yp = cross_evaluate_transformer(
+                model, stats, X_baseline_val, Y_baseline_val,
+                y_transform=y_transform, target='DMRD', device=device, return_predictions=True)
+
+            baseline_stats = compute_stats(X_baseline_combined, Y_baseline_combined, idx_train_base)
+            baseline_model = PMSSMTransformerTabular(
+                d_model=128, nhead=4, num_layers=3, dim_feedforward=512, dropout=dropout)
+            baseline_model.load_state_dict(torch.load(baseline_checkpoint_path, map_location=device))
+            base_cross_loss, base_cross_r2, base_cross_yt, base_cross_yp = cross_evaluate_transformer(
+                baseline_model, baseline_stats, X_val, Y_val,
+                y_transform=y_transform, target='DMRD', device=device, return_predictions=True)
+            base_own_loss, base_own_r2, base_own_yt, base_own_yp = cross_evaluate_transformer(
+                baseline_model, baseline_stats, X_baseline_val, Y_baseline_val,
+                y_transform=y_transform, target='DMRD', device=device, return_predictions=True)
+
+            logger.info(f"Cross-eval: AL_on_base_val_loss={al_cross_loss:.6f}, AL_on_base_val_R²={al_cross_r2:.4f}, base_on_al_val_loss={base_cross_loss:.6f}, base_on_al_val_R²={base_cross_r2:.4f}")
+            al_on_base_val_losses.append(al_cross_loss)
+            al_on_base_val_r2.append(al_cross_r2)
+            base_on_al_val_losses.append(base_cross_loss)
+            base_on_al_val_r2.append(base_cross_r2)
+
+            scatter_results.extend([
+                dict(model_name="AL", dataset_name="Base Val", y_true=al_cross_yt, y_pred=al_cross_yp,
+                     loss=al_cross_loss, r2=al_cross_r2, n=len(X_baseline_val), lsp_fracs=F_baseline_val),
+                dict(model_name="Baseline", dataset_name="AL Val", y_true=base_cross_yt, y_pred=base_cross_yp,
+                     loss=base_cross_loss, r2=base_cross_r2, n=len(X_val), lsp_fracs=F_val),
+                dict(model_name="Baseline", dataset_name="Base Val", y_true=base_own_yt, y_pred=base_own_yp,
+                     loss=base_own_loss, r2=base_own_r2, n=len(X_baseline_val), lsp_fracs=F_baseline_val),
+            ])
+        else:
+            al_on_base_val_losses.append(float('nan'))
+            al_on_base_val_r2.append(float('nan'))
+            base_on_al_val_losses.append(float('nan'))
+            base_on_al_val_r2.append(float('nan'))
 
         # Evaluate on MCMC static dataset
         if X_mcmc is not None:
             mcmc_loss_al, mcmc_r2_al, mcmc_yt_al, mcmc_yp_al = cross_evaluate_transformer(
                 model, stats, X_mcmc, Y_mcmc,
                 y_transform=y_transform, target='DMRD', device=device, return_predictions=True)
-            mcmc_loss_base, mcmc_r2_base, mcmc_yt_base, mcmc_yp_base = cross_evaluate_transformer(
-                baseline_model, baseline_stats, X_mcmc, Y_mcmc,
-                y_transform=y_transform, target='DMRD', device=device, return_predictions=True)
             al_on_mcmc_losses.append(mcmc_loss_al)
             al_on_mcmc_r2.append(mcmc_r2_al)
-            baseline_on_mcmc_losses.append(mcmc_loss_base)
-            baseline_on_mcmc_r2.append(mcmc_r2_base)
-            logger.info(f"MCMC eval: AL_loss={mcmc_loss_al:.6f}, AL_R²={mcmc_r2_al:.4f}, "
-                        f"Base_loss={mcmc_loss_base:.6f}, Base_R²={mcmc_r2_base:.4f}")
             scatter_results.append(dict(model_name="AL", dataset_name="MCMC",
-                y_true=mcmc_yt_al, y_pred=mcmc_yp_al, loss=mcmc_loss_al, r2=mcmc_r2_al, n=len(X_mcmc)))
-            scatter_results.append(dict(model_name="Baseline", dataset_name="MCMC",
-                y_true=mcmc_yt_base, y_pred=mcmc_yp_base, loss=mcmc_loss_base, r2=mcmc_r2_base, n=len(X_mcmc)))
+                y_true=mcmc_yt_al, y_pred=mcmc_yp_al, loss=mcmc_loss_al, r2=mcmc_r2_al, n=len(X_mcmc), lsp_fracs=F_mcmc))
+            if train_baseline:
+                mcmc_loss_base, mcmc_r2_base, mcmc_yt_base, mcmc_yp_base = cross_evaluate_transformer(
+                    baseline_model, baseline_stats, X_mcmc, Y_mcmc,
+                    y_transform=y_transform, target='DMRD', device=device, return_predictions=True)
+                baseline_on_mcmc_losses.append(mcmc_loss_base)
+                baseline_on_mcmc_r2.append(mcmc_r2_base)
+                logger.info(f"MCMC eval: AL_loss={mcmc_loss_al:.6f}, AL_R²={mcmc_r2_al:.4f}, "
+                            f"Base_loss={mcmc_loss_base:.6f}, Base_R²={mcmc_r2_base:.4f}")
+                scatter_results.append(dict(model_name="Baseline", dataset_name="MCMC",
+                    y_true=mcmc_yt_base, y_pred=mcmc_yp_base, loss=mcmc_loss_base, r2=mcmc_r2_base, n=len(X_mcmc), lsp_fracs=F_mcmc))
+            else:
+                baseline_on_mcmc_losses.append(float('nan'))
+                baseline_on_mcmc_r2.append(float('nan'))
+                logger.info(f"MCMC eval: AL_loss={mcmc_loss_al:.6f}, AL_R²={mcmc_r2_al:.4f}")
 
         # Evaluate on static random dataset
         if X_static_random is not None:
             static_loss_al, static_r2_al, static_yt_al, static_yp_al = cross_evaluate_transformer(
                 model, stats, X_static_random, Y_static_random,
                 y_transform=y_transform, target='DMRD', device=device, return_predictions=True)
-            static_loss_base, static_r2_base, static_yt_base, static_yp_base = cross_evaluate_transformer(
-                baseline_model, baseline_stats, X_static_random, Y_static_random,
-                y_transform=y_transform, target='DMRD', device=device, return_predictions=True)
             al_on_static_random_losses.append(static_loss_al)
             al_on_static_random_r2.append(static_r2_al)
-            baseline_on_static_random_losses.append(static_loss_base)
-            baseline_on_static_random_r2.append(static_r2_base)
-            logger.info(f"Static random eval: AL_loss={static_loss_al:.6f}, AL_R²={static_r2_al:.4f}, "
-                        f"Base_loss={static_loss_base:.6f}, Base_R²={static_r2_base:.4f}")
             scatter_results.append(dict(model_name="AL", dataset_name="Static Rnd",
-                y_true=static_yt_al, y_pred=static_yp_al, loss=static_loss_al, r2=static_r2_al, n=len(X_static_random)))
-            scatter_results.append(dict(model_name="Baseline", dataset_name="Static Rnd",
-                y_true=static_yt_base, y_pred=static_yp_base, loss=static_loss_base, r2=static_r2_base, n=len(X_static_random)))
+                y_true=static_yt_al, y_pred=static_yp_al, loss=static_loss_al, r2=static_r2_al, n=len(X_static_random), lsp_fracs=F_static_random))
+            if train_baseline:
+                static_loss_base, static_r2_base, static_yt_base, static_yp_base = cross_evaluate_transformer(
+                    baseline_model, baseline_stats, X_static_random, Y_static_random,
+                    y_transform=y_transform, target='DMRD', device=device, return_predictions=True)
+                baseline_on_static_random_losses.append(static_loss_base)
+                baseline_on_static_random_r2.append(static_r2_base)
+                logger.info(f"Static random eval: AL_loss={static_loss_al:.6f}, AL_R²={static_r2_al:.4f}, "
+                            f"Base_loss={static_loss_base:.6f}, Base_R²={static_r2_base:.4f}")
+                scatter_results.append(dict(model_name="Baseline", dataset_name="Static Rnd",
+                    y_true=static_yt_base, y_pred=static_yp_base, loss=static_loss_base, r2=static_r2_base, n=len(X_static_random), lsp_fracs=F_static_random))
+            else:
+                baseline_on_static_random_losses.append(float('nan'))
+                baseline_on_static_random_r2.append(float('nan'))
+                logger.info(f"Static random eval: AL_loss={static_loss_al:.6f}, AL_R²={static_r2_al:.4f}")
 
         plot_eval_scatterplots(scatter_results, iteration, iter_plots_dir, logger)
 
@@ -1122,12 +1099,12 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
         })
 
         # Generate new models if requested, with retry logic
-        new_X, new_Y = None, None
+        new_X, new_Y, new_F = None, None, None
         if generate_data:
             n_target = max(1, int(n_select * min_gen_fraction))
             logger.info(f"Generation target: {n_target} valid models ({min_gen_fraction*100:.0f}% of {n_select} selected, max {max_gen_attempts} attempts)")
 
-            collected_X, collected_Y = [], []
+            collected_X, collected_Y, collected_F = [], [], []
 
             for attempt in range(max_gen_attempts):
                 if attempt == 0:
@@ -1190,10 +1167,12 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
                 ntuple_paths = generate_models_from_csv(attempt_csv, attempt_dir, logger, n_workers=gen_workers)
 
                 for ntuple_path in ntuple_paths:
-                    batch_X, batch_Y = load_generated_data(ntuple_path, logger)
+                    batch_X, batch_Y, batch_F = load_generated_data(
+                        ntuple_path, logger, return_lsp_fracs=True)
                     if batch_X is not None and len(batch_X) > 0:
                         collected_X.append(batch_X)
                         collected_Y.append(batch_Y)
+                        collected_F.append(batch_F)
 
                 n_collected = sum(len(x) for x in collected_X)
                 logger.info(f"After attempt {attempt + 1}: {n_collected}/{n_target} target models collected")
@@ -1207,6 +1186,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
             if collected_X:
                 new_X = torch.cat(collected_X)
                 new_Y = torch.cat(collected_Y)
+                new_F = torch.cat(collected_F)
                 # Deduplicate: identical X rows from SPheno rounding can leak across train/val
                 _, unique_idx = np.unique(new_X.numpy(), axis=0, return_index=True)
                 if len(unique_idx) < len(new_X):
@@ -1214,6 +1194,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
                     unique_idx = torch.from_numpy(np.sort(unique_idx))
                     new_X = new_X[unique_idx]
                     new_Y = new_Y[unique_idx]
+                    new_F = new_F[unique_idx]
                 logger.info(f"Total generated: {len(new_X)} unique training points across {min(attempt + 1, max_gen_attempts)} attempt(s)")
                 all_selected_points[-1]["n_generated"] = len(new_X)
             else:
@@ -1235,6 +1216,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
                 logger.info(f"Removing {n_existing_dups} generated points that duplicate existing data")
                 new_X = new_X[novel_mask]
                 new_Y = new_Y[novel_mask]
+                new_F = new_F[novel_mask]
 
             if len(new_X) == 0:
                 logger.warning("All generated points were duplicates of existing data")
@@ -1243,14 +1225,17 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
                 perm_new = torch.randperm(len(new_X))
                 new_X = new_X[perm_new]
                 new_Y = new_Y[perm_new]
+                new_F = new_F[perm_new]
                 n_new_val = max(1, int(len(new_X) * val_fraction))
                 n_new_train = len(new_X) - n_new_val
                 logger.info(f"Augmenting AL: +{n_new_train} train, +{n_new_val} val "
                             f"(train: {len(X)}->{len(X)+n_new_train}, val: {len(X_val)}->{len(X_val)+n_new_val})")
                 X = torch.cat([X, new_X[:n_new_train]], dim=0)
                 Y = torch.cat([Y, new_Y[:n_new_train]], dim=0)
+                F = torch.cat([F, new_F[:n_new_train]], dim=0)
                 X_val = torch.cat([X_val, new_X[n_new_train:]], dim=0)
                 Y_val = torch.cat([Y_val, new_Y[n_new_train:]], dim=0)
+                F_val = torch.cat([F_val, new_F[n_new_train:]], dim=0)
 
                 # Plot new-points-only histograms for AL
                 idx_train_al_new = torch.arange(n_new_train)
@@ -1268,6 +1253,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
         save_state(output_dir, {
             "iteration": iteration,
             "X": X, "Y": Y, "X_val": X_val, "Y_val": Y_val,
+            "F": F, "F_val": F_val,
             "baseline_add_indices": baseline_add_indices,
             "prev_n_add_train": prev_n_add_train,
             "prev_n_add_val": prev_n_add_val,
