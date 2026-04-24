@@ -64,6 +64,8 @@ from pmssm import (
     plot_candidate_uncertainty,
     plot_iteration_metrics,
     plot_eval_scatterplots,
+    pick_representative_points,
+    plot_representative_trajectories,
     # Logging
     setup_logging,
     setup_worker_logging,
@@ -597,6 +599,32 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
         n_iterations = saved["iteration"] + n_additional_iterations
         logger.info(f"Resuming at iteration {start_iteration}, will run through {n_iterations}")
 
+    # ------------------------------------------------------------------
+    # Representative-points trajectory tracker (seeded, deterministic).
+    # Picks 1 point per LSP class nearest the target Ωh², plus the Ωh²-median
+    # row, from the MCMC eval pool (fallback: X_full). Same 5 inputs are
+    # evaluated with MC-Dropout every iteration so we can plot mean±1σ vs
+    # iteration for fixed anchors. Matches on resume because selection is
+    # deterministic given the same (X_mcmc, Y_mcmc) pool and target.
+    # ------------------------------------------------------------------
+    if X_mcmc is not None:
+        _repr_pool_X, _repr_pool_Y, _repr_pool_F = X_mcmc, Y_mcmc, F_mcmc
+        _repr_pool_source = "MCMC eval set"
+    else:
+        _repr_pool_X, _repr_pool_Y, _repr_pool_F = X_full, Y_full, F_full
+        _repr_pool_source = "X_full"
+    repr_points = pick_representative_points(
+        _repr_pool_X, _repr_pool_Y, _repr_pool_F, target_value, seed=seed
+    )
+    logger.info(
+        f"Representative points (from {_repr_pool_source}): "
+        + ", ".join(f"{lbl}@idx={i}:Ω={y.item():.4f}"
+                    for lbl, i, y in zip(repr_points['labels'],
+                                          repr_points['indices'],
+                                          repr_points['Y'].reshape(-1)))
+    )
+    repr_log = []
+
     for iteration in range(start_iteration, n_iterations + 1):
         logger.info(f"=== Global Iteration {iteration} ===")
 
@@ -712,8 +740,10 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
                              reference_X=X_static_random, reference_Y=Y_static_random, reference_label="Static Random")
         plot_parallel_coordinates(X_baseline_combined, idx_train_base, idx_val_base, baseline_hist_dir, "Baseline", iteration, logger)
 
-        # Plot new-points-only histograms for baseline (iteration 2+)
-        if iteration > 1 and len(new_idx) > 0:
+        # Plot new-points-only histograms for baseline (iteration 2+). `new_idx`
+        # is only assigned in the grow-baseline branch above, which is skipped
+        # when --no-train-baseline is set.
+        if train_baseline and iteration > 1 and len(new_idx) > 0:
             X_base_new = X_full[new_idx]
             Y_base_new = Y_full[new_idx]
             idx_train_base_new = torch.arange(n_new_train)
@@ -822,6 +852,18 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
         )
         model.load_state_dict(torch.load(al_checkpoint_path, map_location=device))
         logger.info(f"Loaded AL model from {al_checkpoint_path} for MC Dropout uncertainty estimation")
+
+        # Representative-points capture: MC-Dropout mean/var at the fixed anchors
+        # chosen before the iteration loop. Output is in transformed space; the
+        # end-of-run plot maps it to physical Ωh².
+        _rep_mean_t, _rep_var_t = compute_uncertainty_mc_dropout(
+            model, repr_points['X'], stats, mc_samples, device, logger=None
+        )
+        repr_log.append({
+            'iteration': int(iteration),
+            'mean': _rep_mean_t.squeeze(-1).cpu().numpy().tolist(),
+            'var':  _rep_var_t.squeeze(-1).cpu().numpy().tolist(),
+        })
 
         # AL own-val predictions (always computed — one scatter panel + metric).
         al_own_loss, al_own_r2, al_own_yt, al_own_yp = cross_evaluate_transformer(
@@ -1322,6 +1364,15 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
     else:
         logger.info(f"Single iteration - AL: val_loss={al_val_losses[0]:.6f}, R²={al_r2_scores[0]:.4f}")
         logger.info(f"Single iteration - Baseline: val_loss={baseline_val_losses[0]:.6f}, R²={baseline_r2_scores[0]:.4f}")
+
+    # Representative-points trajectory plot (+ CSV)
+    if repr_log:
+        _rep_out, _rep_csv = plot_representative_trajectories(
+            repr_log, repr_points['Y'], repr_points['cls'], repr_points['labels'],
+            target_value, output_dir, y_transform=y_transform, target='DMRD',
+        )
+        logger.info(f"Representative-points trajectory: {_rep_out}")
+        logger.info(f"Representative-points CSV: {_rep_csv}")
 
     # Save summary
     summary = {

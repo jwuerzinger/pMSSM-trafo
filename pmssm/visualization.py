@@ -953,3 +953,149 @@ def plot_advanced_diagnostics(model, X_eval_norm, Y_eval_true, X_train_norm,
 
     if logger:
         logger.info(f"Advanced diagnostic plots saved to {plots_dir}")
+
+
+# ===== Representative-point trajectory tracking =====
+
+def pick_representative_points(X, Y, lsp_fracs, target_value, seed=42):
+    """Pick up to 5 anchor points to track mean±var across AL iterations.
+
+    One point per LSP class (bino, wino, higgsino, mixed) — the point nearest
+    `target_value` within its class — plus the dataset median row. Classes not
+    represented in the pool are silently skipped.
+
+    Args:
+        X: (N, D) input tensor.
+        Y: (N, 1) target tensor in physical units.
+        lsp_fracs: (N, 3) tensor of [bino, wino, higgsino] fractions.
+        target_value: physical Ωh² target (anchors the per-class pick).
+        seed: unused tiebreaker RNG (kept for future extension).
+
+    Returns:
+        dict with X (k, D), Y (k, 1), lsp_fracs (k, 3), cls (k-list of int
+        class ids, -1=median), labels (k-list of str), indices (k-list).
+    """
+    X_np = X.detach().cpu().numpy() if hasattr(X, 'detach') else np.asarray(X)
+    Y_np = Y.detach().cpu().numpy().reshape(-1) if hasattr(Y, 'detach') else np.asarray(Y).reshape(-1)
+    cls_labels = classify_lsp_type(lsp_fracs)
+
+    picks = []  # (index, cls_id)
+    for cls in (0, 1, 2, 3):
+        mask = cls_labels == cls
+        if not mask.any():
+            continue
+        cls_idx = np.where(mask)[0]
+        best = int(cls_idx[np.argmin(np.abs(Y_np[cls_idx] - target_value))])
+        picks.append((best, cls))
+
+    median_idx = int(np.argmin(np.abs(Y_np - np.median(Y_np))))
+    picks.append((median_idx, -1))  # -1 marks "median row" (ignore LSP class)
+
+    idxs = [p[0] for p in picks]
+    cls_ids = [p[1] for p in picks]
+    names = [LSP_TYPE_NAMES.get(c, 'median') for c in cls_ids]
+    # Subscript consistently whether inputs are tensors or arrays
+    idx_t = torch.tensor(idxs, dtype=torch.long)
+    return {
+        'X': X[idx_t] if hasattr(X, '__getitem__') else torch.as_tensor(X_np[idx_t.numpy()]),
+        'Y': Y[idx_t] if hasattr(Y, '__getitem__') else torch.as_tensor(Y_np[idx_t.numpy()]).unsqueeze(1),
+        'lsp_fracs': lsp_fracs[idx_t],
+        'cls': cls_ids,
+        'labels': names,
+        'indices': idxs,
+    }
+
+
+def plot_representative_trajectories(repr_log, Y_true, cls_ids, labels,
+                                      target_value, plot_dir,
+                                      y_transform='zscore', target='DMRD'):
+    """Plot mean ± 1σ vs iteration for each representative point.
+
+    `repr_log` entries are computed in the model's **transformed** output space
+    (same space the MC-Dropout variance is measured in); this function maps
+    mean and mean±std back to physical Ωh² so the per-point true value is
+    directly comparable.
+
+    Args:
+        repr_log: list of dicts with keys 'iteration', 'mean' (k-list),
+            'var' (k-list). mean/var are in transformed space.
+        Y_true: (k,) or (k, 1) physical true Ωh² for the k anchor points.
+        cls_ids: k-list of LSP class ids (0-3) or -1 (median row).
+        labels: k-list of human-readable class names.
+        target_value: physical Ωh² reference line.
+        plot_dir: directory to save the figure (and CSV).
+        y_transform: 'log' or 'zscore' — matches the training y_transform.
+        target: target name for inverse_transform_y when y_transform='log'.
+    """
+    import pandas as pd
+    plot_dir = Path(plot_dir)
+    plot_dir.mkdir(parents=True, exist_ok=True)
+
+    iters = np.array([e['iteration'] for e in repr_log])
+    mean_t = np.array([e['mean'] for e in repr_log], dtype=float)   # (n_iter, k)
+    std_t = np.sqrt(np.clip(np.array([e['var'] for e in repr_log], dtype=float), 0, None))
+
+    # Map to physical space. For log-transform this is inverse_transform_y;
+    # the ±1σ bands become asymmetric, which is correct for log-space noise.
+    if y_transform == 'log':
+        from .data import inverse_transform_y
+        mean_p = inverse_transform_y(torch.from_numpy(mean_t), target=target).numpy()
+        upper_p = inverse_transform_y(torch.from_numpy(mean_t + std_t), target=target).numpy()
+        lower_p = inverse_transform_y(torch.from_numpy(mean_t - std_t), target=target).numpy()
+    else:
+        mean_p = mean_t
+        upper_p = mean_t + std_t
+        lower_p = mean_t - std_t
+
+    Y_phys = (Y_true.detach().cpu().numpy() if hasattr(Y_true, 'detach')
+              else np.asarray(Y_true)).reshape(-1)
+
+    # CSV persistence (long format)
+    rows = []
+    for ep, e in enumerate(repr_log):
+        for j in range(len(labels)):
+            rows.append({
+                'iteration': int(e['iteration']),
+                'point_idx': j,
+                'label': labels[j],
+                'cls': cls_ids[j],
+                'Y_true_phys': float(Y_phys[j]),
+                'mean_transformed': float(mean_t[ep, j]),
+                'var_transformed': float(std_t[ep, j] ** 2),
+                'mean_phys': float(mean_p[ep, j]),
+                'lower_phys': float(lower_p[ep, j]),
+                'upper_phys': float(upper_p[ep, j]),
+            })
+    csv_path = plot_dir / 'representative_trajectory.csv'
+    pd.DataFrame(rows).to_csv(csv_path, index=False)
+
+    k = len(labels)
+    n_cols = min(k, 3)
+    n_rows = int(np.ceil(k / n_cols))
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 4 * n_rows),
+                             squeeze=False, sharex=True)
+    axes = axes.flatten()
+    for i in range(k):
+        ax = axes[i]
+        c = LSP_TYPE_COLORS.get(cls_ids[i], 'gray')
+        ax.fill_between(iters, lower_p[:, i], upper_p[:, i], alpha=0.25, color=c)
+        ax.plot(iters, mean_p[:, i], 'o-', color=c, label='predicted mean')
+        ax.axhline(Y_phys[i], color='k', linestyle='--', linewidth=1,
+                   label=f'true Ωh² = {Y_phys[i]:.4f}')
+        ax.axhline(target_value, color='r', linestyle=':', linewidth=1,
+                   alpha=0.6, label=f'target = {target_value}')
+        ax.set_title(f'{labels[i]}  (Ωh²={Y_phys[i]:.4f})')
+        ax.set_xlabel('Iteration')
+        ax.set_ylabel('Predicted Ωh²')
+        ax.legend(fontsize=8)
+        ax.grid(alpha=0.2)
+    for j in range(k, len(axes)):
+        axes[j].axis('off')
+
+    fig.suptitle('Representative points: predicted mean ± 1σ vs iteration',
+                 fontsize=13, y=1.00)
+    fig.tight_layout()
+    out_path = plot_dir / 'representative_points_trajectory.png'
+    fig.savefig(out_path, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    return out_path, csv_path

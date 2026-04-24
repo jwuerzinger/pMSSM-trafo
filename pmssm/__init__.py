@@ -124,6 +124,8 @@ from .visualization import (
     plot_advanced_diagnostics,
     plot_eval_scatterplots,
     classify_lsp_type,
+    pick_representative_points,
+    plot_representative_trajectories,
     gp_predict,
     running_in_notebook,
 )
@@ -221,6 +223,8 @@ __all__ = [
     'plot_advanced_diagnostics',
     'plot_eval_scatterplots',
     'classify_lsp_type',
+    'pick_representative_points',
+    'plot_representative_trajectories',
     'gp_predict',
     'running_in_notebook',
 
