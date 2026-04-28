@@ -34,9 +34,12 @@ TERMINAL_FAILS = {"FAILED", "TIMEOUT", "CANCELLED", "CANCELLED+", "NODE_FAIL",
 # Statuses that never change again — safe to skip on a default refresh.
 # Anything else (running, pending, submitted, missing, etc.) can still
 # transition and should be re-checked regardless of sweep_id scope.
+# `superseded` is a manual marker for rows abandoned in favour of a newer
+# resubmission; without it here, the updater would re-poll sacct and clobber
+# the marker with whatever sacct still reports for the original job.
 TERMINAL_STATUSES = {"completed", "cancelled", "cancelled+", "failed",
                      "timeout", "node_fail", "out_of_memory",
-                     "boot_fail", "preempted"}
+                     "boot_fail", "preempted", "superseded"}
 
 
 def _sacct_state(job_id: str) -> str:
@@ -62,7 +65,7 @@ def _sacct_state(job_id: str) -> str:
 def _resolve_status(row) -> str:
     """Compute the new status for a single manifest row."""
     current = str(row.get("status", "submitted")).strip().lower()
-    if current == "completed":
+    if current in TERMINAL_STATUSES:
         return current
 
     run_dir = row.get("expected_run_dir")
