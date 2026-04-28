@@ -55,6 +55,8 @@ from pmssm import (
     plot_iteration_metrics,
     plot_advanced_diagnostics,
     plot_eval_scatterplots,
+    pick_representative_points,
+    plot_representative_trajectories,
     # Logging
     setup_logging,
     # Model generation
@@ -643,6 +645,32 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, v
                                                 return_lsp_fracs=True)
         logger.info(f"Loaded MCMC evaluation data: {len(X_mcmc)} samples")
 
+    # ------------------------------------------------------------------
+    # Representative-points trajectory tracker (seeded, deterministic).
+    # Picks 1 point per LSP class nearest the target Ωh², plus the Ωh²-median
+    # row, from the MCMC eval pool (fallback: X_full). Same anchors are
+    # evaluated by the AL GP every iteration so we can plot mean ± 1σ vs
+    # iteration. Symmetric to the transformer driver's tracker.
+    # ------------------------------------------------------------------
+    if X_mcmc is not None:
+        _repr_pool_X, _repr_pool_Y, _repr_pool_F = X_mcmc, Y_mcmc, F_mcmc
+        _repr_pool_source = "MCMC eval set"
+    else:
+        _repr_pool_X, _repr_pool_Y, _repr_pool_F = X_full, Y_full, F_full
+        _repr_pool_source = "X_full"
+    _target_value = TARGET_CONFIG[target]["true_value"]
+    repr_points = pick_representative_points(
+        _repr_pool_X, _repr_pool_Y, _repr_pool_F, _target_value, seed=seed
+    )
+    logger.info(
+        f"Representative points (from {_repr_pool_source}): "
+        + ", ".join(f"{lbl}@idx={i}:Ω={y.item():.4f}"
+                    for lbl, i, y in zip(repr_points['labels'],
+                                          repr_points['indices'],
+                                          repr_points['Y'].reshape(-1)))
+    )
+    repr_log = []
+
     # Carve out static random evaluation set from X_full (after initial reserved block)
     X_static_random, Y_static_random, F_static_random = None, None, None
     static_random_indices = torch.tensor([], dtype=torch.long)
@@ -1016,6 +1044,24 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, v
         _gp_eval_kw = dict(data_min=data_min, data_max=data_max, model_type=model_type,
                            jitter=jitter, num_samples=gp_num_samples, target=target,
                            return_predictions=True)
+
+        # Representative-points capture: GP posterior mean + variance at the fixed
+        # anchors chosen before the iteration loop. Output is in *transformed*
+        # (z-score) space — plot_representative_trajectories maps it back to physical
+        # Ωh² with `y_transform='zscore'`.
+        try:
+            _rep_mean_t, _rep_var_t = compute_uncertainty_gp(
+                al_model, repr_points['X'], data_min, data_max,
+                model_type=model_type, jitter=jitter, num_samples=gp_num_samples,
+                logger=None,
+            )
+            repr_log.append({
+                'iteration': int(iteration),
+                'mean': _rep_mean_t.detach().cpu().numpy().reshape(-1).tolist(),
+                'var':  _rep_var_t.detach().cpu().numpy().reshape(-1).tolist(),
+            })
+        except Exception as _e:
+            logger.warning(f"Representative-points capture failed at iter {iteration}: {_e}")
 
         al_cross_loss, al_cross_r2, al_cross_yt, al_cross_yp = cross_evaluate_gp(
             al_model, X_baseline_val, Y_baseline_val, **_gp_eval_kw)
@@ -1486,6 +1532,18 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, v
         ls_path = output_dir / "lengthscales.csv"
         pd.DataFrame(lengthscale_rows).to_csv(ls_path, index=False)
         logger.info(f"Lengthscales saved to {ls_path}")
+
+    # ---- Representative-points trajectory plot (+ CSV) ----
+    if repr_log:
+        try:
+            _rep_out, _rep_csv = plot_representative_trajectories(
+                repr_log, repr_points['Y'], repr_points['cls'], repr_points['labels'],
+                _target_value, output_dir, y_transform='zscore', target=target,
+            )
+            logger.info(f"Representative-points trajectory: {_rep_out}")
+            logger.info(f"Representative-points CSV: {_rep_csv}")
+        except Exception as _e:
+            logger.warning(f"Representative-points plot failed: {_e}")
 
     # ---- Save summary ----
     summary = {
