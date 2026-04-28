@@ -10,7 +10,7 @@ Based on active_learning.py — same loop structure, data generation, and evalua
 from pathlib import Path
 from datetime import datetime
 import logging
-import multiprocessing as mp
+from concurrent.futures import ThreadPoolExecutor
 import structlog
 import json
 import random
@@ -49,6 +49,8 @@ from pmssm import (
     plot_candidate_uncertainty,
     plot_iteration_metrics,
     plot_eval_scatterplots,
+    pick_representative_points,
+    plot_representative_trajectories,
     # Logging
     setup_logging,
     # Model generation
@@ -187,13 +189,15 @@ def cross_evaluate_tabpfn(model, X_other, Y_other,
 
 
 def _tabpfn_eval_worker(gpu_id, X_train, Y_train, eval_sets, candidates,
-                        target, name, out_queue):
+                        target, name, repr_X=None):
     """Fit a TabPFN model on its training set and evaluate on N held-out sets.
 
-    Runs entirely in a child process so the GPU binding is local. Returns all
-    results through ``out_queue`` as a dict keyed by eval-set name, each
-    holding loss / r2 / Y_true / Y_pred. ``train_loss`` / ``train_r2`` is
-    the self-eval on the training set.
+    Returns a dict keyed by eval-set name, each holding loss / r2 /
+    Y_true / Y_pred. ``train`` is the self-eval on the training set.
+    Designed to be called either directly (sequential) or via
+    ``concurrent.futures.ThreadPoolExecutor.submit`` for two-GPU concurrency
+    on the same node — threads share the parent's CUDA context, so binding
+    is by ``cuda:{gpu_id}`` argument with no spawn deadlock.
 
     eval_sets: list of ``(name, X, Y)`` tuples. Entries with X/Y == None are
     skipped — convenient for optional MCMC / static-random sets.
@@ -201,11 +205,12 @@ def _tabpfn_eval_worker(gpu_id, X_train, Y_train, eval_sets, candidates,
     candidates: optional tensor of candidate points. If provided, the worker
     also returns native-variance predictions on them, so the main process
     doesn't have to re-fit the model and re-run inference.
-    """
-    import torch as _torch
-    from tabpfn import TabPFNRegressor as _TabPFNRegressor  # noqa: F401 (ensures import happens in child)
 
-    device = f"cuda:{gpu_id}" if _torch.cuda.is_available() else "cpu"
+    repr_X: optional (k, D) tensor of representative anchor points. If given,
+    the worker returns mean+var predictions on them in log-transformed space
+    (matching y_transform='log' for the trajectory plotter).
+    """
+    device = f"cuda:{gpu_id}" if torch.cuda.is_available() else "cpu"
     t0 = time.time()
     model, _ = fit_tabpfn(X_train, Y_train, device=device)
     fit_time = time.time() - t0
@@ -232,7 +237,13 @@ def _tabpfn_eval_worker(gpu_id, X_train, Y_train, eval_sets, candidates,
     else:
         result['candidates'] = None
 
-    out_queue.put(result)
+    if repr_X is not None:
+        repr_mean, repr_var = tabpfn_predict_with_variance(model, repr_X)
+        result['repr'] = {'mean': repr_mean, 'var': repr_var}
+    else:
+        result['repr'] = None
+
+    return result
 
 
 def load_config_with_sweep(config_file, sweep_index=None):
@@ -445,16 +456,18 @@ def main(testing, n_iterations, n_candidates, n_select, n_ensemble_samples, n_da
     if torch.cuda.is_available():
         logger.info(f"GPU: {torch.cuda.get_device_name(AL_GPU_ID)}")
 
-    # Parallel fit+eval only when 2+ distinct GPUs are visible (otherwise fall
-    # back to sequential on the single device).
+    # Parallel fit+eval via ThreadPoolExecutor when 2+ distinct GPUs are
+    # visible; otherwise sequential on the single device. Threads (rather
+    # than mp.Process) avoid the ROCm/MI300A spawn-after-CUDA-init deadlock
+    # — the two threads share the parent's CUDA context, with binding
+    # selected per call by the worker's ``cuda:{gpu_id}`` argument.
     use_parallel = (
         torch.cuda.is_available()
         and torch.cuda.device_count() >= 2
         and AL_GPU_ID != BASELINE_GPU_ID
     )
     if use_parallel:
-        logger.info(f"Parallel TabPFN enabled: AL on cuda:{AL_GPU_ID}, Baseline on cuda:{BASELINE_GPU_ID}")
-        mp.set_start_method('spawn', force=True)
+        logger.info(f"Parallel TabPFN enabled (threads): AL on cuda:{AL_GPU_ID}, Baseline on cuda:{BASELINE_GPU_ID}")
     else:
         logger.info(f"Sequential TabPFN: both models on {device}")
 
@@ -483,6 +496,32 @@ def main(testing, n_iterations, n_candidates, n_select, n_ensemble_samples, n_da
 
     # Store full dataset for baseline random sampling (before any truncation)
     X_full, Y_full, F_full = X.clone(), Y.clone(), F.clone()
+
+    # ------------------------------------------------------------------
+    # Representative-points trajectory tracker (seeded, deterministic).
+    # Picks 1 point per LSP class nearest the target Ωh², plus the Ωh²-median
+    # row, from the MCMC eval pool (fallback: X_full). Symmetric to the
+    # transformer + GP drivers' trackers; predictions are in log-transformed
+    # space (TabPFN's training space).
+    # ------------------------------------------------------------------
+    if X_mcmc is not None:
+        _repr_pool_X, _repr_pool_Y, _repr_pool_F = X_mcmc, Y_mcmc, F_mcmc
+        _repr_pool_source = "MCMC eval set"
+    else:
+        _repr_pool_X, _repr_pool_Y, _repr_pool_F = X_full, Y_full, F_full
+        _repr_pool_source = "X_full"
+    _target_value = TARGET_CONFIG["DMRD"]["true_value"]
+    repr_points = pick_representative_points(
+        _repr_pool_X, _repr_pool_Y, _repr_pool_F, _target_value, seed=seed
+    )
+    logger.info(
+        f"Representative points (from {_repr_pool_source}): "
+        + ", ".join(f"{lbl}@idx={i}:Ω={y.item():.4f}"
+                    for lbl, i, y in zip(repr_points['labels'],
+                                          repr_points['indices'],
+                                          repr_points['Y'].reshape(-1)))
+    )
+    repr_log = []
 
     # Select n_samples from loaded data (or use all), then split 80/20 into train/val.
     if n_samples is not None:
@@ -749,8 +788,8 @@ def main(testing, n_iterations, n_candidates, n_select, n_ensemble_samples, n_da
                                  fixed_axes=True)
 
         # Generate candidate pool BEFORE the parallel fit+eval phase, so each
-        # worker can also predict (mean, var) on the candidates in the same
-        # subprocess. This avoids re-fitting either model in the main process
+        # worker thread can also predict (mean, var) on the candidates in the
+        # same call. This avoids re-fitting either model in the main thread
         # just to run inference for selection and uncertainty plots.
         logger.info(f"Generating {n_candidates} candidate points using {candidate_generation} sampling...")
         candidates = generate_candidate_pool(n_candidates, method=candidate_generation, seed=seed * 10_000 + iteration)
@@ -787,34 +826,38 @@ def main(testing, n_iterations, n_candidates, n_select, n_ensemble_samples, n_da
 
         t_fit0 = time.time()
         if use_parallel:
-            logger.info(f"Fitting+evaluating TabPFN AL on cuda:{AL_GPU_ID} and Baseline on cuda:{BASELINE_GPU_ID} in parallel...")
-            al_queue = mp.Queue()
-            base_queue = mp.Queue()
-            al_proc = mp.Process(
-                target=_tabpfn_eval_worker,
-                args=(AL_GPU_ID, X, Y, al_eval_sets, al_candidates, 'DMRD', 'AL', al_queue),
-            )
-            base_proc = mp.Process(
-                target=_tabpfn_eval_worker,
-                args=(BASELINE_GPU_ID, X_baseline_train, Y_baseline_train, base_eval_sets,
-                      candidates, 'DMRD', 'Baseline', base_queue),
-            )
-            al_proc.start()
-            base_proc.start()
-            # Drain queues before join to avoid pipe-buffer deadlocks.
-            al_res = al_queue.get()
-            base_res = base_queue.get()
-            al_proc.join()
-            base_proc.join()
+            logger.info(f"Fitting+evaluating TabPFN AL on cuda:{AL_GPU_ID} and Baseline on cuda:{BASELINE_GPU_ID} in parallel threads...")
+            with ThreadPoolExecutor(max_workers=2) as ex:
+                al_fut = ex.submit(
+                    _tabpfn_eval_worker,
+                    AL_GPU_ID, X, Y, al_eval_sets, al_candidates, 'DMRD', 'AL',
+                    repr_X=repr_points['X'],
+                )
+                base_fut = ex.submit(
+                    _tabpfn_eval_worker,
+                    BASELINE_GPU_ID, X_baseline_train, Y_baseline_train, base_eval_sets,
+                    candidates, 'DMRD', 'Baseline',
+                )
+                al_res = al_fut.result()
+                base_res = base_fut.result()
         else:
             logger.info(f"Fitting+evaluating TabPFN AL then Baseline sequentially on {device}...")
-            al_queue = mp.Queue()
-            _tabpfn_eval_worker(AL_GPU_ID, X, Y, al_eval_sets, al_candidates, 'DMRD', 'AL', al_queue)
-            al_res = al_queue.get()
-            base_queue = mp.Queue()
-            _tabpfn_eval_worker(BASELINE_GPU_ID, X_baseline_train, Y_baseline_train, base_eval_sets,
-                               candidates, 'DMRD', 'Baseline', base_queue)
-            base_res = base_queue.get()
+            al_res = _tabpfn_eval_worker(
+                AL_GPU_ID, X, Y, al_eval_sets, al_candidates, 'DMRD', 'AL',
+                repr_X=repr_points['X'],
+            )
+            base_res = _tabpfn_eval_worker(
+                BASELINE_GPU_ID, X_baseline_train, Y_baseline_train, base_eval_sets,
+                candidates, 'DMRD', 'Baseline',
+            )
+
+        # Representative-points capture from this iteration's AL fit.
+        if al_res.get('repr') is not None:
+            repr_log.append({
+                'iteration': int(iteration),
+                'mean': np.asarray(al_res['repr']['mean']).reshape(-1).tolist(),
+                'var':  np.asarray(al_res['repr']['var']).reshape(-1).tolist(),
+            })
         logger.info(f"TabPFN fit+eval wall-clock: {time.time() - t_fit0:.1f}s  "
                    f"(AL fit {al_res['_fit_time']:.1f}s, Baseline fit {base_res['_fit_time']:.1f}s)")
 
@@ -1028,11 +1071,12 @@ def main(testing, n_iterations, n_candidates, n_select, n_ensemble_samples, n_da
                             device=device, logger=logger
                         )
                     else:
-                        # Retry path for top_k variants: parallel worker only
-                        # predicted on the original candidate pool, so we need
-                        # a local AL model here. Lazy-fit once per iteration
-                        # (al_model_retry is reset to None at the top of the
-                        # iteration loop).
+                        # Retry path for top_k variants: the per-iteration AL
+                        # worker (thread or sequential call) only predicted on
+                        # the original candidate pool, so we need a local AL
+                        # model to evaluate the retry pool. Lazy-fit once per
+                        # iteration (al_model_retry is reset to None at the
+                        # top of the iteration loop).
                         if al_model_retry is None:
                             al_model_retry, _ = fit_tabpfn(X, Y, device=device)
                         attempt_y_pred, attempt_var = tabpfn_predict_with_variance(al_model_retry, attempt_candidates)
@@ -1218,6 +1262,18 @@ def main(testing, n_iterations, n_candidates, n_select, n_ensemble_samples, n_da
     else:
         logger.info(f"Single iteration - AL: val_loss={al_val_losses[0]:.6f}, R²={al_r2_scores[0]:.4f}")
         logger.info(f"Single iteration - Baseline: val_loss={baseline_val_losses[0]:.6f}, R²={baseline_r2_scores[0]:.4f}")
+
+    # ---- Representative-points trajectory plot (+ CSV) ----
+    if repr_log:
+        try:
+            _rep_out, _rep_csv = plot_representative_trajectories(
+                repr_log, repr_points['Y'], repr_points['cls'], repr_points['labels'],
+                _target_value, output_dir, y_transform='log', target='DMRD',
+            )
+            logger.info(f"Representative-points trajectory: {_rep_out}")
+            logger.info(f"Representative-points CSV: {_rep_csv}")
+        except Exception as _e:
+            logger.warning(f"Representative-points plot failed: {_e}")
 
     # Save summary
     summary = {

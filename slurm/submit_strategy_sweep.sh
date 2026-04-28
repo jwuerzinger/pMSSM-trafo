@@ -121,9 +121,10 @@ for model in ${MODELS//,/ }; do
                 al_output_base="/ptmp/jwuerzin/output/active_learning_${model_tag}_${strategy}_${warm}"
 
                 # Per-model resource footprint. All bundles request gpu:2 per
-                # node — the other models use both GPUs, and TabPFN now also
-                # parallelises AL/Baseline across both (cuda:0 and cuda:1).
-                # Mem stays lower for TabPFN — it never needs 128G.
+                # node — the other models use both GPUs, and TabPFN drives
+                # AL on cuda:0 and Baseline on cuda:1 concurrently via a
+                # ThreadPoolExecutor (see active_learning_tabpfn.py). Mem
+                # stays lower for TabPFN — it never needs 128G.
                 n_seeds=$(echo "${SEEDS}" | tr ',' '\n' | wc -l)
                 gres="${CLUSTER_GPU_GRES_2:-gpu:2}"
                 if [[ "${model}" == "tabpfn" ]]; then

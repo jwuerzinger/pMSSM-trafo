@@ -624,10 +624,10 @@ python scripts/update_sweep_manifest.py --all
 
 Idempotent — safe to re-run or cron. A job is marked `completed` only when `summary.json` appears on disk — the driver writes it once, at the very end of the AL loop, so this is the true end-of-run marker. (`state.pt` is overwritten after every iteration and is *not* sufficient evidence of completion; its presence flips the row to `running`.) If sacct reports `COMPLETED` but `summary.json` is missing, the row becomes `missing` (finalise step crashed or output dir mis-pointed).
 
-### Multi-seed hit-rate plot
+### Multi-seed hit-rate plots
 
 ```bash
-# Read manifest, group by (model, strategy, warm_start), plot mean ± SEM
+# Read manifest, group by (model, strategy, warm_start), render three views
 python scripts/plot_hit_rate_trajectories_multiseed.py
 
 # Filter to one sweep, require >=3 completed seeds, use ±1 SD bands instead
@@ -637,7 +637,24 @@ python scripts/plot_hit_rate_trajectories_multiseed.py \
     --uncertainty sd
 ```
 
-Default output: `/ptmp/jwuerzin/analysis/all_runs/hit_rate_trajectories.png` (3 panels: 10%, 20%, 50% relative tolerance). Visual encoding: colour = model, linestyle = strategy, marker = warm/cold/tabpfn. Groups with fewer than `--min-seeds` completed seeds are silently skipped, so a partially-finished sweep still produces a readable figure.
+Default output dir: `/ptmp/jwuerzin/analysis/all_runs/`. The script writes three plot families (each with one panel per relative tolerance — 10 %, 20 %, 50 %):
+
+  1. `hit_rate_settings_<model>.png` — one figure per model, overlaying every (strategy, warm) combo for that model. Colour = strategy, linestyle = warm.
+  2. `hit_rate_models_<strategy>_<warm>.png` — one figure per setting, overlaying every model that ran with that setting. Colour = model.
+  3. `hit_rate_best_per_model.png` — single figure with one curve per model, picking the (strategy, warm) setting that maximises mean final-iteration hit rate at the strictest tolerance. Falls back to looser tolerances if no config has data at the strictest one. The chosen settings are echoed to stdout.
+
+Groups with fewer than `--min-seeds` completed seeds are silently skipped, so a partially-finished sweep still produces readable figures.
+
+### Multi-seed MCMC R² plots
+
+```bash
+python scripts/plot_r2_mcmc_trajectories_multiseed.py
+
+# Clip y-axis to focus on best-performing region
+python scripts/plot_r2_mcmc_trajectories_multiseed.py --y-min -10 --y-max 1
+```
+
+Sister script to the hit-rate plotter: same manifest filtering, seed grouping, and visual encoding, but plots `al_on_mcmc_r2` (AL surrogate's R² on the held-out MCMC eval set). Outputs go to the same default dir under `r2_mcmc_strategy_<strategy>.png` (one per strategy) and `r2_mcmc_best_per_model.png`. Each figure has a single panel since R² is scalar per iteration. R² on MCMC is typically deeply negative because the MCMC chain distribution differs sharply from the iid training pool — the `--y-min` / `--y-max` flags are useful for comparing high-performing configs without the long tail of bad runs flattening the axis.
 
 ## Project Structure
 
