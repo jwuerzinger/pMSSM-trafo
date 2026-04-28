@@ -160,11 +160,15 @@ for model in ${MODELS//,/ }; do
                     echo "[bundled]   ${JOB_ID}  ${model_tag}/${strategy}/${warm} × ${n_seeds} seeds"
                 fi
 
-                # One manifest row per seed, sharing the bundle's job_id
+                # One manifest row per seed, sharing the bundle's job_id.
+                # Dry-run still increments the counter so the summary is meaningful,
+                # but skips the manifest write to avoid polluting it with JOB_ID=DRY rows.
                 slurm_log="logs/al_bundled_${JOB_ID}.out"
                 for seed in ${SEEDS//,/ }; do
                     expected_dir="${al_output_base}_seed${seed}_${SWEEP_ID}"
-                    echo "${SWEEP_ID},${submit_time},${model_tag},${strategy},${warm},${seed},${JOB_ID},${expected_dir},submitted,${slurm_log}" >> "${MANIFEST}"
+                    if [[ "${DRY_RUN}" != "1" ]]; then
+                        echo "${SWEEP_ID},${submit_time},${model_tag},${strategy},${warm},${seed},${JOB_ID},${expected_dir},submitted,${slurm_log}" >> "${MANIFEST}"
+                    fi
                     N_SUBMITTED=$((N_SUBMITTED + 1))
                 done
 
@@ -188,12 +192,6 @@ for model in ${MODELS//,/ }; do
                     extra_args="${extra_args} ${WARM_FLAG}"
                 fi
 
-                # TabPFN driver also reads AL_SELECTION_STRATEGY; align it.
-                tabpfn_strategy_env=""
-                if [[ "${model}" == "tabpfn" ]]; then
-                    tabpfn_strategy_env=",AL_SELECTION_STRATEGY=${strategy}"
-                fi
-
                 # Choose GRES (tabpfn runs on 1 GPU; others on 2)
                 if [[ "${model}" == "tabpfn" ]]; then
                     gres="${CLUSTER_GPU_GRES_1:-gpu:1}"
@@ -209,13 +207,15 @@ for model in ${MODELS//,/ }; do
                     JOB_ID=$(sbatch --parsable \
                         --partition="${CLUSTER_PARTITION}" \
                         --gres="${gres}" \
-                        --export=ALL,AL_OUTPUT_DIR="${expected_dir}",AL_EXTRA_ARGS="${extra_args}"${tabpfn_strategy_env} \
+                        --export=ALL,AL_OUTPUT_DIR="${expected_dir}",AL_EXTRA_ARGS="${extra_args}" \
                         "${submit_script}")
                     echo "[submitted] ${JOB_ID}  ${model_tag}/${strategy}/${warm}/seed${seed}"
                 fi
 
                 slurm_log="logs/al_${model_tag}_${JOB_ID}.out"
-                echo "${SWEEP_ID},${submit_time},${model_tag},${strategy},${warm},${seed},${JOB_ID},${expected_dir},submitted,${slurm_log}" >> "${MANIFEST}"
+                if [[ "${DRY_RUN}" != "1" ]]; then
+                    echo "${SWEEP_ID},${submit_time},${model_tag},${strategy},${warm},${seed},${JOB_ID},${expected_dir},submitted,${slurm_log}" >> "${MANIFEST}"
+                fi
                 N_SUBMITTED=$((N_SUBMITTED + 1))
 
                 sleep "${SUBMIT_SLEEP_SEC}"

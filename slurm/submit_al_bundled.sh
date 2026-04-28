@@ -123,17 +123,10 @@ for seed in "${SEEDS_ARR[@]}"; do
         per_seed_extra="${per_seed_extra} ${AL_EXTRA_ARGS_BASE}"
     fi
 
-    # TabPFN driver reads AL_SELECTION_STRATEGY as a fallback; align it.
-    tabpfn_strategy_env=""
-    if [[ "${AL_MODEL}" == "tabpfn" ]]; then
-        tabpfn_strategy_env="AL_SELECTION_STRATEGY=${AL_STRATEGY}"
-    fi
-
     echo "[bundle] launching seed=${seed} -> ${per_seed_dir}"
 
     AL_OUTPUT_DIR="${per_seed_dir}" \
     AL_EXTRA_ARGS="${per_seed_extra}" \
-    ${tabpfn_strategy_env} \
     srun \
         --nodes=1 \
         --ntasks=1 \
