@@ -21,6 +21,7 @@ Each metric produces three figures (one panel per tolerance):
 """
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -164,6 +165,101 @@ def _hits_per_desired_trajectory(run, true_value, tol):
     return iters, rates
 
 
+def _load_y_full(data_dir: str, target: str, cache_dir: Path) -> np.ndarray:
+    """Load (or read from .npy cache) the full unshuffled Y pool used by AL runs.
+
+    The cache file is keyed by `data_dir` + `target` so changing either
+    invalidates it. ROOT loading is slow (~1 min, 11 GB); the cache turns
+    subsequent re-renders into a millisecond op.
+    """
+    safe = data_dir.replace("/", "_").strip("_")
+    cache = cache_dir / f"y_full_{safe}_{target}.npy"
+    if cache.exists():
+        return np.load(cache)
+    from pmssm.data import load_pmssm_data  # noqa: PLC0415
+    _X, Y = load_pmssm_data(n_datasets=-1, target=target, data_dir=data_dir,
+                             plot_dir=str(cache_dir))
+    Y = Y.numpy().ravel().astype(np.float64) if hasattr(Y, "numpy") else np.asarray(Y).ravel()
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    np.save(cache, Y)
+    return Y
+
+
+def _seed_shuffled_y(Y_full: np.ndarray, seed: int) -> np.ndarray:
+    """Replay the AL driver's per-seed `_load_perm` shuffle on Y_full."""
+    g = torch.Generator().manual_seed(int(seed))
+    perm = torch.randperm(len(Y_full), generator=g).numpy()
+    return Y_full[perm]
+
+
+def _baseline_iter_y(state: dict, Y_full_shuffled: np.ndarray, iter_idx: int) -> np.ndarray | None:
+    """Reconstruct the baseline cumulative training Y values at iteration `iter_idx`.
+
+    Layout of `baseline_add_indices` (from active_learning.py): all train indices
+    in addition order, followed by all val indices. So the first
+    `n_added_train` entries always recover the baseline-train indices ever
+    added by iteration i.
+    """
+    al_n_train = list(state.get("al_n_train") or [])
+    base_n_train = list(state.get("baseline_n_train") or [])
+    if iter_idx >= len(base_n_train) or not al_n_train:
+        return None
+    n_train_init = int(al_n_train[0])
+    n_total = int(base_n_train[iter_idx])
+    if n_total <= 0:
+        return None
+    n_added = max(0, n_total - n_train_init)
+
+    Y_state = state.get("Y")
+    Y_state = Y_state.numpy().ravel() if hasattr(Y_state, "numpy") else np.asarray(Y_state).ravel()
+    Y_init = Y_state[:n_train_init]
+
+    if n_added == 0:
+        return Y_init
+    add_idx = state.get("baseline_add_indices")
+    add_idx = add_idx.numpy() if hasattr(add_idx, "numpy") else np.asarray(add_idx)
+    if len(add_idx) < n_added:
+        return None
+    Y_added = Y_full_shuffled[add_idx[:n_added]]
+    return np.concatenate([Y_init, Y_added])
+
+
+def _baseline_hit_rate_trajectory(run_dir: str, seed: int, Y_full: np.ndarray,
+                                  true_value: float, tol: float):
+    state_path = Path(run_dir) / "state.pt"
+    state = torch.load(state_path, weights_only=False, map_location="cpu")
+    Y_full_shuffled = _seed_shuffled_y(Y_full, seed)
+    base_n_train = list(state.get("baseline_n_train") or [])
+    iters, rates = [], []
+    for i in range(len(base_n_train)):
+        Y_b = _baseline_iter_y(state, Y_full_shuffled, i)
+        if Y_b is None or len(Y_b) == 0:
+            continue
+        hits = int(np.sum(np.abs(Y_b - true_value) / true_value < tol))
+        iters.append(i + 1)
+        rates.append(hits / len(Y_b))
+    return iters, rates
+
+
+def _baseline_hits_per_desired_trajectory(run_dir: str, seed: int, Y_full: np.ndarray,
+                                          true_value: float, tol: float):
+    """Random-scan reference for the hits/desired panel.
+
+    Uses the *baseline's own sample count* as denominator (= the hit rate of
+    the random-baseline samples). The AL hits/desired metric exists to
+    penalise physics-generation failures, but the baseline draws from a
+    pre-filtered pool with no failures — the honest baseline is therefore the
+    pool prevalence (i.e. the same value as the hit_rate panel), not
+    `hits / desired`, which artificially shrinks because `baseline_n_train` is
+    coupled to AL's smaller `al_n_train`, not the full physics budget.
+    """
+    return _baseline_hit_rate_trajectory(run_dir, seed, Y_full, true_value, tol)
+
+
+def _pool_prevalence(Y_full: np.ndarray, true_value: float, tols) -> dict:
+    return {float(t): float(np.mean(np.abs(Y_full - true_value) / true_value < t)) for t in tols}
+
+
 # Registry of metrics: name → (trajectory_fn, file_prefix, axis_label, title_word)
 METRICS = {
     "hit_rate": (
@@ -171,12 +267,14 @@ METRICS = {
         "hit_rate",
         "Hit rate",
         "Hit rate",
+        _baseline_hit_rate_trajectory,
     ),
     "hits_per_desired": (
         _hits_per_desired_trajectory,
         "hits_per_desired",
         "Hits / Desired",
         "Hits / Desired",
+        _baseline_hits_per_desired_trajectory,
     ),
 }
 
@@ -228,13 +326,53 @@ def _collect_trajectories(df, true_val, tols, min_seeds, traj_fn):
     return out
 
 
+def _collect_baseline_trajectories(df, true_val, tols, min_seeds, traj_fn_baseline,
+                                   Y_full):
+    """Like `_collect_trajectories` but builds the random-baseline trajectories.
+
+    Per-run: needs the seed (for replaying the AL driver's `_load_perm`) and
+    the run_dir (for `state.pt`).
+    """
+    out: dict = {}
+    for (model, strat, warm), sub in df.groupby(["model", "strategy", "warm_start"]):
+        per_tol = {}
+        run_seeds = list(zip(sub["expected_run_dir"].dropna(), sub["seed"]))
+        for tol in tols:
+            trajs = []
+            for run_dir, seed in run_seeds:
+                try:
+                    iters, rates = traj_fn_baseline(run_dir, int(seed), Y_full,
+                                                    true_val, tol)
+                    if rates:
+                        trajs.append((iters, rates))
+                except Exception as exc:
+                    click.echo(f"[warn] baseline skip {run_dir} tol={tol}: {exc}", err=True)
+            if len(trajs) < min_seeds:
+                continue
+            max_len = max(len(r) for _, r in trajs)
+            Y = np.full((len(trajs), max_len), np.nan, dtype=float)
+            for i, (_, rates) in enumerate(trajs):
+                Y[i, :len(rates)] = rates
+            longest_iters = next(its for its, r in trajs if len(r) == max_len)
+            iters_ax = np.asarray(longest_iters[:max_len])
+            n_per_iter = np.sum(~np.isnan(Y), axis=0)
+            keep = n_per_iter >= min_seeds
+            if not keep.any():
+                continue
+            per_tol[tol] = (iters_ax[keep], Y[:, keep])
+        if per_tol:
+            out[(model, strat, warm)] = per_tol
+    return out
+
+
 def _draw_curve(ax, iters_ax, Y, *, color, linestyle, marker, label,
-                uncertainty):
+                uncertainty, linewidth=1.5, fill_alpha=0.15, alpha=1.0):
     lo, hi = _band(Y, uncertainty)
     mean = np.nanmean(Y, axis=0)
     ax.plot(iters_ax, mean, color=color, linestyle=linestyle, marker=marker,
-            markersize=3, linewidth=1.5, label=label)
-    ax.fill_between(iters_ax, lo, hi, color=color, alpha=0.15)
+            markersize=3, linewidth=linewidth, label=label, alpha=alpha)
+    if fill_alpha > 0:
+        ax.fill_between(iters_ax, lo, hi, color=color, alpha=fill_alpha)
 
 
 def _setup_axes(axes, tols, true_val, title_word, ylabel):
@@ -257,9 +395,9 @@ def _finalize(fig, axes, out_path):
 
     fig.tight_layout()
     if seen:
-        fig.subplots_adjust(right=0.78)
+        fig.subplots_adjust(right=0.80, wspace=0.28)
         fig.legend(seen.values(), seen.keys(),
-                   loc="center left", bbox_to_anchor=(0.79, 0.5),
+                   loc="center left", bbox_to_anchor=(0.81, 0.5),
                    fontsize=8, frameon=True, borderaxespad=0.)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -331,8 +469,15 @@ def _best_setting_for_model(traj, model, tols):
 
 
 def plot_best_per_model(traj, tols, uncertainty, true_val, out_dir,
-                        file_prefix, title_word, ylabel):
-    """Single figure: one curve per model using its best (strategy, warm) setting."""
+                        file_prefix, title_word, ylabel,
+                        baseline_traj=None, prevalence=None):
+    """Single figure: one curve per model using its best (strategy, warm) setting.
+
+    If `baseline_traj` is provided (same {(model, strat, warm): {tol: ...}}
+    structure), each picked config also gets a dashed random-baseline curve in
+    its model colour. If `prevalence` is provided ({tol: rate}), a horizontal
+    grey reference line is drawn on each panel.
+    """
     models = sorted({m for (m, _, _) in traj})
     picks = []  # (model, strat, warm, tol_used, score)
     for model in models:
@@ -371,6 +516,24 @@ def plot_best_per_model(traj, tols, uncertainty, true_val, out_dir,
                 label=f"{m}: {s}-{w} (n={len(Y)})",
                 uncertainty=uncertainty,
             )
+            if baseline_traj is not None and cfg in baseline_traj \
+                    and tol in baseline_traj[cfg]:
+                b_iters, b_Y = baseline_traj[cfg][tol]
+                _draw_curve(
+                    ax, b_iters, b_Y,
+                    color=MODEL_COLORS.get(m, "gray"),
+                    linestyle="--",
+                    marker=None,
+                    label=f"{m}: random baseline",
+                    uncertainty=uncertainty,
+                    linewidth=1.8, fill_alpha=0.0, alpha=0.85,
+                )
+        if prevalence is not None and tol in prevalence:
+            ax.axhline(prevalence[tol], color="black", linestyle=":", linewidth=1.4,
+                       label="random scan (full pool)")
+            ax.text(0.99, prevalence[tol], f" {prevalence[tol]:.4f}",
+                    transform=ax.get_yaxis_transform(), ha="right", va="bottom",
+                    fontsize=8, color="black")
 
     out_path = out_dir / f"{file_prefix}_best_per_model.png"
     _finalize(fig, axes, out_path)
@@ -408,8 +571,13 @@ def plot_best_per_model(traj, tols, uncertainty, true_val, out_dir,
                    "`running` and `timeout` rows surface partial trajectories "
                    "alongside completed seeds; the per-iteration band uses "
                    "whichever seeds have data at that iter.")
+@click.option("--baseline-data-dir", default="/ptmp/jwuerzin/data/18387358",
+              show_default=True,
+              help="ROOT data directory used to compute the random-scan baseline "
+                   "(pool prevalence + per-run baseline trajectories). Set to "
+                   "empty string to disable the baseline overlay.")
 def main(manifest, sweep_id, output_dir, uncertainty, target, tolerances,
-         min_seeds, include_status):
+         min_seeds, include_status, baseline_data_dir):
     df = pd.read_csv(manifest)
     if sweep_id:
         df = df[df["sweep_id"].astype(str) == str(sweep_id)]
@@ -422,13 +590,38 @@ def main(manifest, sweep_id, output_dir, uncertainty, target, tolerances,
     true_val = TARGET_CONFIG[target]["true_value"]
 
     out_dir = Path(output_dir)
+
+    Y_full = None
+    prevalence = None
+    if baseline_data_dir:
+        try:
+            Y_full = _load_y_full(baseline_data_dir, target, out_dir)
+            prevalence = _pool_prevalence(Y_full, true_val, tols)
+            with open(out_dir / "random_baseline_prevalence.json", "w") as fh:
+                json.dump({"data_dir": baseline_data_dir, "target": target,
+                           "true_value": true_val, "n_pool": int(len(Y_full)),
+                           "prevalence": {f"{t:.4f}": v for t, v in prevalence.items()}},
+                          fh, indent=2)
+            click.echo(f"[baseline] pool prevalence (n={len(Y_full)}): "
+                       + ", ".join(f"tol={int(t*100)}%→{r:.4f}" for t, r in prevalence.items()))
+        except Exception as exc:
+            click.echo(f"[warn] could not load random baseline pool from {baseline_data_dir}: {exc}",
+                       err=True)
+            Y_full = None
+            prevalence = None
+
     written = []
-    for metric_name, (traj_fn, file_prefix, ylabel, title_word) in METRICS.items():
+    for metric_name, (traj_fn, file_prefix, ylabel, title_word, traj_fn_baseline) in METRICS.items():
         traj = _collect_trajectories(df, true_val, tols, min_seeds, traj_fn)
         if not traj:
             click.echo(f"[warn] metric '{metric_name}': no groups passed min-seeds filter; skipping",
                        err=True)
             continue
+        baseline_traj = None
+        if Y_full is not None:
+            baseline_traj = _collect_baseline_trajectories(
+                df, true_val, tols, min_seeds, traj_fn_baseline, Y_full,
+            )
         written += plot_models_per_strategy(
             traj, tols, uncertainty, true_val, out_dir,
             file_prefix=file_prefix, title_word=title_word, ylabel=ylabel,
@@ -436,6 +629,7 @@ def main(manifest, sweep_id, output_dir, uncertainty, target, tolerances,
         written += plot_best_per_model(
             traj, tols, uncertainty, true_val, out_dir,
             file_prefix=file_prefix, title_word=title_word, ylabel=ylabel,
+            baseline_traj=baseline_traj, prevalence=prevalence,
         )
 
     if not written:

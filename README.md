@@ -113,6 +113,8 @@ Multi-layer perceptron for comparison.
 - 4-layer fully connected network
 - Typically performs best on tabular regression tasks
 
+> **Architecture diagram**: Regenerate `doc/transformer_architecture.png` (PMSSMTransformerTabular block diagram) with `python scripts/plot_transformer_architecture.py`.
+
 ## Active Learning Pipeline
 
 In addition to standard training, this project includes an **active learning pipeline** that intelligently selects the most informative pMSSM points for expensive physics simulations, significantly improving model performance with fewer samples.
@@ -516,6 +518,15 @@ python analyse_runs.py \
 
 See [doc/ANALYSIS_METRICS.md](doc/ANALYSIS_METRICS.md) for a full description of all metrics, their interpretation, and CLI options.
 
+### MCMC convergence diagnostics
+
+```bash
+python scripts/mcmc_diagnostics.py --data-dir /ptmp/jwuerzin/data/19250082
+python scripts/mcmc_diagnostics.py --data-dir /path/to/output --params M_1,M_2,mu,tanb
+```
+
+Standalone helper that computes split-R̂ (Gelman-Rubin with Vehtari et al. 2021 splitting) and bulk-ESS for each free parameter, treating each ROOT file in the input directory as a separate chain. Pass/fail thresholds: R̂ < 1.01 (well-converged), R̂ < 1.05 (acceptable). Self-contained — only needs `numpy`, `uproot`, and (optional) `arviz`.
+
 ## Slurm Submission
 
 Slurm job scripts live in `slurm/` and read cluster-specific settings (partition, GPU gres) from `slurm/cluster.conf`:
@@ -656,6 +667,48 @@ python scripts/plot_r2_mcmc_trajectories_multiseed.py --y-min -10 --y-max 1
 
 Sister script to the hit-rate plotter: same manifest filtering, seed grouping, and visual encoding, but plots `al_on_mcmc_r2` (AL surrogate's R² on the held-out MCMC eval set). Outputs go to the same default dir under `r2_mcmc_strategy_<strategy>.png` (one per strategy) and `r2_mcmc_best_per_model.png`. Each figure has a single panel since R² is scalar per iteration. R² on MCMC is typically deeply negative because the MCMC chain distribution differs sharply from the iid training pool — the `--y-min` / `--y-max` flags are useful for comparing high-performing configs without the long tail of bad runs flattening the axis.
 
+### Multi-seed val/static R² and n_train trajectories
+
+```bash
+python scripts/plot_r2_trajectories_multiseed.py
+```
+
+Covers the per-iteration scalars not handled by the dedicated hit-rate / MCMC-R² scripts: validation R² (`al_r2`), static-random eval R² (`al_static_r2`), and cumulative training-set size (`n_train_per_iter`). For each metric writes `<metric>_strategy_<strategy>.png` (one per strategy) and `<metric>_best_per_model.png`.
+
+### Multi-seed MMD² trajectories
+
+```bash
+python scripts/plot_mmd2_trajectories_multiseed.py
+```
+
+For each iteration of every (model, strategy, warm) seed, computes MMD² between the AL training set (free params, normalized) and a fixed MCMC reference subsample with a Gaussian kernel. Caches per-iteration MMD² values to `mmd2_cache.csv` so re-renders are fast; the kernel bandwidth used is logged to `mmd2_bandwidth.json`. Outputs `mmd2_strategy_<strategy>.png` and `mmd2_best_per_model.png`.
+
+### Multi-seed pairwise density summary
+
+```bash
+python scripts/plot_pairwise_input_summary.py
+```
+
+For each (model, strategy, warm) cell with ≥ `--min-seeds` seeds, plots a 2×N_pairs grid of 2-D histograms over the same parameter projections used by `analyse_runs.plot_pairwise_scatter_per_run`. Top row: *mean* normalized density across seeds. Bottom row: *std* of per-seed densities (highlights bins where seed-to-seed agreement is weakest). Optionally overlays an MCMC reference contour on the mean row. One PNG per cell at `pairwise_density_<model>_<strategy>_<warm>.png`.
+
+### Per-seed (no aggregation) hit-rate plots
+
+```bash
+python scripts/plot_hit_rate_seeds_per_model.py
+```
+
+Same manifest + tolerance + metric machinery as `plot_hit_rate_trajectories_multiseed.py`, but each seed gets its own line instead of a mean ± band. Useful for diagnosing seed-to-seed variability or partial runs that the band would otherwise smooth over.
+
+### Single-run hit-rate plots
+
+```bash
+python scripts/plot_hit_rate_single_run.py \
+    --run-dir /ptmp/jwuerzin/output/active_learning_<...> \
+    --seed 42 --model-label transformer --strategy-label top_k --warm-label warm
+```
+
+Single-run analogue of the multi-seed plotter: writes `hit_rate_single_run.png` and `hits_per_desired_single_run.png` (one panel per tolerance) for one run directory. Reuses the metric helpers from `plot_hit_rate_trajectories_multiseed.py` so definitions stay in sync. Useful for one-off runs that aren't in the sweep manifest. Outputs default to the run directory; override via `--output-dir`.
+
 ## Project Structure
 
 ```
@@ -697,8 +750,16 @@ pMSSM-trafo/
 │   ├── submit_strategy_sweep.sh        # Multi-seed grid launcher (5 seeds × grid)
 │   └── submit_al_bundled.sh            # Multi-node bundled-seed worker (srun-fork one seed per node)
 ├── scripts/
-│   ├── update_sweep_manifest.py        # Refresh sweep manifest status from sacct + state.pt
-│   └── plot_hit_rate_trajectories_multiseed.py  # Mean ± SEM hit-rate plot across seeds
+│   ├── update_sweep_manifest.py                 # Refresh sweep manifest status from sacct + state.pt
+│   ├── plot_hit_rate_trajectories_multiseed.py  # Mean ± SEM hit-rate / hits-per-desired across seeds
+│   ├── plot_hit_rate_seeds_per_model.py         # Per-seed (no aggregation) hit-rate trajectories
+│   ├── plot_hit_rate_single_run.py              # Single-run hit-rate / hits-per-desired panels
+│   ├── plot_r2_trajectories_multiseed.py        # Val/static R² and n_train trajectories
+│   ├── plot_r2_mcmc_trajectories_multiseed.py   # MCMC R² trajectories
+│   ├── plot_mmd2_trajectories_multiseed.py      # MMD² (training set vs MCMC reference) trajectories
+│   ├── plot_pairwise_input_summary.py           # Per-cell pairwise density mean ± std grids
+│   ├── plot_transformer_architecture.py         # Regenerate doc/transformer_architecture.png
+│   └── mcmc_diagnostics.py                      # Split-R̂ + bulk-ESS for ROOT-chain MCMC outputs
 ├── pixi.toml                   # Dependency configuration
 ├── data/                       # ROOT files with pMSSM data
 ├── logs/                       # Slurm job logs (timestamped)
