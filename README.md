@@ -425,7 +425,7 @@ Both pipelines choose informative points for simulation via a shared pre-filter 
 
 1. **Candidate generation**: A pool of `n_candidates` points (default 20,000) is generated via Latin Hypercube Sampling across the 19D parameter space.
 
-2. **Tolerance cut** (`--tolerance-sampling`, default 1.0): A **hard cut** that keeps only candidates whose predicted target lies within `[threshold − tol, threshold + tol]` in transformed space. With the default `log(Y/0.12)` transform and `tol=1.0`, this keeps candidates predicted to give `Y ∈ [0.044, 0.326]` — i.e. within a factor ~3 of the observed relic density. Candidates the model extrapolates as overclosing (Y ≫ 0.12) or far-sub-dominant are dropped outright. Set to 0 to disable.
+2. **Tolerance cut** (`--tolerance-sampling`, default 1.0): A **hard cut** that keeps only candidates whose predicted target lies within `[threshold − tol, threshold + tol]` in transformed space. With the default `log(Y/0.12)` transform and `tol=1.0`, the cut is `|log(Y/0.12)| < 1`, i.e. a multiplicative window of `e ≈ 2.718` around the observed relic density: `Y ∈ [0.12/e, 0.12·e] ≈ [0.044, 0.326]`. Note this is symmetric in log space and therefore asymmetric in physical space (the upper arm reaches further above 0.12 than the lower arm reaches below). Candidates the model extrapolates as overclosing (Y ≫ 0.12) or far-sub-dominant are dropped outright. Set to 0 to disable.
 
    > **Note:** applied by *both* `top_k` and `entropy_batch` as of the current version. Previously only `entropy_batch` honored it.
 
@@ -656,6 +656,47 @@ Default output dir: `/ptmp/jwuerzin/analysis/all_runs/`. The script writes three
 
 Groups with fewer than `--min-seeds` completed seeds are silently skipped, so a partially-finished sweep still produces readable figures.
 
+### Best-per-model classification-accuracy plots
+
+Same script (`scripts/plot_hit_rate_trajectories_multiseed.py`), opt-in via `--compute-accuracy`. Renders four extra PNGs alongside `hits_per_desired_best_per_model.png`, each showing classification accuracy (binary `(ŷ ≥ 0.12) == (y_true ≥ 0.12)` in transformed space) across iterations for the best-per-model picks:
+
+  - `accuracy_best_per_model_static_random.png` — eval on the 100 k static random eval set.
+  - `accuracy_best_per_model_mcmc.png` — eval on the MCMC eval set from `--mcmc-data-dir`.
+  - `accuracy_best_per_model_train.png` — each model's *own* iteration-i training set.
+  - `accuracy_best_per_model_val.png` — each model's *own* iteration-i validation set.
+
+Solid line: AL model. Dashed line: random-sampling baseline. SEM band across seeds, same colour-by-model as the hit-rate plot.
+
+The script recomputes accuracy on demand by walking each picked seed run, loading every iteration's `al_model_checkpoint.pt` / `baseline_model_checkpoint.pt` (TabPFN refits per iteration since it has no weight file), and predicting on the four datasets. Per-iteration results are cached at `<run_dir>/accuracy_trajectory.json`, so the first run takes minutes-to-hours and subsequent re-renders are near-instant.
+
+```bash
+# Render hit-rate / hits-per-desired plots AND the four accuracy plots.
+# First run loads X_full once (~88s) then evaluates per seed/iter.
+.pixi/envs/rocm/bin/python scripts/plot_hit_rate_trajectories_multiseed.py \
+    --compute-accuracy \
+    --accuracy-device cuda:0
+
+# Skip TabPFN (its per-iter refit on the 410k MCMC set is the slowest cell):
+... --compute-accuracy --accuracy-skip-tabpfn
+
+# Force re-evaluation of cached iters (e.g. after a code change):
+... --compute-accuracy --accuracy-cache-refresh
+```
+
+Interactive nodes typically don't have a GPU; submit on the cluster instead. The single-GPU memory cap on the `apu` partition (`mem=110000`, `cpus-per-task=18`) is enforced — passing those overrides at submit time matches `submit_slurm_single.sh`'s pattern:
+
+```bash
+source slurm/cluster.conf
+sbatch --partition="${CLUSTER_PARTITION}" --gres="${CLUSTER_GPU_GRES_1}" \
+       --cpus-per-task=18 --mem=110000 \
+       slurm/submit_accuracy_plots.sh
+
+# Toggles via --export=ALL,...
+sbatch ... --export=ALL,REFRESH=1     slurm/submit_accuracy_plots.sh   # re-eval cached iters
+sbatch ... --export=ALL,SKIP_TABPFN=1 slurm/submit_accuracy_plots.sh   # drop TabPFN
+sbatch ... --export=ALL,SWEEP_ID=20260424_153140 slurm/submit_accuracy_plots.sh
+```
+
 ### Multi-seed MCMC R² plots
 
 ```bash
@@ -694,10 +735,11 @@ For each (model, strategy, warm) cell with ≥ `--min-seeds` seeds, plots a 2×N
 ### Per-seed (no aggregation) hit-rate plots
 
 ```bash
-python scripts/plot_hit_rate_seeds_per_model.py
+python scripts/plot_hit_rate_seeds_per_model.py \
+    --baseline-data-dir /ptmp/jwuerzin/data/18387358
 ```
 
-Same manifest + tolerance + metric machinery as `plot_hit_rate_trajectories_multiseed.py`, but each seed gets its own line instead of a mean ± band. Useful for diagnosing seed-to-seed variability or partial runs that the band would otherwise smooth over.
+Same manifest + tolerance + metric machinery as `plot_hit_rate_trajectories_multiseed.py`, but each seed gets its own line instead of a mean ± band. Useful for diagnosing seed-to-seed variability or partial runs that the band would otherwise smooth over. Pass `--baseline-data-dir` to overlay each seed's dashed random-baseline trajectory and a horizontal full-pool prevalence reference (matching the overlays on `*_best_per_model.png` and `*_strategy_*.png`).
 
 ### Single-run hit-rate plots
 

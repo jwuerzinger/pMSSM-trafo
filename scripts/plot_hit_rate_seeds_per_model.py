@@ -33,6 +33,8 @@ from scripts.plot_hit_rate_trajectories_multiseed import (  # noqa: E402
     MODEL_COLORS,
     _best_setting_for_model,
     _collect_trajectories,
+    _load_y_full,
+    _pool_prevalence,
 )
 
 
@@ -94,6 +96,30 @@ def _per_seed_trajectories(df_sub, true_val, tols, traj_fn):
     return per_tol
 
 
+def _per_seed_baseline_trajectories(df_sub, true_val, tols, traj_fn_baseline,
+                                    Y_full):
+    """Return {tol: list[(seed, iters, rates)]} of random-baseline trajectories."""
+    per_tol = {}
+    for tol in tols:
+        rows = []
+        for _, row in df_sub.iterrows():
+            run_dir = row.get("expected_run_dir")
+            seed = row.get("seed")
+            if pd.isna(run_dir) or pd.isna(seed):
+                continue
+            try:
+                iters, rates = traj_fn_baseline(run_dir, int(seed), Y_full,
+                                                true_val, tol)
+                if rates:
+                    rows.append((seed, np.asarray(iters), np.asarray(rates)))
+            except Exception as exc:
+                click.echo(f"[warn] baseline skip {run_dir} tol={tol}: {exc}",
+                           err=True)
+        if rows:
+            per_tol[tol] = rows
+    return per_tol
+
+
 def _draw_seed_curves(ax, rows, color):
     """Plot each (seed, iters, rates) as its own thin line."""
     n = len(rows)
@@ -103,6 +129,20 @@ def _draw_seed_curves(ax, rows, color):
         ax.plot(iters, rates,
                 color=cmap(i) if color is None else color,
                 alpha=0.85, linewidth=1.2, marker="o", markersize=2.5,
+                label=lbl)
+
+
+def _draw_baseline_seed_curves(ax, rows, color):
+    """Plot each (seed, iters, rates) as a dashed thin line (random baseline)."""
+    n = len(rows)
+    cmap = plt.get_cmap("viridis", max(n, 2))
+    for i, (seed, iters, rates) in enumerate(sorted(rows, key=lambda r: (r[0] if r[0] is not None else i))):
+        lbl = (f"seed {int(seed)}: random baseline"
+               if seed is not None and not pd.isna(seed)
+               else f"run {i}: random baseline")
+        ax.plot(iters, rates,
+                color=cmap(i) if color is None else color,
+                alpha=0.55, linewidth=1.0, linestyle="--",
                 label=lbl)
 
 
@@ -127,8 +167,13 @@ def _draw_seed_curves(ax, rows, color):
 @click.option("--per-model-color", is_flag=True,
               help="Color all seed lines with the model's signature color "
                    "instead of viridis-by-seed.")
+@click.option("--baseline-data-dir", default=None,
+              help="ROOT data directory used to compute the random-scan "
+                   "baseline pool. If set, each seed's dashed random-baseline "
+                   "trajectory and a horizontal full-pool prevalence line "
+                   "are overlaid.")
 def main(manifest, sweep_id, output_dir, target, tolerances, include_status,
-         models, strategy, warm_start, per_model_color):
+         models, strategy, warm_start, per_model_color, baseline_data_dir):
     df = pd.read_csv(manifest)
     if sweep_id:
         df = df[df["sweep_id"].astype(str) == str(sweep_id)]
@@ -141,19 +186,35 @@ def main(manifest, sweep_id, output_dir, target, tolerances, include_status,
     true_val = TARGET_CONFIG[target]["true_value"]
     out_dir = Path(output_dir)
 
+    Y_full = None
+    prevalence = None
+    if baseline_data_dir:
+        try:
+            Y_full = _load_y_full(baseline_data_dir, target, out_dir)
+            prevalence = _pool_prevalence(Y_full, true_val, tols)
+            click.echo(f"[baseline] pool prevalence (n={len(Y_full)}): "
+                       + ", ".join(f"tol={int(t*100)}%→{r:.4f}"
+                                   for t, r in prevalence.items()))
+        except Exception as exc:
+            click.echo(f"[warn] could not load baseline pool from "
+                       f"{baseline_data_dir}: {exc}", err=True)
+            Y_full = None
+            prevalence = None
+
     pick_models = list(models) if models else sorted(df["model"].dropna().unique())
 
     # For "best" selection we need the aggregated trajectories; only build them
     # if the user didn't pin (strategy, warm) explicitly.
     traj_for_pick = {}
     if strategy is None or warm_start is None:
-        for metric_name, (traj_fn, _, _, _) in METRICS.items():
+        for metric_name, (traj_fn, _, _, _, _) in METRICS.items():
             traj_for_pick[metric_name] = _collect_trajectories(
                 df, true_val, tols, min_seeds=1, traj_fn=traj_fn,
             )
 
     written = []
-    for metric_name, (traj_fn, file_prefix, ylabel, title_word) in METRICS.items():
+    for metric_name, (traj_fn, file_prefix, ylabel, title_word,
+                       traj_fn_baseline) in METRICS.items():
         for model in pick_models:
             if strategy is not None and warm_start is not None:
                 strat, warm = strategy, warm_start
@@ -180,6 +241,12 @@ def main(manifest, sweep_id, output_dir, target, tolerances, include_status,
                 click.echo(f"[warn] {metric_name}/{model}/{strat}-{warm}: no trajectories", err=True)
                 continue
 
+            per_tol_baseline = {}
+            if Y_full is not None:
+                per_tol_baseline = _per_seed_baseline_trajectories(
+                    sub, true_val, tols, traj_fn_baseline, Y_full,
+                )
+
             fig, axes = plt.subplots(1, len(tols), figsize=(6 * len(tols), 5),
                                      sharey=False, squeeze=False)
             axes = list(axes.flat)
@@ -195,6 +262,15 @@ def main(manifest, sweep_id, output_dir, target, tolerances, include_status,
                 if not rows:
                     continue
                 _draw_seed_curves(ax, rows, color=color)
+                b_rows = per_tol_baseline.get(tol)
+                if b_rows:
+                    _draw_baseline_seed_curves(ax, b_rows, color=color)
+                if prevalence is not None and tol in prevalence:
+                    ax.axhline(prevalence[tol], color="black", linestyle=":",
+                               linewidth=1.4, label="random scan (full pool)")
+                    ax.text(0.99, prevalence[tol], f" {prevalence[tol]:.4f}",
+                            transform=ax.get_yaxis_transform(), ha="right",
+                            va="bottom", fontsize=8, color="black")
 
             out_path = out_dir / f"{file_prefix}_seeds_{model}_{strat}_{warm}.png"
             _finalize(fig, axes, out_path)
