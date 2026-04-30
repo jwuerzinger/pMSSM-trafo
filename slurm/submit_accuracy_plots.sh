@@ -14,9 +14,9 @@
 # To force re-evaluation (e.g. after a code change in the predict path):
 #   sbatch --export=ALL,REFRESH=1 slurm/submit_accuracy_plots.sh
 #
-# To skip TabPFN (the slowest cell, since it refits per iteration on the MCMC
-# eval set):
-#   sbatch --export=ALL,SKIP_TABPFN=1 slurm/submit_accuracy_plots.sh
+# Note: TabPFN is intentionally not evaluated here -- AL TabPFN runs save no
+# per-iteration weight file, so reproducing AL-time predictions would require
+# re-running the AL pipeline. The plotter skips TabPFN picks.
 # ==============================================================================
 #SBATCH --job-name=acc_plots
 #SBATCH --nodes=1
@@ -84,10 +84,6 @@ EXTRA_FLAGS=()
 if [[ "${REFRESH:-0}" == "1" ]]; then
     EXTRA_FLAGS+=(--accuracy-cache-refresh)
     echo "[opt] cache refresh: ON"
-fi
-if [[ "${SKIP_TABPFN:-0}" == "1" ]]; then
-    EXTRA_FLAGS+=(--accuracy-skip-tabpfn)
-    echo "[opt] skip TabPFN: ON"
 fi
 if [[ -n "${SWEEP_ID:-}" ]]; then
     EXTRA_FLAGS+=(--sweep-id "${SWEEP_ID}")

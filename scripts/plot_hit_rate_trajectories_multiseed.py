@@ -26,6 +26,14 @@ import sys
 import time
 from pathlib import Path
 
+# Force line-buffered stdout/stderr so SLURM log files reflect progress in real
+# time even when PYTHONUNBUFFERED is missed (e.g. inside subprocesses).
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
+except (AttributeError, ValueError):
+    pass
+
 import click
 import matplotlib.pyplot as plt
 import numpy as np
@@ -506,15 +514,6 @@ def _predict_gp_t(model, model_type: str, X: torch.Tensor, data_min, data_max,
     return np.concatenate(out).astype(np.float64)
 
 
-def _predict_tabpfn_t(model, X: torch.Tensor, batch_size: int = 10_000) -> np.ndarray:
-    """Predict TabPFN outputs in transformed space."""
-    sys.path.insert(0, str(_REPO_ROOT))
-    from active_learning_tabpfn import tabpfn_predict  # noqa: PLC0415
-    y_t = tabpfn_predict(model, X, batch_size=batch_size)
-    arr = y_t.detach().cpu().numpy() if hasattr(y_t, "detach") else np.asarray(y_t)
-    return arr.ravel().astype(np.float64)
-
-
 def _build_eval_sets(run_dir: Path, state: dict, seed: int,
                      X_full: np.ndarray, Y_full: np.ndarray,
                      X_static: torch.Tensor, Y_static: torch.Tensor,
@@ -582,8 +581,18 @@ def _load_iter_model(model_type: str, role: str, iter_dir: Path,
                      run_kwargs: dict, device: str, dropout: float = 0.1):
     """Construct the model used for evaluation at this iteration.
 
-    For transformer/GP, loads the per-iter checkpoint. For TabPFN, refits
-    on the iteration's train set (TabPFN saves no weight file).
+    Always loads from the per-iter checkpoint saved by the AL driver:
+    ``al_model_checkpoint.pt`` (AL) or ``baseline_model_checkpoint.pt``
+    (random baseline). For transformer the state_dict is loaded into a
+    freshly-instantiated model whose architecture matches active_learning.py
+    (d_model=128, nhead=4, num_layers=3, dim_feedforward=512). For GPs the
+    architecture is rebuilt with the iteration's train/val data (inducing-point
+    selection depends on it) using kernel/ARD/noise kwargs parsed from the
+    run's startup banner, then state_dict + likelihood_state_dict are loaded.
+
+    TabPFN is not supported here: AL TabPFN runs save no weight file (TabPFN
+    is in-context-fit per call), so reproducing its AL-time predictions would
+    require re-running the AL pipeline. Skip those picks at the caller.
     """
     ckpt_name = "al_model_checkpoint.pt" if role == "al" else "baseline_model_checkpoint.pt"
     ckpt_path = iter_dir / ckpt_name
@@ -629,14 +638,7 @@ def _load_iter_model(model_type: str, role: str, iter_dir: Path,
             model.likelihood = model.likelihood.to(device)
         return model.to(device)
 
-    if model_type == "tabpfn":
-        sys.path.insert(0, str(_REPO_ROOT))
-        from active_learning_tabpfn import fit_tabpfn  # noqa: PLC0415
-        # TabPFN ignores the checkpoint dir entirely — refit on this iter's train.
-        model, _ = fit_tabpfn(X_train_i, Y_train_i, device=device)
-        return model
-
-    raise ValueError(f"unsupported model_type: {model_type}")
+    raise ValueError(f"unsupported model_type for checkpoint reload: {model_type}")
 
 
 def _accuracy_for_iter(model_type: str, role: str, iter_dir: Path,
@@ -675,6 +677,7 @@ def _accuracy_for_iter(model_type: str, role: str, iter_dir: Path,
             continue  # eval set absent for this run (e.g. MCMC dir not provided)
         Y_true_t = transform_y(Y_d.float(), target=target).numpy().ravel().astype(np.float64)
 
+        ds_t0 = time.time()
         if model_type == "transformer":
             y_pred_t = _predict_transformer_t(model, X_d.float(), stats, device)
         elif model_type in ("exact_gp", "deep_gp", "sparse_gp"):
@@ -683,10 +686,11 @@ def _accuracy_for_iter(model_type: str, role: str, iter_dir: Path,
             y_pred_t = _predict_gp_t(model, model_type, X_d.float(), *_GP_NORM,
                                      jitter=jitter, num_samples=num_samples,
                                      device=device)
-        elif model_type == "tabpfn":
-            y_pred_t = _predict_tabpfn_t(model, X_d.float())
         else:
             raise ValueError(f"unsupported model_type: {model_type}")
+        click.echo(f"[accuracy]         {role}/{ds}: n={len(X_d)} "
+                   f"predicted in {time.time()-ds_t0:5.1f}s", err=False)
+        sys.stdout.flush()
 
         out[ds] = _classification_accuracy(y_pred_t, Y_true_t, threshold_t)
 
@@ -733,7 +737,10 @@ def _classification_accuracy_trajectory(run, run_dir: str, seed: int,
     n_cached = 0
     seed_t0 = time.time()
     click.echo(f"[accuracy]     seed={seed} run={run_dir_p.name}: "
-               f"{n_iters_total} iters, refresh={refresh}", err=False)
+               f"{n_iters_total} iters, "
+               f"cache_entries={len(cache)}, refresh={refresh}, "
+               f"model_type={model_type}", err=False)
+    sys.stdout.flush()
 
     # Datasets the *current* invocation can actually evaluate. Datasets with
     # zero-length tensors (e.g. MCMC not provided this run) are skipped from
@@ -769,27 +776,47 @@ def _classification_accuracy_trajectory(run, run_dir: str, seed: int,
 
         if needs_compute:
             iter_t0 = time.time()
+            click.echo(f"[accuracy]       iter {iter_no}/{n_iters_total} "
+                       f"start (n_train={al_n_train[i]})", err=False)
+            sys.stdout.flush()
             sets = eval_sets_cached.get(i)
             if sets is None:
                 sets = _build_eval_sets(run_dir_p, state, seed, X_full, Y_full,
                                         X_static, Y_static, X_mcmc, Y_mcmc, i)
                 if sets is None:
+                    click.echo(f"[accuracy]       iter {iter_no}/{n_iters_total} "
+                               "skipped: could not build eval sets", err=True)
+                    sys.stdout.flush()
                     continue
                 eval_sets_cached[i] = sets
 
             roles_done = []
+            roles_acc_summary: list[str] = []
             for role in ACC_ROLES:
                 role_cache = cache_iter.get(role) or {}
                 if not refresh and all(ds in role_cache for ds in required_datasets):
                     continue
+                role_t0 = time.time()
+                click.echo(f"[accuracy]         loading {role} checkpoint", err=False)
+                sys.stdout.flush()
                 role_acc = _accuracy_for_iter(model_type, role, iter_dir, sets,
                                               run_kwargs, threshold_t, device,
                                               dropout=dropout)
                 if role_acc is None:
+                    click.echo(f"[accuracy]         {role}: checkpoint missing or "
+                               "eval set empty -- skipped", err=True)
+                    sys.stdout.flush()
                     continue
                 role_cache.update({k: float(v) for k, v in role_acc.items()})
                 cache_iter[role] = role_cache
                 roles_done.append(role)
+                roles_acc_summary.append(
+                    f"{role}=" + "/".join(f"{ds}={role_acc[ds]:.4f}"
+                                          for ds in ACC_DATASETS if ds in role_acc)
+                )
+                click.echo(f"[accuracy]         {role} done in "
+                           f"{time.time()-role_t0:5.1f}s", err=False)
+                sys.stdout.flush()
 
             cache[key] = cache_iter
             _save_accuracy_cache(run_dir_p, cache)
@@ -797,7 +824,9 @@ def _classification_accuracy_trajectory(run, run_dir: str, seed: int,
             click.echo(f"[accuracy]       iter {iter_no}/{n_iters_total} "
                        f"computed in {time.time()-iter_t0:5.1f}s "
                        f"(roles={','.join(roles_done) or 'none'}, "
-                       f"n_train={al_n_train[i]})", err=False)
+                       f"n_train={al_n_train[i]}) "
+                       + " | ".join(roles_acc_summary), err=False)
+            sys.stdout.flush()
         else:
             n_cached += 1
 
@@ -809,6 +838,7 @@ def _classification_accuracy_trajectory(run, run_dir: str, seed: int,
 
     click.echo(f"[accuracy]     seed={seed} done in {time.time()-seed_t0:5.1f}s "
                f"(computed={n_computed}, cached={n_cached})", err=False)
+    sys.stdout.flush()
     return out
 
 
@@ -818,9 +848,11 @@ def _collect_accuracy_trajectories(df, picks, target: str, X_full: np.ndarray,
                                    Y_mcmc: torch.Tensor, threshold_t: float,
                                    device: str, min_seeds: int,
                                    refresh: bool = False,
-                                   skip_tabpfn: bool = False,
                                    dropout: float = 0.1) -> dict:
     """Build accuracy trajectories for every picked (model, strategy, warm)+seed.
+
+    TabPFN picks are skipped: AL TabPFN runs save no per-iteration weight file,
+    so reproducing AL-time predictions would require re-running the pipeline.
 
     Returns
         {(model, strat, warm): {role: {dataset: (iters_axis, Y[n_seeds, n_iters])}}}
@@ -830,27 +862,40 @@ def _collect_accuracy_trajectories(df, picks, target: str, X_full: np.ndarray,
         from pmssm.data import build_norm_tensors  # noqa: PLC0415
         _GP_NORM = build_norm_tensors()
 
+    click.echo(f"[accuracy] starting collection over {len(picks)} pick(s); "
+               f"min_seeds={min_seeds}, refresh={refresh}, device={device}")
+    sys.stdout.flush()
+
     out: dict = {}
-    for (model, strat, warm, _tu, _sc) in picks:
-        if skip_tabpfn and model == "tabpfn":
-            click.echo(f"[accuracy] skipping {model} per --accuracy-skip-tabpfn")
+    for pick_idx, (model, strat, warm, _tu, _sc) in enumerate(picks, start=1):
+        if model == "tabpfn":
+            click.echo(f"[accuracy] [{pick_idx}/{len(picks)}] skipping {model}-{strat}-{warm}: "
+                       "TabPFN saves no per-iter checkpoint, would require re-running AL.",
+                       err=True)
+            sys.stdout.flush()
             continue
         sub = df[(df["model"] == model) & (df["strategy"] == strat)
                  & (df["warm_start"] == warm)]
-        click.echo(f"[accuracy]   pick {model}-{strat}-{warm}: "
+        click.echo(f"[accuracy] [{pick_idx}/{len(picks)}] pick {model}-{strat}-{warm}: "
                    f"{len(sub)} seed runs to process")
+        sys.stdout.flush()
         pick_t0 = time.time()
         per_role_ds: dict = {role: {ds: [] for ds in ACC_DATASETS} for role in ACC_ROLES}
         valid_seeds = 0
-        for _, row in sub.iterrows():
+        n_seeds_total = len(sub)
+        for seed_idx, (_, row) in enumerate(sub.iterrows(), start=1):
             run_dir = row.get("expected_run_dir")
             seed = int(row.get("seed"))
             if not isinstance(run_dir, str) or not run_dir:
                 continue
+            click.echo(f"[accuracy]   [{pick_idx}/{len(picks)}] "
+                       f"seed {seed_idx}/{n_seeds_total} (seed={seed}) -> {run_dir}")
+            sys.stdout.flush()
             try:
                 run = load_run(run_dir)
             except Exception as exc:
                 click.echo(f"[warn] accuracy: skip {run_dir}: {exc}", err=True)
+                sys.stdout.flush()
                 continue
             try:
                 seed_traj = _classification_accuracy_trajectory(
@@ -860,6 +905,7 @@ def _collect_accuracy_trajectories(df, picks, target: str, X_full: np.ndarray,
                 )
             except Exception as exc:
                 click.echo(f"[warn] accuracy: failed for {run_dir}: {exc}", err=True)
+                sys.stdout.flush()
                 continue
             recorded = False
             for role in ACC_ROLES:
@@ -873,6 +919,7 @@ def _collect_accuracy_trajectories(df, picks, target: str, X_full: np.ndarray,
 
         click.echo(f"[accuracy]   pick {model}-{strat}-{warm} done in "
                    f"{time.time()-pick_t0:5.1f}s ({valid_seeds} valid seeds)")
+        sys.stdout.flush()
 
         if valid_seeds < min_seeds:
             click.echo(f"[accuracy] {model}-{strat}-{warm}: "
@@ -1398,10 +1445,6 @@ def plot_best_per_model(traj, tols, uncertainty, true_val, out_dir,
               default=False, show_default=True,
               help="Force re-evaluation of cached iters (overwrites "
                    "<run_dir>/accuracy_trajectory.json entries).")
-@click.option("--accuracy-skip-tabpfn/--no-accuracy-skip-tabpfn",
-              default=False, show_default=True,
-              help="Skip TabPFN runs in --compute-accuracy (refit cost on the "
-                   "MCMC eval set is the slowest cell of the matrix).")
 @click.option("--accuracy-static-eval-size", default=100_000, type=int,
               show_default=True,
               help="Static random eval set size used for --compute-accuracy. "
@@ -1412,7 +1455,7 @@ def plot_best_per_model(traj, tols, uncertainty, true_val, out_dir,
 def main(manifest, sweep_id, output_dir, uncertainty, target, tolerances,
          min_seeds, include_status, baseline_data_dir,
          compute_accuracy, mcmc_data_dir, accuracy_device,
-         accuracy_cache_refresh, accuracy_skip_tabpfn,
+         accuracy_cache_refresh,
          accuracy_static_eval_size, accuracy_dropout):
     df = pd.read_csv(manifest)
     if sweep_id:
@@ -1530,9 +1573,11 @@ def main(manifest, sweep_id, output_dir, uncertainty, target, tolerances,
                         X_mcmc = Xm.float() if hasattr(Xm, "float") else torch.from_numpy(np.asarray(Xm, dtype=np.float32))
                         Y_mcmc = Ym.float().view(-1) if hasattr(Ym, "float") else torch.from_numpy(np.asarray(Ym, dtype=np.float32)).view(-1)
                         click.echo(f"[accuracy] MCMC eval set: n={len(X_mcmc)}")
+                        sys.stdout.flush()
                     except Exception as exc:
                         click.echo(f"[warn] --compute-accuracy: MCMC load failed ({exc}); skipping mcmc panel",
                                    err=True)
+                        sys.stdout.flush()
 
                 if X_static is None and X_mcmc is None:
                     click.echo("[warn] --compute-accuracy: neither static nor MCMC "
@@ -1545,6 +1590,7 @@ def main(manifest, sweep_id, output_dir, uncertainty, target, tolerances,
                                f"threshold(transformed)={threshold_t}, "
                                f"static_n={0 if X_static is None else len(X_static)}, "
                                f"mcmc_n={0 if X_mcmc is None else len(X_mcmc)}")
+                    sys.stdout.flush()
                     # Pad missing eval sets with zero-length tensors so the
                     # worker can iterate uniformly.
                     if X_static is None:
@@ -1560,7 +1606,6 @@ def main(manifest, sweep_id, output_dir, uncertainty, target, tolerances,
                         X_static, Y_static, X_mcmc, Y_mcmc, threshold_t,
                         device=accuracy_device, min_seeds=min_seeds,
                         refresh=accuracy_cache_refresh,
-                        skip_tabpfn=accuracy_skip_tabpfn,
                         dropout=accuracy_dropout,
                     )
                     if traj_acc:
