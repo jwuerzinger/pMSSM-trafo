@@ -960,6 +960,9 @@ def plot_classification_accuracy_best_per_model(traj_acc: dict, picks, out_dir: 
 
     Mirrors `plot_best_per_model`'s layout: solid line per model (AL), dashed
     line per model (baseline) in the same colour, SEM band across seeds.
+    Y-axis auto-zooms with padding so MCMC and other narrow ranges are
+    readable. Pick details (strategy/warm) move out of the legend into a
+    footnote, leaving short `model (AL)` / `model (baseline)` labels.
     """
     written = []
     dataset_titles = {
@@ -968,14 +971,20 @@ def plot_classification_accuracy_best_per_model(traj_acc: dict, picks, out_dir: 
         "train": "Per-model own train set",
         "val": "Per-model own validation set",
     }
+    pick_summary = ", ".join(
+        f"{m}: {s}-{w}" for (m, s, w, _tu, _sc) in picks
+        if (m, s, w) in traj_acc
+    )
     for ds in ACC_DATASETS:
-        fig, ax = plt.subplots(1, 1, figsize=(7, 5))
+        fig, ax = plt.subplots(1, 1, figsize=(7.5, 5))
         ax.set_title(f"Classification accuracy — {dataset_titles[ds]}")
         ax.set_xlabel("Iteration")
         ax.set_ylabel("Accuracy (Ωh² ≷ 0.12)")
         ax.grid(alpha=0.3)
 
         any_data = False
+        y_lo, y_hi = float("inf"), float("-inf")
+        n_seeds_per_label: dict[str, int] = {}
         for (m, s, w, _tu, _sc) in picks:
             cfg = (m, s, w)
             if cfg not in traj_acc:
@@ -985,36 +994,58 @@ def plot_classification_accuracy_best_per_model(traj_acc: dict, picks, out_dir: 
                 if ds not in role_traj:
                     continue
                 iters_ax, Y = role_traj[ds]
+                role_label = "AL" if role == "al" else "baseline"
+                label = f"{m} ({role_label})"
+                n_seeds_per_label[label] = int((~np.isnan(Y)).any(axis=1).sum())
                 _draw_curve(
                     ax, iters_ax, Y,
                     color=MODEL_COLORS.get(m, "gray"),
                     linestyle="-" if role == "al" else "--",
-                    marker="o" if role == "al" else None,
-                    label=f"{m}: {s}-{w} ({'AL' if role == 'al' else 'baseline'}, n={(~np.isnan(Y)).any(axis=1).sum()})",
+                    marker="o" if role == "al" else "s",
+                    label=label,
                     uncertainty=uncertainty,
-                    linewidth=1.5 if role == "al" else 1.4,
-                    fill_alpha=0.12 if role == "al" else 0.0,
+                    linewidth=1.6 if role == "al" else 1.3,
+                    fill_alpha=0.14 if role == "al" else 0.06,
                     alpha=1.0 if role == "al" else 0.85,
                 )
                 any_data = True
+                mean = np.nanmean(Y, axis=0)
+                if np.isfinite(mean).any():
+                    y_lo = min(y_lo, float(np.nanmin(mean)))
+                    y_hi = max(y_hi, float(np.nanmax(mean)))
 
         if not any_data:
             plt.close(fig)
             continue
 
-        ax.set_ylim(0, 1.02)
+        # Auto-zoom y-axis with 10% padding (or at least 0.02), clipped to [0, 1].
+        if np.isfinite(y_lo) and np.isfinite(y_hi):
+            pad = max(0.02, (y_hi - y_lo) * 0.15)
+            ax.set_ylim(max(0.0, y_lo - pad), min(1.0, y_hi + pad))
+        else:
+            ax.set_ylim(0, 1.02)
+
         seen = {}
         for h, l in zip(*ax.get_legend_handles_labels()):
-            seen.setdefault(l, h)
-        fig.tight_layout()
+            # Append seed count to deduplicated label so it stays compact.
+            l_with_n = f"{l}, n={n_seeds_per_label.get(l, 0)}"
+            seen.setdefault(l_with_n, h)
         if seen:
-            fig.subplots_adjust(right=0.72)
-            fig.legend(seen.values(), seen.keys(),
-                       loc="center left", bbox_to_anchor=(0.73, 0.5),
-                       fontsize=8, frameon=True, borderaxespad=0.)
+            ax.legend(seen.values(), seen.keys(),
+                      loc="best", fontsize=9, frameon=True, ncol=1,
+                      framealpha=0.9)
+
+        if pick_summary:
+            fig.text(0.5, 0.01,
+                     f"Best-per-model picks: {pick_summary}",
+                     ha="center", fontsize=8, color="gray")
+
+        # Reserve space at the bottom for the picks footnote, then save with
+        # bbox_inches='tight' so nothing gets clipped.
+        fig.tight_layout(rect=(0, 0.05, 1, 1))
         out_path = out_dir / f"accuracy_best_per_model_{ds}.png"
         out_dir.mkdir(parents=True, exist_ok=True)
-        fig.savefig(out_path, dpi=150)
+        fig.savefig(out_path, dpi=150, bbox_inches="tight")
         plt.close(fig)
         written.append(out_path)
     return written
