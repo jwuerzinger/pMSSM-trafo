@@ -65,7 +65,7 @@ def parse_log(log_path):
 
     # Iteration headers — accept both formats
     iter_re = re.compile(
-        r"=== (?:Global|GP Active Learning) Iteration (\d+) ==="
+        r"=== (?:Global|GP Active Learning|DNN Active Learning) Iteration (\d+) ==="
     )
     # Metric lines (same format for both pipelines)
     # train_R² is optional for backward compatibility with older logs
@@ -94,6 +94,7 @@ def parse_log(log_path):
     # Auto-detect pipeline type
     gp_header_re = re.compile(r"GP Active Learning")
     tabpfn_header_re = re.compile(r"pMSSM \(TabPFN\)")
+    dnn_header_re = re.compile(r"DNN Active Learning Iteration")
     # TabPFN logs dataset sizes inline: "AL: n_train=1600, n_val=400"
     al_size_re = re.compile(r"AL: n_train=(\d+), n_val=(\d+)")
     base_size_re = re.compile(r"Baseline: n_train=(\d+), n_val=(\d+)")
@@ -111,6 +112,8 @@ def parse_log(log_path):
                 pipeline = "tabpfn"
             elif pipeline is None and gp_header_re.search(line):
                 pipeline = "gp"
+            elif pipeline is None and dnn_header_re.search(line):
+                pipeline = "dnn"
 
             m = iter_re.search(line)
             if m:
@@ -235,7 +238,7 @@ def plot(data, output_path):
         return
 
     pipeline = data["pipeline"]
-    _pipeline_labels = {"gp": "GP", "transformer": "Transformer", "tabpfn": "TabPFN"}
+    _pipeline_labels = {"gp": "GP", "transformer": "Transformer", "tabpfn": "TabPFN", "dnn": "DNN"}
     pipeline_label = _pipeline_labels.get(pipeline, pipeline.title())
 
     fig, axes = plt.subplots(1, 3, figsize=(18, 5))

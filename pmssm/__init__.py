@@ -46,6 +46,7 @@ from . import evaluation
 from . import visualization
 from . import logging_utils
 from . import resume
+from . import accuracy
 from . import model_generation
 
 # Backward compatibility: expose commonly used functions at package level
@@ -140,6 +141,12 @@ from .model_generation import (
     load_generated_data,
     save_selected_points,
     load_true_eval_dataset,
+)
+
+from .accuracy import (
+    binary_accuracy,
+    update_accuracy_trajectory,
+    write_iter_accuracies,
 )
 
 __all__ = [
@@ -237,4 +244,9 @@ __all__ = [
     'load_generated_data',
     'save_selected_points',
     'load_true_eval_dataset',
+
+    # Classification accuracy capture
+    'binary_accuracy',
+    'update_accuracy_trajectory',
+    'write_iter_accuracies',
 ]

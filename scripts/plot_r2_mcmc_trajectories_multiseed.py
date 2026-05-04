@@ -36,6 +36,7 @@ MODEL_COLORS = {
     "exact_gp":    "tab:orange",
     "deep_gp":     "tab:green",
     "tabpfn":      "tab:red",
+    "dnn":         "tab:purple",
 }
 STRATEGY_COLORS = {
     "top_k":          "tab:blue",

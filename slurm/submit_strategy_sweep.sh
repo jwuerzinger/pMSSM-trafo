@@ -6,8 +6,8 @@
 # appends one row per job to the sweep manifest. Lets downstream bookkeeping
 # scripts map (config, seed) -> (job_id, run_dir, status).
 #
-# Grid (per user decisions, 2026-04-22):
-#   models     : transformer, deep_gp, exact_gp, tabpfn
+# Grid (per user decisions, 2026-04-22 + 2026-05-04 dnn addition):
+#   models     : transformer, dnn, deep_gp, exact_gp, tabpfn
 #   strategies : top_k, top_k_tol_only, entropy_batch
 #              : tabpfn SKIPS entropy_batch (prohibitively expensive)
 #   warm_modes : warm, cold
@@ -19,7 +19,7 @@
 #
 # Env overrides (all optional):
 #   SEEDS       (default "1,2,3,4,5")
-#   MODELS      (default "transformer,deep_gp,exact_gp,tabpfn")
+#   MODELS      (default "transformer,dnn,deep_gp,exact_gp,tabpfn")
 #   STRATEGIES  (default "top_k,top_k_tol_only,entropy_batch"; tabpfn still
 #                auto-skips entropy_batch unless TABPFN_ALLOW_ENTROPY=1)
 #   WARM_MODES  (default "warm,cold"; tabpfn always uses "tabpfn" sentinel)
@@ -60,7 +60,7 @@ fi
 
 SWEEP_ID="$(date +%Y%m%d_%H%M%S)"
 SEEDS="${SEEDS:-1,2,3,4,5}"
-MODELS="${MODELS:-transformer,deep_gp,exact_gp,tabpfn}"
+MODELS="${MODELS:-transformer,dnn,deep_gp,exact_gp,tabpfn}"
 STRATEGIES="${STRATEGIES:-top_k,top_k_tol_only,entropy_batch}"
 WARM_MODES="${WARM_MODES:-warm,cold}"
 SUBMIT_SLEEP_SEC="${SUBMIT_SLEEP_SEC:-0}"
@@ -82,6 +82,7 @@ N_SKIPPED=0
 for model in ${MODELS//,/ }; do
     case "${model}" in
         transformer) submit_script="slurm/submit_al_transformer.sh"; model_tag="transformer";;
+        dnn)         submit_script="slurm/submit_al_dnn.sh";         model_tag="dnn";;
         deep_gp)     submit_script="slurm/submit_al_gp_deep.sh";     model_tag="deep_gp";;
         exact_gp)    submit_script="slurm/submit_al_gp_exact.sh";    model_tag="exact_gp";;
         tabpfn)      submit_script="slurm/submit_al_tabpfn.sh";      model_tag="tabpfn";;

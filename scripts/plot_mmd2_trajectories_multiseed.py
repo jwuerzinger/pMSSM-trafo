@@ -45,6 +45,7 @@ MODEL_COLORS = {
     "exact_gp":    "tab:orange",
     "deep_gp":     "tab:green",
     "tabpfn":      "tab:red",
+    "dnn":         "tab:purple",
 }
 WARM_LS = {
     "warm":   "-",

@@ -38,6 +38,9 @@ sub() {
 # Transformer (1 GPU)
 sub test_al_transformer_output "${CLUSTER_GPU_GRES_1}" "" slurm/test_al_transformer.sh
 
+# DNN (1 GPU)
+sub test_al_dnn_output         "${CLUSTER_GPU_GRES_1}" "" slurm/test_al_dnn.sh
+
 # ExactGP (2 GPUs)
 sub test_al_gp_exact_output    "${CLUSTER_GPU_GRES_2}" "" slurm/test_al_gp_exact.sh
 

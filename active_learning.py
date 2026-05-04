@@ -75,6 +75,7 @@ from pmssm import (
     save_selected_points,
 )
 from pmssm.data import inverse_transform_y
+from pmssm.accuracy import binary_accuracy, write_iter_accuracies
 
 
 
@@ -969,6 +970,52 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
                 logger.info(f"Static random eval: AL_loss={static_loss_al:.6f}, AL_R²={static_r2_al:.4f}")
 
         plot_eval_scatterplots(scatter_results, iteration, iter_plots_dir, logger)
+
+        # ---- Classification-accuracy capture --------------------------------
+        # Compute binary accuracy at the constraint threshold (target_value in
+        # physical space) from the predictions already produced above, and
+        # write them into <output_dir>/accuracy_trajectory.json in the schema
+        # consumed by scripts/plot_hit_rate_trajectories_multiseed.py. With
+        # this cache populated in-training, the offline accuracy plotter
+        # downgrades to a pure cache read (no checkpoint reload, no inference).
+        # Train accuracy needs one extra inference pass per role since the
+        # main loop doesn't already run AL/Baseline against their own train
+        # sets. Failures are non-fatal — accuracy is diagnostic.
+        try:
+            _acc_thr = float(target_value)
+            al_accs: dict = {"val": binary_accuracy(al_own_yt, al_own_yp, _acc_thr)}
+            base_accs: dict = {}
+            if train_baseline:
+                base_accs["val"] = binary_accuracy(base_own_yt, base_own_yp, _acc_thr)
+            if X_mcmc is not None:
+                al_accs["mcmc"] = binary_accuracy(mcmc_yt_al, mcmc_yp_al, _acc_thr)
+                if train_baseline:
+                    base_accs["mcmc"] = binary_accuracy(mcmc_yt_base, mcmc_yp_base, _acc_thr)
+            if X_static_random is not None:
+                al_accs["static_random"] = binary_accuracy(static_yt_al, static_yp_al, _acc_thr)
+                if train_baseline:
+                    base_accs["static_random"] = binary_accuracy(static_yt_base, static_yp_base, _acc_thr)
+            # Train: extra inference on each role's own training set.
+            _, _, _al_tr_yt, _al_tr_yp = cross_evaluate_transformer(
+                model, stats, X, Y,
+                y_transform=y_transform, target='DMRD', device=device,
+                return_predictions=True)
+            al_accs["train"] = binary_accuracy(_al_tr_yt, _al_tr_yp, _acc_thr)
+            if train_baseline and baseline_model is not None:
+                _, _, _bs_tr_yt, _bs_tr_yp = cross_evaluate_transformer(
+                    baseline_model, baseline_stats, X_baseline_train, Y_baseline_train,
+                    y_transform=y_transform, target='DMRD', device=device,
+                    return_predictions=True)
+                base_accs["train"] = binary_accuracy(_bs_tr_yt, _bs_tr_yp, _acc_thr)
+            write_iter_accuracies(output_dir, iteration, al_accs=al_accs,
+                                  baseline_accs=base_accs if base_accs else None)
+            _acc_summary = "  ".join(
+                f"{role}=" + "/".join(f"{k}={v:.4f}" for k, v in (d or {}).items())
+                for role, d in (("AL", al_accs), ("Base", base_accs)) if d
+            )
+            logger.info(f"Accuracy@{_acc_thr}: {_acc_summary}")
+        except Exception as _acc_exc:
+            logger.warning(f"Accuracy capture failed (non-fatal): {_acc_exc}")
 
         # Evaluate on external dataset if provided
         if eval_data_path is not None:

@@ -40,6 +40,11 @@ sub active_learning_output_slurm              "${CLUSTER_GPU_GRES_2}" "" slurm/s
 sub active_learning_output_top_k_slurm        "${CLUSTER_GPU_GRES_2}" "" slurm/submit_al_transformer_top_k.sh
 sub active_learning_output_top_k_n_select_20k "${CLUSTER_GPU_GRES_2}" "" slurm/submit_al_transformer_top_k_20k.sh
 
+# DNN (2 GPUs)
+sub active_learning_dnn_output_slurm              "${CLUSTER_GPU_GRES_2}" "" slurm/submit_al_dnn.sh
+sub active_learning_dnn_output_top_k_slurm        "${CLUSTER_GPU_GRES_2}" "" slurm/submit_al_dnn_top_k.sh
+sub active_learning_dnn_output_top_k_n_select_20k "${CLUSTER_GPU_GRES_2}" "" slurm/submit_al_dnn_top_k_20k.sh
+
 # ExactGP (2 GPUs)
 sub active_learning_exact_gp_output       "${CLUSTER_GPU_GRES_2}" "" slurm/submit_al_gp_exact.sh
 sub active_learning_exact_gp_top_k_output "${CLUSTER_GPU_GRES_2}" "" slurm/submit_al_gp_exact_top_k.sh

@@ -1,0 +1,60 @@
+2026-05-04 16:11:11 [info     ] ============================================================
+2026-05-04 16:11:11 [info     ] Active Learning Pipeline for pMSSM
+2026-05-04 16:11:11 [info     ] ============================================================
+2026-05-04 16:11:11 [info     ] Log file: active_learning_dnn_output_smoke_entropy_batch_warm_seed42_20260504_181111/active_learning.log
+2026-05-04 16:11:11 [info     ] Output directory: active_learning_dnn_output_smoke_entropy_batch_warm_seed42_20260504_181111
+2026-05-04 16:11:11 [info     ] Configuration:
+2026-05-04 16:11:11 [info     ]   n_iterations: 3
+2026-05-04 16:11:11 [info     ]   n_candidates: 5000
+2026-05-04 16:11:11 [info     ]   n_select: 10
+2026-05-04 16:11:11 [info     ]   mc_samples: 10
+2026-05-04 16:11:11 [info     ]   epochs: 200
+2026-05-04 16:11:11 [info     ]   dropout: 0.1
+2026-05-04 16:11:11 [info     ]   n_datasets: 3
+2026-05-04 16:11:11 [info     ]   n_samples: 2000
+2026-05-04 16:11:11 [info     ]   val_fraction: 0.2
+2026-05-04 16:11:11 [info     ]   selection_strategy: entropy_batch
+2026-05-04 16:11:11 [info     ]   entropy_blur: 0.15
+2026-05-04 16:11:11 [info     ]   entropy_beta: 50.0
+2026-05-04 16:11:11 [info     ]   entropy_pool_size: 1500
+2026-05-04 16:11:11 [info     ]   candidate_generation: lhs
+2026-05-04 16:11:11 [info     ]   proximity_sampling: 0.1
+2026-05-04 16:11:11 [info     ]   tolerance_sampling: 1.0
+2026-05-04 16:11:11 [info     ]   target_value: 0.12
+2026-05-04 16:11:11 [info     ]   early_stopping: True (patience=200)
+2026-05-04 16:11:11 [info     ]   warm_starting: True
+2026-05-04 16:11:11 [info     ]   y_transform: log
+2026-05-04 16:11:11 [info     ]   compute_full_metrics: False
+2026-05-04 16:11:11 [info     ]   generate_data: False
+2026-05-04 16:11:11 [info     ] Device: cpu
+2026-05-04 16:11:11 [info     ] Loading data...
+2026-05-04 16:11:11 [info     ] Found 300 ROOT files
+2026-05-04 16:11:11 [info     ] Only using 3 out of the 300 datasets
+2026-05-04 16:11:12 [info     ] Filter (MO_Omega > 0 & < 1 & SP_m_h != -1): 13446 / 30000 samples kept
+2026-05-04 16:11:15 [info     ] Shuffled loaded dataset (13446 samples, seed=42)
+2026-05-04 16:11:15 [info     ] Found 188 MCMC ROOT files in /ptmp/jwuerzin/data/19250082
+2026-05-04 16:12:03 [warning  ] Excluded 143/188 MCMC ROOT files: 85 don't straddle MO_Omega=0.12, 58 contain values below 0.04
+2026-05-04 16:12:05 [info     ] MCMC filter (MO_Omega > 0 & < 1 & SP_m_h != -1): 410958 / 410958 samples kept
+2026-05-04 16:12:09 [info     ] MCMC evaluation dataset: 410958 samples from /ptmp/jwuerzin/data/19250082
+2026-05-04 16:12:09 [info     ] Initial split (80% train / 20% val): 1600 train + 400 val = 2000 total
+2026-05-04 16:12:09 [info     ] Baseline pool: X_full=torch.Size([13446, 19]), reserved [0..1999] excluded from sampling
+2026-05-04 16:12:09 [info     ] Static random evaluation set: 1000 samples (carved from indices 2000..13445)
+2026-05-04 16:12:09 [info     ] Sequential training (need 2+ GPUs for parallel)
+2026-05-04 16:12:09 [info     ] Representative points (from MCMC eval set): bino@idx=5229:Ω=0.1200, wino@idx=162327:Ω=0.1190, higgsino@idx=6628:Ω=0.1200, mixed@idx=33338:Ω=0.1200, median@idx=889:Ω=0.1170
+2026-05-04 16:12:09 [info     ] === DNN Active Learning Iteration 1 ===
+2026-05-04 16:12:09 [info     ] Iteration directory: active_learning_dnn_output_smoke_entropy_batch_warm_seed42_20260504_181111/iteration_001
+2026-05-04 16:12:09 [info     ] Iteration 1: Both models use identical data (1600 train + 400 val)
+2026-05-04 16:12:09 [info     ] AL: n_train=1600, n_val=400
+2026-05-04 16:12:09 [info     ] Baseline: n_train=1600, n_val=400
+2026-05-04 16:12:12 [info     ] AL histograms saved to active_learning_dnn_output_smoke_entropy_batch_warm_seed42_20260504_181111/iteration_001/plots/al
+2026-05-04 16:12:13 [info     ] AL parallel coordinates saved to active_learning_dnn_output_smoke_entropy_batch_warm_seed42_20260504_181111/iteration_001/plots/al
+2026-05-04 16:12:15 [info     ] Baseline histograms saved to active_learning_dnn_output_smoke_entropy_batch_warm_seed42_20260504_181111/iteration_001/plots/baseline
+2026-05-04 16:12:16 [info     ] Baseline parallel coordinates saved to active_learning_dnn_output_smoke_entropy_batch_warm_seed42_20260504_181111/iteration_001/plots/baseline
+2026-05-04 16:12:16 [info     ] Training Active Learning model...
+Training on device: cpu
+Training set size: 1600, Validation set size: 400
+MLP                  | Epoch 0000 | Train MSE = 15.415463 | Val MSE = 11.866266 | LR = 2.999816e-04
+MLP                  | Epoch 0001 | Train MSE = 9.737099 | Val MSE = 5.434851 | LR = 2.999262e-04
+MLP                  | Epoch 0002 | Train MSE = 7.020042 | Val MSE = 6.667872 | LR = 2.998340e-04
+MLP                  | Epoch 0003 | Train MSE = 5.986655 | Val MSE = 5.360029 | LR = 2.997050e-04
+MLP                  | Epoch 0004 | Train MSE = 5.637909 | Val MSE = 5.528622 | LR = 2.995391e-04

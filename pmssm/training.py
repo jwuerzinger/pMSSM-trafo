@@ -25,7 +25,7 @@ from .visualization import (
     plot_losses, scatter_true_vs_pred, hist_true_vs_pred,
     compare_random_predictions, gp_predict
 )
-from .models import PMSSMTransformerTabular
+from .models import PMSSMTransformerTabular, PMSSMFeedForward
 
 
 # ===== Transformer Training =====
@@ -158,9 +158,10 @@ def train_model_worker(gpu_id, X, Y, idx_train, idx_val, epochs, dropout,
                       result_queue, model_name="model", log_dir=None,
                       plots_dir=None, checkpoint_path=None,
                       warm_start_path=None, early_stopping=True, patience=200,
-                      y_transform='zscore', target='DMRD', lsp_fracs=None):
+                      y_transform='zscore', target='DMRD', lsp_fracs=None,
+                      arch='transformer'):
     """
-    Worker function for multiprocessing transformer training.
+    Worker function for multiprocessing neural-network training.
 
     Args:
         gpu_id: GPU device ID or "cpu"
@@ -178,6 +179,7 @@ def train_model_worker(gpu_id, X, Y, idx_train, idx_val, epochs, dropout,
         patience: Early stopping patience in epochs (default: 200)
         y_transform: Y transformation type: 'zscore' (default) or 'log'
         target: Target function name (e.g., 'DMRD') for log transformation
+        arch: Architecture, 'transformer' (default) or 'dnn' (PMSSMFeedForward).
     """
     device = f"cuda:{gpu_id}" if isinstance(gpu_id, int) else gpu_id
 
@@ -240,13 +242,24 @@ def train_model_worker(gpu_id, X, Y, idx_train, idx_val, epochs, dropout,
     train_loader = DataLoader(train_dataset, batch_size=256, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=256, shuffle=False)
 
-    model = PMSSMTransformerTabular(
-        d_model=128,
-        nhead=4,
-        num_layers=3,
-        dim_feedforward=512,
-        dropout=dropout,
-    )
+    if arch == 'dnn':
+        model = PMSSMFeedForward(
+            n_params=19,
+            d_model=64,
+            num_layers=4,
+            dim_feedforward=256,
+            dropout=dropout,
+        )
+    elif arch == 'transformer':
+        model = PMSSMTransformerTabular(
+            d_model=128,
+            nhead=4,
+            num_layers=3,
+            dim_feedforward=512,
+            dropout=dropout,
+        )
+    else:
+        raise ValueError(f"Unknown arch: {arch!r} (expected 'transformer' or 'dnn')")
 
     # Warm-start from previous checkpoint if provided
     if warm_start_path is not None:

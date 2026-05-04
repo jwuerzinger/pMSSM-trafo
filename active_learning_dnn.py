@@ -1,30 +1,32 @@
 """
-Active Learning pipeline for pMSSM relic density prediction using TabPFN.
+Active Learning pipeline for pMSSM relic density prediction using a feed-forward DNN.
 
-Uses TabPFN's native predictive variance for uncertainty estimation and
-ensemble diversity (multiple random_state runs) for entropy-based batch selection.
-
-Based on active_learning.py — same loop structure, data generation, and evaluation.
+Mirrors active_learning.py exactly (data, normalisation, training loop,
+MC-Dropout uncertainty, acquisition strategies, output layout) but swaps the
+PMSSMTransformerTabular surrogate for a simple PMSSMFeedForward MLP — the
+canonical baseline from the BSM-AL literature (Goodsell & Joury / BSMArt).
 """
+
+import warnings
+warnings.filterwarnings('ignore', message='.*enable_nested_tensor.*')
 
 from pathlib import Path
 from datetime import datetime
 import logging
-from concurrent.futures import ThreadPoolExecutor
 import structlog
 import json
+import multiprocessing as mp
 import random
 import re
-import time
 
 import click
 import numpy as np
 import pandas as pd
 import yaml
 import torch
+from torch.utils.data import DataLoader
 
 from sklearn.metrics import mean_squared_error, r2_score
-from tabpfn import TabPFNRegressor
 
 # Import from unified pmssm package
 from pmssm import (
@@ -37,12 +39,25 @@ from pmssm import (
     load_pmssm_data,
     load_mcmc_data,
     make_split,
+    compute_stats,
+    PMSSMDataset,
+    # Models
+    PMSSMTransformer,
+    PMSSMTransformerTabular,
+    PMSSMFeedForward,
+    is_transformer,
+    get_model_name,
     # Selection
     generate_candidate_pool,
     select_top_uncertain,
     select_top_uncertain_filtered,
     select_top_uncertain_tol_only,
     select_entropy_batch_mc,
+    # Uncertainty
+    compute_uncertainty_mc_dropout,
+    # Training
+    train_with_validation,
+    train_model_worker,
     # Visualization
     plot_data_histograms,
     plot_parallel_coordinates,
@@ -53,12 +68,13 @@ from pmssm import (
     plot_representative_trajectories,
     # Logging
     setup_logging,
+    setup_worker_logging,
     # Model generation
     generate_models_from_csv,
     load_generated_data,
     save_selected_points,
 )
-from pmssm.data import transform_y, inverse_transform_y
+from pmssm.data import inverse_transform_y
 from pmssm.accuracy import binary_accuracy, write_iter_accuracies
 
 
@@ -67,119 +83,46 @@ from pmssm.accuracy import binary_accuracy, write_iter_accuracies
 # visualization, logging) are now imported from the unified pmssm package
 
 
-def fit_tabpfn(X_train, Y_train, device="cuda:0"):
-    """Fit a TabPFN model on training data.
+def cross_evaluate_transformer(model, stats, X_other, Y_other,
+                                y_transform='log', target='DMRD', device='cpu',
+                                return_predictions=False):
+    """Evaluate a trained transformer on an arbitrary dataset.
 
-    Args:
-        X_train: (N, 19) tensor in physical space
-        Y_train: (N, 1) tensor in physical space (raw Omega h^2)
-    Returns:
-        model: Fitted TabPFNRegressor
-        y_train_t: log-transformed training targets (numpy, 1D)
-    """
-    y_train_t = transform_y(Y_train, target="DMRD").squeeze().numpy()
-    model = TabPFNRegressor(device=device)
-    model.fit(X_train.numpy(), y_train_t)
-    return model, y_train_t
-
-
-def tabpfn_predict(model, X, batch_size=10_000):
-    """Predict with a fitted TabPFN model, batched to avoid OOM.
-
-    Args:
-        model: Fitted TabPFNRegressor
-        X: (N, D) tensor in physical space
-        batch_size: Max samples per predict call
-    Returns:
-        y_pred: (N,) numpy array in log-transformed space
-    """
-    X_np = X.numpy()
-    if len(X_np) <= batch_size:
-        return model.predict(X_np)
-    predictions = []
-    for i in range(0, len(X_np), batch_size):
-        predictions.append(model.predict(X_np[i:i + batch_size]))
-    return np.concatenate(predictions)
-
-
-def tabpfn_predict_with_variance(model, X, batch_size=10_000):
-    """Predict with variance from TabPFN's native predictive distribution, batched.
-
-    Args:
-        model: Fitted TabPFNRegressor
-        X: (N, D) tensor in physical space
-        batch_size: Max samples per predict call
-    Returns:
-        y_pred: (N,) numpy array in log-transformed space
-        variance: (N,) numpy array
-    """
-    X_np = X.numpy()
-    all_means, all_vars = [], []
-    for i in range(0, len(X_np), batch_size):
-        batch = X_np[i:i + batch_size]
-        results = model.predict(batch, output_type="full")
-        all_means.append(results['mean'])
-        var = results['criterion'].variance(results['logits']).detach().cpu().numpy()
-        if var.ndim > 1:
-            var = var.mean(axis=0)
-        all_vars.append(var)
-    return np.concatenate(all_means), np.concatenate(all_vars)
-
-
-def tabpfn_ensemble_predictions(X_train, Y_train, X_candidates, n_samples, device, logger):
-    """Generate T diverse prediction sets by varying TabPFN's random_state.
-
-    Returns pred_mean, pred_var, and a (T, N, 1) predictions tensor
-    suitable for select_entropy_batch_mc.
-    """
-    y_train_t = transform_y(Y_train, target="DMRD").squeeze().numpy()
-    X_cand_np = X_candidates.numpy()
-    X_train_np = X_train.numpy()
-
-    predictions = []
-    batch_size = 10_000
-    logger.info(f"Running {n_samples} TabPFN ensemble forward passes...")
-    for t in range(n_samples):
-        model_t = TabPFNRegressor(device=device, random_state=t)
-        model_t.fit(X_train_np, y_train_t)
-        # Batch predictions to avoid OOM on large candidate pools
-        preds_chunks = []
-        for i in range(0, len(X_cand_np), batch_size):
-            preds_chunks.append(model_t.predict(X_cand_np[i:i + batch_size]))
-        predictions.append(np.concatenate(preds_chunks))
-
-    predictions = np.stack(predictions)  # (T, N)
-    pred_mean = predictions.mean(axis=0)  # (N,)
-    pred_var = predictions.var(axis=0)    # (N,)
-
-    logger.info(f"Uncertainty stats: mean={pred_var.mean():.6f}, max={pred_var.max():.6f}")
-
-    # Convert to torch tensors matching select_entropy_batch_mc interface
-    pred_mean_t = torch.from_numpy(pred_mean).float().unsqueeze(1)   # (N, 1)
-    pred_var_t = torch.from_numpy(pred_var).float().unsqueeze(1)     # (N, 1)
-    predictions_t = torch.from_numpy(predictions).float().unsqueeze(2)  # (T, N, 1)
-
-    return pred_mean_t, pred_var_t, predictions_t
-
-
-def cross_evaluate_tabpfn(model, X_other, Y_other,
-                           target='DMRD', return_predictions=False):
-    """Evaluate a fitted TabPFN model on an arbitrary dataset.
-
+    Uses the model's own training stats for normalization.
     Returns (mse_loss, r2) where mse_loss is in transformed space
-    and r2 is in physical space.
+    (matching the regular training/validation loss) and r2 is in physical space.
     If return_predictions=True, returns (mse_loss, r2, Y_true_phys, Y_pred_phys).
     """
-    Y_transformed = transform_y(Y_other, target=target).squeeze()
-    Y_pred_transformed = tabpfn_predict(model, X_other)
-    Y_pred_transformed_t = torch.from_numpy(Y_pred_transformed).float()
+    model.eval()
+    model.to(device)
+    mean_X, std_X, mean_Y, std_Y = stats
 
-    # MSE in transformed space
-    mse = ((Y_transformed - Y_pred_transformed_t) ** 2).mean().item()
+    # Normalize using the model's training stats
+    X_norm = (X_other - mean_X) / std_X
 
-    # R² in physical space
-    Y_true_phys = inverse_transform_y(Y_transformed, target=target)
-    Y_pred_phys = inverse_transform_y(Y_pred_transformed_t, target=target)
+    if y_transform == 'log':
+        from pmssm.data import transform_y
+        Y_transformed = transform_y(Y_other, target=target)
+    else:
+        Y_transformed = (Y_other - mean_Y) / std_Y
+
+    # Batch inference to avoid OOM on large datasets (e.g., 410k MCMC samples)
+    preds = []
+    with torch.no_grad():
+        for i in range(0, len(X_norm), 1024):
+            preds.append(model(X_norm[i:i+1024].to(device)).cpu())
+    Y_pred_transformed = torch.cat(preds, dim=0)
+
+    # MSE in transformed space (same space as training loss)
+    mse = ((Y_transformed.squeeze() - Y_pred_transformed.squeeze()) ** 2).mean().item()
+
+    # R² in physical space (same as regular R² computation)
+    if y_transform == 'log':
+        Y_true_phys = inverse_transform_y(Y_transformed, target=target)
+        Y_pred_phys = inverse_transform_y(Y_pred_transformed, target=target)
+    else:
+        Y_true_phys = Y_transformed * std_Y + mean_Y
+        Y_pred_phys = Y_pred_transformed * std_Y + mean_Y
 
     ss_res = ((Y_true_phys - Y_pred_phys) ** 2).sum()
     ss_tot = ((Y_true_phys - Y_true_phys.mean()) ** 2).sum()
@@ -187,68 +130,6 @@ def cross_evaluate_tabpfn(model, X_other, Y_other,
     if return_predictions:
         return mse, r2, Y_true_phys.squeeze(), Y_pred_phys.squeeze()
     return mse, r2
-
-
-def _tabpfn_eval_worker(gpu_id, X_train, Y_train, eval_sets, candidates,
-                        target, name, repr_X=None):
-    """Fit a TabPFN model on its training set and evaluate on N held-out sets.
-
-    Returns a dict keyed by eval-set name, each holding loss / r2 /
-    Y_true / Y_pred. ``train`` is the self-eval on the training set.
-    Designed to be called either directly (sequential) or via
-    ``concurrent.futures.ThreadPoolExecutor.submit`` for two-GPU concurrency
-    on the same node — threads share the parent's CUDA context, so binding
-    is by ``cuda:{gpu_id}`` argument with no spawn deadlock.
-
-    eval_sets: list of ``(name, X, Y)`` tuples. Entries with X/Y == None are
-    skipped — convenient for optional MCMC / static-random sets.
-
-    candidates: optional tensor of candidate points. If provided, the worker
-    also returns native-variance predictions on them, so the main process
-    doesn't have to re-fit the model and re-run inference.
-
-    repr_X: optional (k, D) tensor of representative anchor points. If given,
-    the worker returns mean+var predictions on them in log-transformed space
-    (matching y_transform='log' for the trajectory plotter).
-    """
-    device = f"cuda:{gpu_id}" if torch.cuda.is_available() else "cpu"
-    t0 = time.time()
-    model, _ = fit_tabpfn(X_train, Y_train, device=device)
-    fit_time = time.time() - t0
-
-    result = {
-        '_name': name, '_fit_time': fit_time, '_device': device,
-    }
-    # Self-eval on the train set, retaining predictions so the caller can
-    # compute classification accuracy from this same train-conditioned model
-    # without re-fitting (TabPFN inference is non-deterministic across fits).
-    tr_loss, tr_r2, tr_yt, tr_yp = cross_evaluate_tabpfn(
-        model, X_train, Y_train, target=target, return_predictions=True
-    )
-    result['train'] = {'loss': tr_loss, 'r2': tr_r2, 'yt': tr_yt, 'yp': tr_yp}
-
-    for set_name, X_eval, Y_eval in eval_sets:
-        if X_eval is None or Y_eval is None:
-            result[set_name] = None
-            continue
-        loss, r2, yt, yp = cross_evaluate_tabpfn(
-            model, X_eval, Y_eval, target=target, return_predictions=True
-        )
-        result[set_name] = {'loss': loss, 'r2': r2, 'yt': yt, 'yp': yp}
-
-    if candidates is not None:
-        cand_mean, cand_var = tabpfn_predict_with_variance(model, candidates)
-        result['candidates'] = {'mean': cand_mean, 'var': cand_var}
-    else:
-        result['candidates'] = None
-
-    if repr_X is not None:
-        repr_mean, repr_var = tabpfn_predict_with_variance(model, repr_X)
-        result['repr'] = {'mean': repr_mean, 'var': repr_var}
-    else:
-        result['repr'] = None
-
-    return result
 
 
 def load_config_with_sweep(config_file, sweep_index=None):
@@ -298,16 +179,18 @@ def load_config_with_sweep(config_file, sweep_index=None):
 @click.option('--n-iterations', default=1, type=int, help="Number of active learning iterations.")
 @click.option('--n-candidates', default=1000, type=int, help="Candidate pool size.")
 @click.option('--n-select', default=10, type=int, help="Number of points to select per iteration.")
-@click.option('--n-ensemble-samples', default=16, type=int, help="Number of TabPFN ensemble runs for uncertainty (default: 16).")
+@click.option('--mc-samples', default=30, type=int, help="Number of MC dropout forward passes.")
+@click.option('--epochs', default=2000, type=int, help="Training epochs per iteration (default: 2000).")
+@click.option('--dropout', default=0.1, type=float, help="Dropout rate for MC dropout.")
 @click.option('--n-datasets', default=None, type=int, help="Number of ROOT datasets to load.")
 @click.option('--n-samples', default=None, type=int, help="Number of samples to use from data.")
 @click.option('--val-fraction', default=0.2, type=float, help="Fraction of data reserved for validation (default: 0.2). Applied to initial data and each batch of new points.")
-@click.option('--output-dir', default='active_learning_tabpfn_output', type=str, help="Output directory.")
+@click.option('--output-dir', default='active_learning_output', type=str, help="Output directory.")
 @click.option('--generate-data/--no-generate-data', default=False, help="Generate new models using Run3ModelGen.")
 @click.option('--min-gen-fraction', default=0.6, type=float, help="Minimum fraction of n-select that must be generated successfully before stopping retries (default: 0.6).")
 @click.option('--max-gen-attempts', default=10, type=int, help="Maximum number of generation attempts per iteration (default: 10).")
 @click.option('--gen-workers', default=1, type=int, help="Number of parallel genModels.py workers per generation attempt (default: 1).")
-@click.option('--selection-strategy', default='top_k', type=click.Choice(['top_k', 'top_k_tol_only', 'entropy_batch']), help="Selection strategy: top_k (default), top_k_tol_only (short-circuit, no proximity), or entropy_batch (prohibitively expensive for TabPFN).")
+@click.option('--selection-strategy', default='entropy_batch', type=click.Choice(['top_k', 'top_k_tol_only', 'entropy_batch']), help="Selection strategy: top_k, top_k_tol_only (short-circuit, no proximity weighting), or entropy_batch (default).")
 @click.option('--entropy-blur', default=0.15, type=float, help="Entropy smoothing parameter (entropy_batch only).")
 @click.option('--entropy-beta', default=50.0, type=float, help="Gibbs sampling temperature (entropy_batch only).")
 @click.option('--entropy-pool-size', default=5000, type=int, help="Focused pool size for entropy_batch pre-filtering.")
@@ -323,67 +206,104 @@ def load_config_with_sweep(config_file, sweep_index=None):
               help="YAML config file (overrides CLI args). Supports parameter sweeps.")
 @click.option('--sweep-index', default=None, type=int,
               help="Sweep combination index (requires --config-file).")
+@click.option('--early-stopping/--no-early-stopping', default=True,
+              help="Enable early stopping on validation loss (default: enabled).")
+@click.option('--patience', default=200, type=int,
+              help="Early stopping patience (epochs without improvement, default: 200).")
+@click.option('--warm-starting/--no-warm-starting', default=True,
+              help="Warm-start from previous iteration checkpoint (default: enabled).")
+@click.option('--eval-data-path', default=None, type=str,
+              help="Path to external eval dataset (ROOT/CSV) for validation.")
+@click.option('--compute-full-metrics/--no-compute-full-metrics', default=False,
+              help="Compute comprehensive evaluation metrics (accuracy, MSE, RMSE).")
+@click.option('--y-transform', default='log', type=click.Choice(['zscore', 'log']),
+              help="Y transformation: 'log' (default, recommended) or 'zscore' (legacy).")
 @click.option('--mcmc-data-dir', default=None, type=str,
               help="Directory containing MCMC ROOT files for static evaluation (e.g., data/19250082).")
 @click.option('--static-eval-size', default=100_000, type=int,
               help="Number of models to reserve from the random pool as a static evaluation set (default: 100000).")
 @click.option('--data-dir', default='data/18387358', type=str,
               help="Directory containing training ROOT files (default: data/18387358).")
+@click.option('--use-mcmc-loader/--no-use-mcmc-loader', default=False,
+              help="Load initial training data via load_mcmc_data (MCMC-specific filters: straddle-0.12, exclude <0.04). Default: load_pmssm_data via --data-dir.")
+@click.option('--train-baseline/--no-train-baseline', default=True,
+              help="Also train a random-sampling baseline model each iteration (default: enabled). Disable for pure capacity tests.")
 @click.option('--resume-from', default=None, type=str,
               help="Path to previous output dir to resume from (loads state.pt).")
 @click.option('--n-additional-iterations', default=None, type=int,
               help="If --resume-from given, run this many more iterations.")
-@click.option('--gpu-ids', '--gpu-id', 'gpu_id', default='0', type=str,
-              help="Comma-separated GPU IDs. One: sequential AL+baseline on that GPU. "
-                   "Two: AL on the first, baseline on the second, in parallel (default: 0). "
-                   "--gpu-id is kept as an alias for backward compatibility.")
+@click.option('--gpu-ids', default='2,3', type=str,
+              help="Comma-separated GPU IDs for AL and baseline models (default: 2,3).")
 @click.option('--seed', default=42, type=int,
               help="Master random seed propagated to torch / numpy / candidate pool (default: 42).")
-def main(testing, n_iterations, n_candidates, n_select, n_ensemble_samples, n_datasets, n_samples, val_fraction, output_dir, generate_data, min_gen_fraction, max_gen_attempts, gen_workers, selection_strategy, entropy_blur, entropy_beta, entropy_pool_size, candidate_generation, proximity_sampling, tolerance_sampling, target_value, config_file, sweep_index, mcmc_data_dir, static_eval_size, data_dir, resume_from, n_additional_iterations, gpu_id, seed):
+def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, dropout, n_datasets, n_samples, val_fraction, output_dir, generate_data, min_gen_fraction, max_gen_attempts, gen_workers, selection_strategy, entropy_blur, entropy_beta, entropy_pool_size, candidate_generation, proximity_sampling, tolerance_sampling, target_value, config_file, sweep_index, early_stopping, patience, warm_starting, eval_data_path, compute_full_metrics, y_transform, mcmc_data_dir, static_eval_size, data_dir, use_mcmc_loader, train_baseline, resume_from, n_additional_iterations, gpu_ids, seed):
     """
-    Active learning pipeline for pMSSM relic density prediction using TabPFN.
+    Active learning pipeline for pMSSM relic density prediction (DNN variant).
 
-    Uses TabPFN's native predictive variance for uncertainty and
-    ensemble diversity for entropy-based batch selection.
+    Trains PMSSMFeedForward, computes uncertainty via MC Dropout,
+    and selects most informative points for data generation.
     """
     # Load config file and override parameters if provided
     if config_file is not None:
         cfg = load_config_with_sweep(config_file, sweep_index)
 
+        # Map config keys to local variables
         _cfg_map = {
             'n_iterations': 'n_iterations',
             'n_candidates': 'n_candidates',
             'n_select': 'n_select',
-            'n_ensemble_samples': 'n_ensemble_samples',
+            'mc_samples': 'mc_samples',
+            'epochs': 'epochs',
+            'dropout': 'dropout',
             'selection_strategy': 'selection_strategy',
             'entropy_blur': 'entropy_blur',
             'entropy_beta': 'entropy_beta',
             'entropy_pool_size': 'entropy_pool_size',
             'candidate_generation': 'candidate_generation',
             'proximity_sampling': 'proximity_sampling',
+            'tolerance_sampling': 'tolerance_sampling',
             'target_value': 'target_value',
+            'early_stopping': 'early_stopping',
+            'patience': 'patience',
+            'warm_starting': 'warm_starting',
+            'compute_full_metrics': 'compute_full_metrics',
+            'y_transform': 'y_transform',
         }
 
+        # Override locals with config values
         for cfg_key, local_key in _cfg_map.items():
             if cfg_key in cfg:
+                # Type conversion
                 val = cfg[cfg_key]
-                if cfg_key in ('n_iterations', 'n_candidates', 'n_select', 'n_ensemble_samples', 'entropy_pool_size'):
+                if cfg_key in ('n_iterations', 'n_candidates', 'n_select', 'mc_samples', 'epochs', 'entropy_pool_size', 'patience'):
                     val = int(val)
-                elif cfg_key in ('entropy_blur', 'entropy_beta', 'proximity_sampling', 'target_value'):
+                elif cfg_key in ('dropout', 'entropy_blur', 'entropy_beta', 'proximity_sampling', 'target_value'):
                     val = float(val)
+                elif cfg_key in ('early_stopping', 'warm_starting', 'compute_full_metrics'):
+                    val = bool(val)
+                # String values: selection_strategy, candidate_generation, y_transform
                 locals()[local_key] = val
 
+        # Re-assign variables from locals (Python locals() quirk workaround)
         n_iterations = locals().get('n_iterations', n_iterations)
         n_candidates = locals().get('n_candidates', n_candidates)
         n_select = locals().get('n_select', n_select)
-        n_ensemble_samples = locals().get('n_ensemble_samples', n_ensemble_samples)
+        mc_samples = locals().get('mc_samples', mc_samples)
+        epochs = locals().get('epochs', epochs)
+        dropout = locals().get('dropout', dropout)
         selection_strategy = locals().get('selection_strategy', selection_strategy)
         entropy_blur = locals().get('entropy_blur', entropy_blur)
         entropy_beta = locals().get('entropy_beta', entropy_beta)
         entropy_pool_size = locals().get('entropy_pool_size', entropy_pool_size)
         candidate_generation = locals().get('candidate_generation', candidate_generation)
         proximity_sampling = locals().get('proximity_sampling', proximity_sampling)
+        tolerance_sampling = locals().get('tolerance_sampling', tolerance_sampling)
         target_value = locals().get('target_value', target_value)
+        early_stopping = locals().get('early_stopping', early_stopping)
+        patience = locals().get('patience', patience)
+        warm_starting = locals().get('warm_starting', warm_starting)
+        compute_full_metrics = locals().get('compute_full_metrics', compute_full_metrics)
+        y_transform = locals().get('y_transform', y_transform)
 
     # Propagate master seed to torch / numpy / python-random
     torch.manual_seed(seed)
@@ -398,9 +318,11 @@ def main(testing, n_iterations, n_candidates, n_select, n_ensemble_samples, n_da
     if n_candidates < n_select: n_candidates = n_select
 
     output_dir = Path(output_dir)
-    # Collision-free dir suffix. TabPFN has no warm-start, use "tabpfn" sentinel
-    # so the manifest parser can still split on the 4-token pattern.
-    auto_suffix = f"_{selection_strategy}_tabpfn_seed{seed}_{timestamp}"
+    # Collision-free dir suffix: only append when caller did not already
+    # include a timestamp. This is the code path used by both manual runs and
+    # the strategy-sweep launcher (slurm/submit_strategy_sweep.sh).
+    warm_tag = "warm" if warm_starting else "cold"
+    auto_suffix = f"_{selection_strategy}_{warm_tag}_seed{seed}_{timestamp}"
     if not re.search(r"_\d{8}_\d{6}$", output_dir.name):
         output_dir = output_dir.with_name(output_dir.name + auto_suffix)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -409,7 +331,7 @@ def main(testing, n_iterations, n_candidates, n_select, n_ensemble_samples, n_da
     log_file, logger = setup_logging(timestamp, output_dir=output_dir)
 
     logger.info("=" * 60)
-    logger.info("Active Learning Pipeline for pMSSM (TabPFN)")
+    logger.info("Active Learning Pipeline for pMSSM")
     logger.info("=" * 60)
     logger.info(f"Log file: {log_file}")
     logger.info(f"Output directory: {output_dir}")
@@ -421,19 +343,21 @@ def main(testing, n_iterations, n_candidates, n_select, n_ensemble_samples, n_da
     if testing:
         n_datasets = n_datasets if n_datasets is not None else 3
         n_samples = n_samples if n_samples is not None else 30
+        epochs = 50  # Aligned with GP script (was 10)
         n_candidates = 100
-        n_ensemble_samples = 4
+        mc_samples = 10
         logger.info("Testing mode enabled")
     else:
         n_datasets = n_datasets if n_datasets is not None else -1
         n_samples = n_samples if n_samples is not None else None
 
     logger.info(f"Configuration:")
-    logger.info(f"  model: TabPFN")
     logger.info(f"  n_iterations: {n_iterations}")
     logger.info(f"  n_candidates: {n_candidates}")
     logger.info(f"  n_select: {n_select}")
-    logger.info(f"  n_ensemble_samples: {n_ensemble_samples}")
+    logger.info(f"  mc_samples: {mc_samples}")
+    logger.info(f"  epochs: {epochs}")
+    logger.info(f"  dropout: {dropout}")
     logger.info(f"  n_datasets: {n_datasets}")
     logger.info(f"  n_samples: {n_samples if n_samples else 'all'}")
     logger.info(f"  val_fraction: {val_fraction}")
@@ -444,16 +368,21 @@ def main(testing, n_iterations, n_candidates, n_select, n_ensemble_samples, n_da
         logger.info(f"  entropy_pool_size: {entropy_pool_size}")
     logger.info(f"  candidate_generation: {candidate_generation}")
     logger.info(f"  proximity_sampling: {proximity_sampling}")
+    logger.info(f"  tolerance_sampling: {tolerance_sampling}")
     logger.info(f"  target_value: {target_value}")
+    logger.info(f"  early_stopping: {early_stopping} (patience={patience})")
+    logger.info(f"  warm_starting: {warm_starting}")
+    logger.info(f"  y_transform: {y_transform}")
+    logger.info(f"  compute_full_metrics: {compute_full_metrics}")
+    if eval_data_path:
+        logger.info(f"  eval_data_path: {eval_data_path}")
     logger.info(f"  generate_data: {generate_data}")
     if generate_data:
         logger.info(f"  min_gen_fraction: {min_gen_fraction} (target: {int(n_select * min_gen_fraction)} valid models per iteration)")
         logger.info(f"  max_gen_attempts: {max_gen_attempts}")
         logger.info(f"  gen_workers: {gen_workers}")
 
-    gpu_id_list = [int(s.strip()) for s in gpu_id.split(',') if s.strip()]
-    if not gpu_id_list:
-        gpu_id_list = [0]
+    gpu_id_list = [int(x.strip()) for x in gpu_ids.split(',')]
     AL_GPU_ID = gpu_id_list[0]
     BASELINE_GPU_ID = gpu_id_list[1] if len(gpu_id_list) > 1 else gpu_id_list[0]
     device = f"cuda:{AL_GPU_ID}" if torch.cuda.is_available() else "cpu"
@@ -461,28 +390,17 @@ def main(testing, n_iterations, n_candidates, n_select, n_ensemble_samples, n_da
     if torch.cuda.is_available():
         logger.info(f"GPU: {torch.cuda.get_device_name(AL_GPU_ID)}")
 
-    # Parallel fit+eval via ThreadPoolExecutor when 2+ distinct GPUs are
-    # visible; otherwise sequential on the single device. Threads (rather
-    # than mp.Process) avoid the ROCm/MI300A spawn-after-CUDA-init deadlock
-    # — the two threads share the parent's CUDA context, with binding
-    # selected per call by the worker's ``cuda:{gpu_id}`` argument.
-    use_parallel = (
-        torch.cuda.is_available()
-        and torch.cuda.device_count() >= 2
-        and AL_GPU_ID != BASELINE_GPU_ID
-    )
-    if use_parallel:
-        logger.info(f"Parallel TabPFN enabled (threads): AL on cuda:{AL_GPU_ID}, Baseline on cuda:{BASELINE_GPU_ID}")
-    else:
-        logger.info(f"Sequential TabPFN: both models on {device}")
-
     # Load initial data
     logger.info("Loading data...")
     plots_dir = output_dir / "plots"
     plots_dir.mkdir(parents=True, exist_ok=True)
-    X, Y, F = load_pmssm_data(n_datasets=n_datasets, logger=logger,
-                              plot_dir=str(plots_dir), data_dir=data_dir,
-                              return_lsp_fracs=True)
+    if use_mcmc_loader:
+        logger.info(f"Using load_mcmc_data (MCMC-specific filters) on {data_dir}")
+        X, Y, F = load_mcmc_data(data_dir=data_dir, logger=logger, return_lsp_fracs=True)
+    else:
+        X, Y, F = load_pmssm_data(n_datasets=n_datasets, logger=logger,
+                                  plot_dir=str(plots_dir), data_dir=data_dir,
+                                  return_lsp_fracs=True)
 
     # Shuffle once up-front: loaders concatenate ROOT files (= MCMC chains)
     # in file order, so X[:n_samples] would otherwise draw from a single chain.
@@ -502,32 +420,6 @@ def main(testing, n_iterations, n_candidates, n_select, n_ensemble_samples, n_da
     # Store full dataset for baseline random sampling (before any truncation)
     X_full, Y_full, F_full = X.clone(), Y.clone(), F.clone()
 
-    # ------------------------------------------------------------------
-    # Representative-points trajectory tracker (seeded, deterministic).
-    # Picks 1 point per LSP class nearest the target Ωh², plus the Ωh²-median
-    # row, from the MCMC eval pool (fallback: X_full). Symmetric to the
-    # transformer + GP drivers' trackers; predictions are in log-transformed
-    # space (TabPFN's training space).
-    # ------------------------------------------------------------------
-    if X_mcmc is not None:
-        _repr_pool_X, _repr_pool_Y, _repr_pool_F = X_mcmc, Y_mcmc, F_mcmc
-        _repr_pool_source = "MCMC eval set"
-    else:
-        _repr_pool_X, _repr_pool_Y, _repr_pool_F = X_full, Y_full, F_full
-        _repr_pool_source = "X_full"
-    _target_value = TARGET_CONFIG["DMRD"]["true_value"]
-    repr_points = pick_representative_points(
-        _repr_pool_X, _repr_pool_Y, _repr_pool_F, _target_value, seed=seed
-    )
-    logger.info(
-        f"Representative points (from {_repr_pool_source}): "
-        + ", ".join(f"{lbl}@idx={i}:Ω={y.item():.4f}"
-                    for lbl, i, y in zip(repr_points['labels'],
-                                          repr_points['indices'],
-                                          repr_points['Y'].reshape(-1)))
-    )
-    repr_log = []
-
     # Select n_samples from loaded data (or use all), then split 80/20 into train/val.
     if n_samples is not None:
         if n_samples > len(X):
@@ -545,7 +437,7 @@ def main(testing, n_iterations, n_candidates, n_select, n_ensemble_samples, n_da
     n_val_init = max(1, int(n_total_init * val_fraction))
     n_train_init = n_total_init - n_val_init
 
-    # Use a fixed permutation so the split is reproducible
+    # Reproducible permutation, driven by the master seed
     perm = torch.randperm(n_total_init, generator=torch.Generator().manual_seed(seed))
     idx_train_perm = perm[:n_train_init]
     idx_val_perm = perm[n_train_init:]
@@ -591,7 +483,15 @@ def main(testing, n_iterations, n_candidates, n_select, n_ensemble_samples, n_da
                 f"(carved from indices {initial_reserved}..{len(X_full)-1})"
             )
 
-    logger.info(f"TabPFN model — no training loop, fit is in-context learning")
+    # Determine if we can use parallel training (2+ GPUs for AL + baseline)
+    use_parallel = torch.cuda.is_available() and torch.cuda.device_count() >= 2
+    if use_parallel:
+        logger.info(f"Parallel training enabled: {torch.cuda.device_count()} GPUs available")
+        logger.info(f"  - Active Learning model on cuda:{AL_GPU_ID}")
+        logger.info(f"  - Baseline model on cuda:{BASELINE_GPU_ID}")
+        mp.set_start_method('spawn', force=True)
+    else:
+        logger.info("Sequential training (need 2+ GPUs for parallel)")
 
     # Run active learning iterations
     all_selected_points = []
@@ -619,6 +519,10 @@ def main(testing, n_iterations, n_candidates, n_select, n_ensemble_samples, n_da
     base_on_al_val_losses = []
     base_on_al_val_r2 = []
 
+    # Checkpoint tracking for warm-starting
+    prev_al_checkpoint = None
+    prev_baseline_checkpoint = None
+
     # Persistent baseline augmentation indices (grows each iteration)
     baseline_add_indices = torch.tensor([], dtype=torch.long)
     prev_n_add_train = 0
@@ -644,28 +548,38 @@ def main(testing, n_iterations, n_candidates, n_select, n_ensemble_samples, n_da
         if saved is None:
             raise click.UsageError(f"No state.pt found in {resume_from}")
         logger.info(f"Resuming from {resume_from} (last completed iteration: {saved['iteration']})")
+        # Restore accumulated data
         X, Y = saved["X"], saved["Y"]
         X_val, Y_val = saved["X_val"], saved["Y_val"]
+        # Older checkpoints may predate LSP-fraction plumbing; fall back to NaN
+        # so scatter plots in the resumed run simply show one (uncolored) cluster
+        # until new fractions start arriving with generated data.
         F = saved.get("F", torch.full((len(X), 3), float('nan')))
         F_val = saved.get("F_val", torch.full((len(X_val), 3), float('nan')))
         baseline_add_indices = saved["baseline_add_indices"]
         prev_n_add_train = saved["prev_n_add_train"]
         prev_n_add_val = saved["prev_n_add_val"]
+        # Restore metric histories
         all_selected_points = saved["all_selected_points"]
         iteration_numbers = saved["iteration_numbers"]
-        al_train_losses = saved["al_train_losses"]; al_val_losses = saved["al_val_losses"]
-        al_r2_scores = saved["al_r2_scores"]; al_train_r2_scores = saved["al_train_r2_scores"]
-        al_n_train = saved["al_n_train"]; al_n_val = saved["al_n_val"]
+        al_train_losses = saved["al_train_losses"]
+        al_val_losses = saved["al_val_losses"]
+        al_r2_scores = saved["al_r2_scores"]
+        al_train_r2_scores = saved["al_train_r2_scores"]
+        al_n_train = saved["al_n_train"]
+        al_n_val = saved["al_n_val"]
         baseline_train_losses = saved["baseline_train_losses"]
         baseline_val_losses = saved["baseline_val_losses"]
         baseline_r2_scores = saved["baseline_r2_scores"]
         baseline_train_r2_scores = saved["baseline_train_r2_scores"]
-        baseline_n_train = saved["baseline_n_train"]; baseline_n_val = saved["baseline_n_val"]
+        baseline_n_train = saved["baseline_n_train"]
+        baseline_n_val = saved["baseline_n_val"]
         al_on_base_val_losses = saved["al_on_base_val_losses"]
         al_on_base_val_r2 = saved["al_on_base_val_r2"]
         base_on_al_val_losses = saved["base_on_al_val_losses"]
         base_on_al_val_r2 = saved["base_on_al_val_r2"]
-        al_on_mcmc_losses = saved["al_on_mcmc_losses"]; al_on_mcmc_r2 = saved["al_on_mcmc_r2"]
+        al_on_mcmc_losses = saved["al_on_mcmc_losses"]
+        al_on_mcmc_r2 = saved["al_on_mcmc_r2"]
         baseline_on_mcmc_losses = saved["baseline_on_mcmc_losses"]
         baseline_on_mcmc_r2 = saved["baseline_on_mcmc_r2"]
         al_on_static_random_losses = saved["al_on_static_random_losses"]
@@ -673,16 +587,47 @@ def main(testing, n_iterations, n_candidates, n_select, n_ensemble_samples, n_da
         baseline_on_static_random_losses = saved["baseline_on_static_random_losses"]
         baseline_on_static_random_r2 = saved["baseline_on_static_random_r2"]
         eval_r2_scores = saved.get("eval_r2_scores", [])
+        # Previous checkpoints for warm-starting
+        prev_al_checkpoint = Path(resume_from) / f"iteration_{saved['iteration']:03d}" / "al_model_checkpoint.pt"
+        prev_baseline_checkpoint = Path(resume_from) / f"iteration_{saved['iteration']:03d}" / "baseline_model_checkpoint.pt"
+        if not prev_al_checkpoint.exists():
+            prev_al_checkpoint = None
+        if not prev_baseline_checkpoint.exists():
+            prev_baseline_checkpoint = None
         restore_rng(saved["rng"])
+        # Run N additional iterations on top of what's saved
         start_iteration = saved["iteration"] + 1
         n_iterations = saved["iteration"] + n_additional_iterations
         logger.info(f"Resuming at iteration {start_iteration}, will run through {n_iterations}")
 
-    for iteration in range(start_iteration, n_iterations + 1):
-        logger.info(f"=== Global Iteration {iteration} ===")
+    # ------------------------------------------------------------------
+    # Representative-points trajectory tracker (seeded, deterministic).
+    # Picks 1 point per LSP class nearest the target Ωh², plus the Ωh²-median
+    # row, from the MCMC eval pool (fallback: X_full). Same 5 inputs are
+    # evaluated with MC-Dropout every iteration so we can plot mean±1σ vs
+    # iteration for fixed anchors. Matches on resume because selection is
+    # deterministic given the same (X_mcmc, Y_mcmc) pool and target.
+    # ------------------------------------------------------------------
+    if X_mcmc is not None:
+        _repr_pool_X, _repr_pool_Y, _repr_pool_F = X_mcmc, Y_mcmc, F_mcmc
+        _repr_pool_source = "MCMC eval set"
+    else:
+        _repr_pool_X, _repr_pool_Y, _repr_pool_F = X_full, Y_full, F_full
+        _repr_pool_source = "X_full"
+    repr_points = pick_representative_points(
+        _repr_pool_X, _repr_pool_Y, _repr_pool_F, target_value, seed=seed
+    )
+    logger.info(
+        f"Representative points (from {_repr_pool_source}): "
+        + ", ".join(f"{lbl}@idx={i}:Ω={y.item():.4f}"
+                    for lbl, i, y in zip(repr_points['labels'],
+                                          repr_points['indices'],
+                                          repr_points['Y'].reshape(-1)))
+    )
+    repr_log = []
 
-        # Reset any per-iteration lazy state (see retry block for details).
-        al_model_retry = None
+    for iteration in range(start_iteration, n_iterations + 1):
+        logger.info(f"=== DNN Active Learning Iteration {iteration} ===")
 
         # Create iteration directory for logs and plots
         iter_dir = output_dir / f"iteration_{iteration:03d}"
@@ -693,7 +638,16 @@ def main(testing, n_iterations, n_candidates, n_select, n_ensemble_samples, n_da
 
         # Build baseline dataset (train + val).
         # Baseline validation grows in parallel with AL validation.
-        if iteration == 1:
+        if not train_baseline:
+            # Capacity-test mode: no baseline, point at empty tensors so
+            # downstream tensor concat logic still works but trains nothing.
+            X_baseline_train = X[:0].clone()
+            Y_baseline_train = Y[:0].clone()
+            X_baseline_val = X_val[:0].clone()
+            Y_baseline_val = Y_val[:0].clone()
+            F_baseline_train = F[:0].clone()
+            F_baseline_val = F_val[:0].clone()
+        elif iteration == 1:
             # First iteration: Baseline is an exact copy of AL (same train/val split).
             X_baseline_train = X.clone()
             Y_baseline_train = Y.clone()
@@ -756,34 +710,44 @@ def main(testing, n_iterations, n_candidates, n_select, n_ensemble_samples, n_da
             logger.info(f"Baseline dataset: {n_train_init}+{n_add_train}={len(X_baseline_train)} train, "
                         f"{n_val_init}+{n_add_val}={len(X_baseline_val)} val")
 
-        logger.info(f"AL: n_train={len(X)}, n_val={len(X_val)}")
-        logger.info(f"Baseline: n_train={len(X_baseline_train)}, n_val={len(X_baseline_val)}")
-
-        # Plot data distribution histograms and parallel coordinates for AL
+        # Combine training + validation into single tensors for transformer workers.
+        # Train indices come first, then val — contiguous and non-overlapping by construction.
         X_combined = torch.cat([X, X_val], dim=0)
         Y_combined = torch.cat([Y, Y_val], dim=0)
+        F_combined = torch.cat([F, F_val], dim=0)
         idx_train_al = torch.arange(len(X))
         idx_val_al = torch.arange(len(X), len(X_combined))
 
         X_baseline_combined = torch.cat([X_baseline_train, X_baseline_val], dim=0)
         Y_baseline_combined = torch.cat([Y_baseline_train, Y_baseline_val], dim=0)
+        F_baseline_combined = torch.cat([F_baseline_train, F_baseline_val], dim=0)
         idx_train_base = torch.arange(len(X_baseline_train))
         idx_val_base = torch.arange(len(X_baseline_train), len(X_baseline_combined))
 
+        logger.info(f"AL: n_train={len(idx_train_al)}, n_val={len(idx_val_al)}")
+        logger.info(f"Baseline: n_train={len(idx_train_base)}, n_val={len(idx_val_base)}")
+
+        # Plot data distribution histograms and parallel coordinates for AL
         al_hist_dir = iter_plots_dir / "al"
         al_hist_dir.mkdir(parents=True, exist_ok=True)
         plot_data_histograms(X_combined, Y_combined, idx_train_al, idx_val_al, al_hist_dir, "AL", iteration, logger,
                              reference_X=X_mcmc, reference_Y=Y_mcmc, reference_label="MCMC")
         plot_parallel_coordinates(X_combined, idx_train_al, idx_val_al, al_hist_dir, "AL", iteration, logger)
 
-        baseline_hist_dir = iter_plots_dir / "baseline"
-        baseline_hist_dir.mkdir(parents=True, exist_ok=True)
-        plot_data_histograms(X_baseline_combined, Y_baseline_combined, idx_train_base, idx_val_base, baseline_hist_dir, "Baseline", iteration, logger,
-                             reference_X=X_static_random, reference_Y=Y_static_random, reference_label="Static Random")
-        plot_parallel_coordinates(X_baseline_combined, idx_train_base, idx_val_base, baseline_hist_dir, "Baseline", iteration, logger)
+        # Skip baseline plots when the baseline pool is empty (e.g.
+        # --no-train-baseline capacity tests) — plot_data_histograms uses a
+        # log-scaled axis and crashes on empty data.
+        if len(X_baseline_combined) > 0:
+            baseline_hist_dir = iter_plots_dir / "baseline"
+            baseline_hist_dir.mkdir(parents=True, exist_ok=True)
+            plot_data_histograms(X_baseline_combined, Y_baseline_combined, idx_train_base, idx_val_base, baseline_hist_dir, "Baseline", iteration, logger,
+                                 reference_X=X_static_random, reference_Y=Y_static_random, reference_label="Static Random")
+            plot_parallel_coordinates(X_baseline_combined, idx_train_base, idx_val_base, baseline_hist_dir, "Baseline", iteration, logger)
 
-        # Plot new-points-only histograms for baseline (iteration 2+)
-        if iteration > 1 and len(new_idx) > 0:
+        # Plot new-points-only histograms for baseline (iteration 2+). `new_idx`
+        # is only assigned in the grow-baseline branch above, which is skipped
+        # when --no-train-baseline is set.
+        if train_baseline and iteration > 1 and len(new_idx) > 0:
             X_base_new = X_full[new_idx]
             Y_base_new = Y_full[new_idx]
             idx_train_base_new = torch.arange(n_new_train)
@@ -792,209 +756,261 @@ def main(testing, n_iterations, n_candidates, n_select, n_ensemble_samples, n_da
                                  baseline_hist_dir, "Baseline_new", iteration, logger,
                                  fixed_axes=True)
 
-        # Generate candidate pool BEFORE the parallel fit+eval phase, so each
-        # worker thread can also predict (mean, var) on the candidates in the
-        # same call. This avoids re-fitting either model in the main thread
-        # just to run inference for selection and uncertainty plots.
-        logger.info(f"Generating {n_candidates} candidate points using {candidate_generation} sampling...")
-        candidates = generate_candidate_pool(n_candidates, method=candidate_generation, seed=seed * 10_000 + iteration)
+        al_checkpoint_path = iter_dir / "al_model_checkpoint.pt"
+        baseline_checkpoint_path = iter_dir / "baseline_model_checkpoint.pt"
 
-        if proximity_sampling > 0 or tolerance_sampling > 0:
-            threshold_transformed = transform_y(torch.tensor([target_value]), target="DMRD").item()
-        else:
-            threshold_transformed = 0.0
+        # Determine warm-start paths
+        al_warm_start = prev_al_checkpoint if (iteration > 1 and warm_starting) else None
+        baseline_warm_start = prev_baseline_checkpoint if (iteration > 1 and warm_starting) else None
 
-        # Only request candidate variance predictions from the AL worker when
-        # the selection strategy needs them. entropy_batch generates its own
-        # ensemble predictions from scratch, so skipping here saves one
-        # inference pass on the candidate pool.
-        al_needs_cand = selection_strategy in ('top_k', 'top_k_tol_only')
-        al_candidates = candidates if al_needs_cand else None
+        nan_baseline_results = {
+            'best_train_loss': float('nan'),
+            'best_val_loss':   float('nan'),
+            'r2_score':        float('nan'),
+            'train_r2_score':  float('nan'),
+        }
 
-        # Fit + evaluate AL and Baseline TabPFN models. In parallel on 2 GPUs
-        # when available; otherwise sequentially on the same GPU. Each worker
-        # returns: train (self-eval) + own_val + cross_val + optional mcmc +
-        # optional static + candidate predictions — the same set the sequential
-        # path computes, plus the candidate inference.
-        al_eval_sets = [
-            ('own_val',   X_val,            Y_val),
-            ('cross_val', X_baseline_val,   Y_baseline_val),
-            ('mcmc',      X_mcmc,           Y_mcmc),
-            ('static',    X_static_random,  Y_static_random),
-        ]
-        base_eval_sets = [
-            ('own_val',   X_baseline_val,   Y_baseline_val),
-            ('cross_val', X_val,            Y_val),
-            ('mcmc',      X_mcmc,           Y_mcmc),
-            ('static',    X_static_random,  Y_static_random),
-        ]
+        if not train_baseline:
+            # Capacity-test mode: train AL only. NaN baseline metrics propagate
+            # through logs / summary / plots without breaking anything.
+            logger.info("Training Active Learning model (baseline disabled)...")
+            al_queue = mp.Queue()
+            train_model_worker(device, X_combined, Y_combined, idx_train_al, idx_val_al, epochs, dropout,
+                             al_queue, "AL", iter_dir, iter_plots_dir, al_checkpoint_path,
+                             al_warm_start, early_stopping, patience, y_transform, "DMRD",
+                             F_combined, arch='dnn')
+            al_results = al_queue.get()
+            baseline_results = dict(nan_baseline_results)
+        elif use_parallel:
+            # Train AL and Baseline in parallel on different GPUs
+            al_queue = mp.Queue()
+            baseline_queue = mp.Queue()
 
-        t_fit0 = time.time()
-        if use_parallel:
-            logger.info(f"Fitting+evaluating TabPFN AL on cuda:{AL_GPU_ID} and Baseline on cuda:{BASELINE_GPU_ID} in parallel threads...")
-            with ThreadPoolExecutor(max_workers=2) as ex:
-                al_fut = ex.submit(
-                    _tabpfn_eval_worker,
-                    AL_GPU_ID, X, Y, al_eval_sets, al_candidates, 'DMRD', 'AL',
-                    repr_X=repr_points['X'],
-                )
-                base_fut = ex.submit(
-                    _tabpfn_eval_worker,
-                    BASELINE_GPU_ID, X_baseline_train, Y_baseline_train, base_eval_sets,
-                    candidates, 'DMRD', 'Baseline',
-                )
-                al_res = al_fut.result()
-                base_res = base_fut.result()
-        else:
-            logger.info(f"Fitting+evaluating TabPFN AL then Baseline sequentially on {device}...")
-            al_res = _tabpfn_eval_worker(
-                AL_GPU_ID, X, Y, al_eval_sets, al_candidates, 'DMRD', 'AL',
-                repr_X=repr_points['X'],
+            al_process = mp.Process(
+                target=train_model_worker,
+                args=(AL_GPU_ID, X_combined, Y_combined, idx_train_al, idx_val_al, epochs, dropout, al_queue, "AL",
+                      iter_dir, iter_plots_dir, al_checkpoint_path, al_warm_start,
+                      early_stopping, patience, y_transform, "DMRD", F_combined),
+                kwargs={'arch': 'dnn'},
             )
-            base_res = _tabpfn_eval_worker(
-                BASELINE_GPU_ID, X_baseline_train, Y_baseline_train, base_eval_sets,
-                candidates, 'DMRD', 'Baseline',
+            baseline_process = mp.Process(
+                target=train_model_worker,
+                args=(BASELINE_GPU_ID, X_baseline_combined, Y_baseline_combined, idx_train_base, idx_val_base, epochs,
+                      dropout, baseline_queue, "Baseline", iter_dir, iter_plots_dir,
+                      baseline_checkpoint_path, baseline_warm_start, early_stopping, patience,
+                      y_transform, "DMRD", F_baseline_combined),
+                kwargs={'arch': 'dnn'},
             )
 
-        # Representative-points capture from this iteration's AL fit.
-        if al_res.get('repr') is not None:
-            repr_log.append({
-                'iteration': int(iteration),
-                'mean': np.asarray(al_res['repr']['mean']).reshape(-1).tolist(),
-                'var':  np.asarray(al_res['repr']['var']).reshape(-1).tolist(),
-            })
-        logger.info(f"TabPFN fit+eval wall-clock: {time.time() - t_fit0:.1f}s  "
-                   f"(AL fit {al_res['_fit_time']:.1f}s, Baseline fit {base_res['_fit_time']:.1f}s)")
+            al_process.start()
+            baseline_process.start()
 
-        # Unpack worker results into the flat names the rest of the loop expects.
-        al_train_loss        = al_res['train']['loss']
-        al_train_r2_val      = al_res['train']['r2']
-        al_val_loss_val      = al_res['own_val']['loss']
-        al_r2_val            = al_res['own_val']['r2']
-        al_own_yt            = al_res['own_val']['yt']
-        al_own_yp            = al_res['own_val']['yp']
-        al_cross_loss        = al_res['cross_val']['loss']
-        al_cross_r2          = al_res['cross_val']['r2']
-        al_cross_yt          = al_res['cross_val']['yt']
-        al_cross_yp          = al_res['cross_val']['yp']
+            # Read from queues BEFORE joining — joining first can deadlock
+            # if the result object is large enough to fill the pipe buffer.
+            al_results = al_queue.get()
+            baseline_results = baseline_queue.get()
 
-        base_train_loss      = base_res['train']['loss']
-        base_train_r2_val    = base_res['train']['r2']
-        base_val_loss_val    = base_res['own_val']['loss']
-        base_r2_val          = base_res['own_val']['r2']
-        base_own_yt          = base_res['own_val']['yt']
-        base_own_yp          = base_res['own_val']['yp']
-        base_cross_loss      = base_res['cross_val']['loss']
-        base_cross_r2        = base_res['cross_val']['r2']
-        base_cross_yt        = base_res['cross_val']['yt']
-        base_cross_yp        = base_res['cross_val']['yp']
+            al_process.join()
+            baseline_process.join()
+        else:
+            # Sequential training
+            logger.info("Training Active Learning model...")
+            al_queue = mp.Queue()
+            train_model_worker(device, X_combined, Y_combined, idx_train_al, idx_val_al, epochs, dropout,
+                             al_queue, "AL", iter_dir, iter_plots_dir, al_checkpoint_path,
+                             al_warm_start, early_stopping, patience, y_transform, "DMRD",
+                             F_combined, arch='dnn')
+            al_results = al_queue.get()
 
-        logger.info(f"AL metrics: train_loss={al_train_loss:.6f}, val_loss={al_val_loss_val:.6f}, R²={al_r2_val:.4f}, train_R²={al_train_r2_val:.4f}")
-        logger.info(f"Baseline metrics: train_loss={base_train_loss:.6f}, val_loss={base_val_loss_val:.6f}, R²={base_r2_val:.4f}, train_R²={base_train_r2_val:.4f}")
+            logger.info("Training Baseline model (random samples)...")
+            baseline_queue = mp.Queue()
+            train_model_worker(device, X_baseline_combined, Y_baseline_combined, idx_train_base, idx_val_base,
+                             epochs, dropout, baseline_queue, "Baseline", iter_dir,
+                             iter_plots_dir, baseline_checkpoint_path, baseline_warm_start,
+                             early_stopping, patience, y_transform, "DMRD",
+                             F_baseline_combined, arch='dnn')
+            baseline_results = baseline_queue.get()
+
+        # Log results
+        logger.info(f"AL metrics: train_loss={al_results['best_train_loss']:.6f}, val_loss={al_results['best_val_loss']:.6f}, R²={al_results['r2_score']:.4f}, train_R²={al_results['train_r2_score']:.4f}")
+        logger.info(f"Baseline metrics: train_loss={baseline_results['best_train_loss']:.6f}, val_loss={baseline_results['best_val_loss']:.6f}, R²={baseline_results['r2_score']:.4f}, train_R²={baseline_results['train_r2_score']:.4f}")
 
         # Track metrics
         iteration_numbers.append(iteration)
-        al_train_losses.append(al_train_loss)
-        al_val_losses.append(al_val_loss_val)
-        al_r2_scores.append(al_r2_val)
-        al_train_r2_scores.append(al_train_r2_val)
-        al_n_train.append(len(X))
-        al_n_val.append(len(X_val))
-        baseline_train_losses.append(base_train_loss)
-        baseline_val_losses.append(base_val_loss_val)
-        baseline_r2_scores.append(base_r2_val)
-        baseline_train_r2_scores.append(base_train_r2_val)
-        baseline_n_train.append(len(X_baseline_train))
-        baseline_n_val.append(len(X_baseline_val))
+        al_train_losses.append(al_results['best_train_loss'])
+        al_val_losses.append(al_results['best_val_loss'])
+        al_r2_scores.append(al_results['r2_score'])
+        al_train_r2_scores.append(al_results['train_r2_score'])
+        al_n_train.append(len(idx_train_al))
+        al_n_val.append(len(idx_val_al))
+        baseline_train_losses.append(baseline_results['best_train_loss'])
+        baseline_val_losses.append(baseline_results['best_val_loss'])
+        baseline_r2_scores.append(baseline_results['r2_score'])
+        baseline_train_r2_scores.append(baseline_results['train_r2_score'])
+        baseline_n_train.append(len(idx_train_base))
+        baseline_n_val.append(len(idx_val_base))
 
-        logger.info(f"Cross-eval: AL_on_base_val_loss={al_cross_loss:.6f}, AL_on_base_val_R²={al_cross_r2:.4f}, base_on_al_val_loss={base_cross_loss:.6f}, base_on_al_val_R²={base_cross_r2:.4f}")
-        al_on_base_val_losses.append(al_cross_loss)
-        al_on_base_val_r2.append(al_cross_r2)
-        base_on_al_val_losses.append(base_cross_loss)
-        base_on_al_val_r2.append(base_cross_r2)
+        # Load the AL model checkpoint saved by the worker for MC Dropout uncertainty estimation.
+        # This avoids training the AL model a second time.
+        stats = compute_stats(X_combined, Y_combined, idx_train_al)
+        model = PMSSMFeedForward(
+            n_params=19, d_model=64, num_layers=4, dim_feedforward=256, dropout=dropout
+        )
+        model.load_state_dict(torch.load(al_checkpoint_path, map_location=device))
+        logger.info(f"Loaded AL model from {al_checkpoint_path} for MC Dropout uncertainty estimation")
+
+        # Representative-points capture: MC-Dropout mean/var at the fixed anchors
+        # chosen before the iteration loop. Output is in transformed space; the
+        # end-of-run plot maps it to physical Ωh².
+        _rep_mean_t, _rep_var_t = compute_uncertainty_mc_dropout(
+            model, repr_points['X'], stats, mc_samples, device, logger=None
+        )
+        repr_log.append({
+            'iteration': int(iteration),
+            'mean': _rep_mean_t.squeeze(-1).cpu().numpy().tolist(),
+            'var':  _rep_var_t.squeeze(-1).cpu().numpy().tolist(),
+        })
+
+        # AL own-val predictions (always computed — one scatter panel + metric).
+        al_own_loss, al_own_r2, al_own_yt, al_own_yp = cross_evaluate_transformer(
+            model, stats, X_val, Y_val,
+            y_transform=y_transform, target='DMRD', device=device, return_predictions=True)
 
         scatter_results = [
             dict(model_name="AL", dataset_name="AL Val", y_true=al_own_yt, y_pred=al_own_yp,
-                 loss=al_val_loss_val, r2=al_r2_val, n=len(X_val), lsp_fracs=F_val),
-            dict(model_name="AL", dataset_name="Base Val", y_true=al_cross_yt, y_pred=al_cross_yp,
-                 loss=al_cross_loss, r2=al_cross_r2, n=len(X_baseline_val), lsp_fracs=F_baseline_val),
-            dict(model_name="Baseline", dataset_name="AL Val", y_true=base_cross_yt, y_pred=base_cross_yp,
-                 loss=base_cross_loss, r2=base_cross_r2, n=len(X_val), lsp_fracs=F_val),
-            dict(model_name="Baseline", dataset_name="Base Val", y_true=base_own_yt, y_pred=base_own_yp,
-                 loss=base_val_loss_val, r2=base_r2_val, n=len(X_baseline_val), lsp_fracs=F_baseline_val),
+                 loss=al_own_loss, r2=al_own_r2, n=len(X_val), lsp_fracs=F_val),
         ]
 
-        # MCMC eval (optional — present only if mcmc_data_dir was provided)
-        if al_res.get('mcmc') is not None:
-            mcmc_loss_al  = al_res['mcmc']['loss']
-            mcmc_r2_al    = al_res['mcmc']['r2']
-            mcmc_yt_al    = al_res['mcmc']['yt']
-            mcmc_yp_al    = al_res['mcmc']['yp']
-            mcmc_loss_base = base_res['mcmc']['loss']
-            mcmc_r2_base   = base_res['mcmc']['r2']
-            mcmc_yt_base   = base_res['mcmc']['yt']
-            mcmc_yp_base   = base_res['mcmc']['yp']
+        # Cross-eval and baseline-side scatter panels only when baseline was
+        # actually trained; otherwise X_baseline_val is empty and the baseline
+        # checkpoint doesn't exist. Metric lists get NaN-filled so row indices
+        # stay aligned across iterations.
+        baseline_model = None
+        baseline_stats = None
+        if train_baseline:
+            al_cross_loss, al_cross_r2, al_cross_yt, al_cross_yp = cross_evaluate_transformer(
+                model, stats, X_baseline_val, Y_baseline_val,
+                y_transform=y_transform, target='DMRD', device=device, return_predictions=True)
+
+            baseline_stats = compute_stats(X_baseline_combined, Y_baseline_combined, idx_train_base)
+            baseline_model = PMSSMFeedForward(
+                n_params=19, d_model=64, num_layers=4, dim_feedforward=256, dropout=dropout)
+            baseline_model.load_state_dict(torch.load(baseline_checkpoint_path, map_location=device))
+            base_cross_loss, base_cross_r2, base_cross_yt, base_cross_yp = cross_evaluate_transformer(
+                baseline_model, baseline_stats, X_val, Y_val,
+                y_transform=y_transform, target='DMRD', device=device, return_predictions=True)
+            base_own_loss, base_own_r2, base_own_yt, base_own_yp = cross_evaluate_transformer(
+                baseline_model, baseline_stats, X_baseline_val, Y_baseline_val,
+                y_transform=y_transform, target='DMRD', device=device, return_predictions=True)
+
+            logger.info(f"Cross-eval: AL_on_base_val_loss={al_cross_loss:.6f}, AL_on_base_val_R²={al_cross_r2:.4f}, base_on_al_val_loss={base_cross_loss:.6f}, base_on_al_val_R²={base_cross_r2:.4f}")
+            al_on_base_val_losses.append(al_cross_loss)
+            al_on_base_val_r2.append(al_cross_r2)
+            base_on_al_val_losses.append(base_cross_loss)
+            base_on_al_val_r2.append(base_cross_r2)
+
+            scatter_results.extend([
+                dict(model_name="AL", dataset_name="Base Val", y_true=al_cross_yt, y_pred=al_cross_yp,
+                     loss=al_cross_loss, r2=al_cross_r2, n=len(X_baseline_val), lsp_fracs=F_baseline_val),
+                dict(model_name="Baseline", dataset_name="AL Val", y_true=base_cross_yt, y_pred=base_cross_yp,
+                     loss=base_cross_loss, r2=base_cross_r2, n=len(X_val), lsp_fracs=F_val),
+                dict(model_name="Baseline", dataset_name="Base Val", y_true=base_own_yt, y_pred=base_own_yp,
+                     loss=base_own_loss, r2=base_own_r2, n=len(X_baseline_val), lsp_fracs=F_baseline_val),
+            ])
+        else:
+            al_on_base_val_losses.append(float('nan'))
+            al_on_base_val_r2.append(float('nan'))
+            base_on_al_val_losses.append(float('nan'))
+            base_on_al_val_r2.append(float('nan'))
+
+        # Evaluate on MCMC static dataset
+        if X_mcmc is not None:
+            mcmc_loss_al, mcmc_r2_al, mcmc_yt_al, mcmc_yp_al = cross_evaluate_transformer(
+                model, stats, X_mcmc, Y_mcmc,
+                y_transform=y_transform, target='DMRD', device=device, return_predictions=True)
             al_on_mcmc_losses.append(mcmc_loss_al)
             al_on_mcmc_r2.append(mcmc_r2_al)
-            baseline_on_mcmc_losses.append(mcmc_loss_base)
-            baseline_on_mcmc_r2.append(mcmc_r2_base)
-            logger.info(f"MCMC eval: AL_loss={mcmc_loss_al:.6f}, AL_R²={mcmc_r2_al:.4f}, "
-                        f"Base_loss={mcmc_loss_base:.6f}, Base_R²={mcmc_r2_base:.4f}")
             scatter_results.append(dict(model_name="AL", dataset_name="MCMC",
                 y_true=mcmc_yt_al, y_pred=mcmc_yp_al, loss=mcmc_loss_al, r2=mcmc_r2_al, n=len(X_mcmc), lsp_fracs=F_mcmc))
-            scatter_results.append(dict(model_name="Baseline", dataset_name="MCMC",
-                y_true=mcmc_yt_base, y_pred=mcmc_yp_base, loss=mcmc_loss_base, r2=mcmc_r2_base, n=len(X_mcmc), lsp_fracs=F_mcmc))
+            if train_baseline:
+                mcmc_loss_base, mcmc_r2_base, mcmc_yt_base, mcmc_yp_base = cross_evaluate_transformer(
+                    baseline_model, baseline_stats, X_mcmc, Y_mcmc,
+                    y_transform=y_transform, target='DMRD', device=device, return_predictions=True)
+                baseline_on_mcmc_losses.append(mcmc_loss_base)
+                baseline_on_mcmc_r2.append(mcmc_r2_base)
+                logger.info(f"MCMC eval: AL_loss={mcmc_loss_al:.6f}, AL_R²={mcmc_r2_al:.4f}, "
+                            f"Base_loss={mcmc_loss_base:.6f}, Base_R²={mcmc_r2_base:.4f}")
+                scatter_results.append(dict(model_name="Baseline", dataset_name="MCMC",
+                    y_true=mcmc_yt_base, y_pred=mcmc_yp_base, loss=mcmc_loss_base, r2=mcmc_r2_base, n=len(X_mcmc), lsp_fracs=F_mcmc))
+            else:
+                baseline_on_mcmc_losses.append(float('nan'))
+                baseline_on_mcmc_r2.append(float('nan'))
+                logger.info(f"MCMC eval: AL_loss={mcmc_loss_al:.6f}, AL_R²={mcmc_r2_al:.4f}")
 
-        # Static-random eval (optional)
-        if al_res.get('static') is not None:
-            static_loss_al  = al_res['static']['loss']
-            static_r2_al    = al_res['static']['r2']
-            static_yt_al    = al_res['static']['yt']
-            static_yp_al    = al_res['static']['yp']
-            static_loss_base = base_res['static']['loss']
-            static_r2_base   = base_res['static']['r2']
-            static_yt_base   = base_res['static']['yt']
-            static_yp_base   = base_res['static']['yp']
+        # Evaluate on static random dataset
+        if X_static_random is not None:
+            static_loss_al, static_r2_al, static_yt_al, static_yp_al = cross_evaluate_transformer(
+                model, stats, X_static_random, Y_static_random,
+                y_transform=y_transform, target='DMRD', device=device, return_predictions=True)
             al_on_static_random_losses.append(static_loss_al)
             al_on_static_random_r2.append(static_r2_al)
-            baseline_on_static_random_losses.append(static_loss_base)
-            baseline_on_static_random_r2.append(static_r2_base)
-            logger.info(f"Static random eval: AL_loss={static_loss_al:.6f}, AL_R²={static_r2_al:.4f}, "
-                        f"Base_loss={static_loss_base:.6f}, Base_R²={static_r2_base:.4f}")
             scatter_results.append(dict(model_name="AL", dataset_name="Static Rnd",
                 y_true=static_yt_al, y_pred=static_yp_al, loss=static_loss_al, r2=static_r2_al, n=len(X_static_random), lsp_fracs=F_static_random))
-            scatter_results.append(dict(model_name="Baseline", dataset_name="Static Rnd",
-                y_true=static_yt_base, y_pred=static_yp_base, loss=static_loss_base, r2=static_r2_base, n=len(X_static_random), lsp_fracs=F_static_random))
+            if train_baseline:
+                static_loss_base, static_r2_base, static_yt_base, static_yp_base = cross_evaluate_transformer(
+                    baseline_model, baseline_stats, X_static_random, Y_static_random,
+                    y_transform=y_transform, target='DMRD', device=device, return_predictions=True)
+                baseline_on_static_random_losses.append(static_loss_base)
+                baseline_on_static_random_r2.append(static_r2_base)
+                logger.info(f"Static random eval: AL_loss={static_loss_al:.6f}, AL_R²={static_r2_al:.4f}, "
+                            f"Base_loss={static_loss_base:.6f}, Base_R²={static_r2_base:.4f}")
+                scatter_results.append(dict(model_name="Baseline", dataset_name="Static Rnd",
+                    y_true=static_yt_base, y_pred=static_yp_base, loss=static_loss_base, r2=static_r2_base, n=len(X_static_random), lsp_fracs=F_static_random))
+            else:
+                baseline_on_static_random_losses.append(float('nan'))
+                baseline_on_static_random_r2.append(float('nan'))
+                logger.info(f"Static random eval: AL_loss={static_loss_al:.6f}, AL_R²={static_r2_al:.4f}")
 
         plot_eval_scatterplots(scatter_results, iteration, iter_plots_dir, logger)
 
         # ---- Classification-accuracy capture --------------------------------
-        # All predictions used here come from the SAME TabPFN model fitted on
-        # the iteration's training set (the model produced inside
-        # _tabpfn_eval_worker, then discarded). Re-fitting would change
-        # predictions because TabPFN inference is non-deterministic across
-        # fits. We piggyback on the worker's already-computed (yt, yp) tuples.
-        # Failures are non-fatal — accuracy is diagnostic.
+        # Compute binary accuracy at the constraint threshold (target_value in
+        # physical space) from the predictions already produced above, and
+        # write them into <output_dir>/accuracy_trajectory.json in the schema
+        # consumed by scripts/plot_hit_rate_trajectories_multiseed.py. With
+        # this cache populated in-training, the offline accuracy plotter
+        # downgrades to a pure cache read (no checkpoint reload, no inference).
+        # Train accuracy needs one extra inference pass per role since the
+        # main loop doesn't already run AL/Baseline against their own train
+        # sets. Failures are non-fatal — accuracy is diagnostic.
         try:
             _acc_thr = float(target_value)
-            al_accs = {
-                "val":   binary_accuracy(al_own_yt, al_own_yp, _acc_thr),
-                "train": binary_accuracy(
-                    al_res['train']['yt'], al_res['train']['yp'], _acc_thr),
-            }
-            base_accs = {
-                "val":   binary_accuracy(base_own_yt, base_own_yp, _acc_thr),
-                "train": binary_accuracy(
-                    base_res['train']['yt'], base_res['train']['yp'], _acc_thr),
-            }
-            if al_res.get('mcmc') is not None:
+            al_accs: dict = {"val": binary_accuracy(al_own_yt, al_own_yp, _acc_thr)}
+            base_accs: dict = {}
+            if train_baseline:
+                base_accs["val"] = binary_accuracy(base_own_yt, base_own_yp, _acc_thr)
+            if X_mcmc is not None:
                 al_accs["mcmc"] = binary_accuracy(mcmc_yt_al, mcmc_yp_al, _acc_thr)
-                base_accs["mcmc"] = binary_accuracy(mcmc_yt_base, mcmc_yp_base, _acc_thr)
-            if al_res.get('static') is not None:
+                if train_baseline:
+                    base_accs["mcmc"] = binary_accuracy(mcmc_yt_base, mcmc_yp_base, _acc_thr)
+            if X_static_random is not None:
                 al_accs["static_random"] = binary_accuracy(static_yt_al, static_yp_al, _acc_thr)
-                base_accs["static_random"] = binary_accuracy(static_yt_base, static_yp_base, _acc_thr)
+                if train_baseline:
+                    base_accs["static_random"] = binary_accuracy(static_yt_base, static_yp_base, _acc_thr)
+            # Train: extra inference on each role's own training set.
+            _, _, _al_tr_yt, _al_tr_yp = cross_evaluate_transformer(
+                model, stats, X, Y,
+                y_transform=y_transform, target='DMRD', device=device,
+                return_predictions=True)
+            al_accs["train"] = binary_accuracy(_al_tr_yt, _al_tr_yp, _acc_thr)
+            if train_baseline and baseline_model is not None:
+                _, _, _bs_tr_yt, _bs_tr_yp = cross_evaluate_transformer(
+                    baseline_model, baseline_stats, X_baseline_train, Y_baseline_train,
+                    y_transform=y_transform, target='DMRD', device=device,
+                    return_predictions=True)
+                base_accs["train"] = binary_accuracy(_bs_tr_yt, _bs_tr_yp, _acc_thr)
             write_iter_accuracies(output_dir, iteration, al_accs=al_accs,
-                                  baseline_accs=base_accs)
+                                  baseline_accs=base_accs if base_accs else None)
             _acc_summary = "  ".join(
                 f"{role}=" + "/".join(f"{k}={v:.4f}" for k, v in (d or {}).items())
                 for role, d in (("AL", al_accs), ("Base", base_accs)) if d
@@ -1003,12 +1019,115 @@ def main(testing, n_iterations, n_candidates, n_select, n_ensemble_samples, n_da
         except Exception as _acc_exc:
             logger.warning(f"Accuracy capture failed (non-fatal): {_acc_exc}")
 
-        # Selection. entropy_batch still runs its own ensemble (independent of
-        # the fitted models). top_k / top_k_tol_only reuse the AL worker's
-        # candidate predictions — no re-fit, no extra inference in main.
+        # Evaluate on external dataset if provided
+        if eval_data_path is not None:
+            # Lazy load eval dataset on first use
+            if X_eval_full is None:
+                logger.info(f"Loading external eval dataset from {eval_data_path}")
+                from pmssm import load_true_eval_dataset
+                X_eval_full, Y_eval_full = load_true_eval_dataset(
+                    eval_data_path, target=None, logger=logger  # No target transformation for transformer
+                )
+
+            # Compute R² on eval dataset
+            from sklearn.metrics import r2_score
+            model.eval()
+            model.to(device)
+
+            # Normalize eval data using training stats
+            mean_X, std_X, mean_Y, std_Y = stats
+            X_eval_norm = (X_eval_full - mean_X) / std_X
+            Y_eval_norm = (Y_eval_full - mean_Y) / std_Y
+
+            with torch.no_grad():
+                y_pred_norm = model(X_eval_norm.to(device)).cpu()
+
+            eval_r2 = r2_score(Y_eval_norm.numpy(), y_pred_norm.numpy())
+            logger.info(f"External eval R²: {eval_r2:.4f}")
+            eval_r2_scores.append(eval_r2)
+
+        # Compute comprehensive metrics if requested
+        if compute_full_metrics:
+
+            # Get validation predictions
+            model.eval()
+            model.to(device)
+            val_dataset = PMSSMDataset(X_combined, Y_combined, idx_val_al, stats)
+            val_loader = DataLoader(val_dataset, batch_size=256, shuffle=False)
+
+            all_preds = []
+            all_true = []
+            for x_batch, y_batch in val_loader:
+                with torch.no_grad():
+                    preds = model(x_batch.to(device)).cpu()
+                all_preds.append(preds)
+                all_true.append(y_batch)
+
+            y_pred_norm = torch.cat(all_preds).squeeze()
+            y_true_norm = torch.cat(all_true).squeeze()
+
+            # Denormalize for physical space metrics
+            mean_X, std_X, mean_Y, std_Y = stats
+            y_true = y_true_norm * std_Y + mean_Y
+            y_pred = y_pred_norm * std_Y + mean_Y
+
+            # Compute metrics in normalized space
+            mse_norm = mean_squared_error(y_true_norm.numpy(), y_pred_norm.numpy())
+            rmse_norm = np.sqrt(mse_norm)
+            r2_norm = r2_score(y_true_norm.numpy(), y_pred_norm.numpy())
+
+            # Compute metrics in physical space
+            mse_phys = mean_squared_error(y_true.numpy(), y_pred.numpy())
+            rmse_phys = np.sqrt(mse_phys)
+            r2_phys = r2_score(y_true.numpy(), y_pred.numpy())
+
+            # Classification accuracy (threshold at target_value in physical space)
+            threshold_phys = target_value  # 0.12
+            if y_transform == 'log':
+                from pmssm.data import transform_y
+                threshold_transformed_acc = transform_y(torch.tensor([threshold_phys]), target="DMRD").item()
+            else:  # zscore
+                threshold_transformed_acc = (threshold_phys - mean_Y) / std_Y
+            acc = ((y_pred_norm >= threshold_transformed_acc) == (y_true_norm >= threshold_transformed_acc)).float().mean().item()
+
+            metrics = {
+                "iteration": iteration,
+                "n_val": len(y_true),
+                "mse_normalized": float(mse_norm),
+                "rmse_normalized": float(rmse_norm),
+                "r2_normalized": float(r2_norm),
+                "mse_physical": float(mse_phys),
+                "rmse_physical": float(rmse_phys),
+                "r2_physical": float(r2_phys),
+                "accuracy": float(acc),
+                "threshold": float(threshold_phys),
+            }
+
+            # Save to CSV
+            metrics_path = iter_dir / "metrics_al.csv"
+            pd.DataFrame([metrics]).to_csv(metrics_path, index=False)
+            logger.info(f"Comprehensive metrics: MSE={mse_phys:.6f}, RMSE={rmse_phys:.6f}, "
+                       f"R²={r2_phys:.4f}, Acc={acc:.4f}")
+            logger.info(f"Metrics saved to {metrics_path}")
+
+        # Generate candidate pool and select uncertain points
+        logger.info(f"Generating {n_candidates} candidate points using {candidate_generation} sampling...")
+        candidates = generate_candidate_pool(n_candidates, method=candidate_generation, seed=seed * 10_000 + iteration)
+
+        # Convert target value to transformed space for threshold
+        mean_X, std_X, mean_Y, std_Y = stats
+        if proximity_sampling > 0 or tolerance_sampling > 0:
+            if y_transform == 'log':
+                from pmssm.data import transform_y
+                threshold_transformed = transform_y(torch.tensor([target_value]), target="DMRD").item()
+            else:  # zscore
+                threshold_transformed = (target_value - mean_Y) / std_Y
+        else:
+            threshold_transformed = 0.0
+
         if selection_strategy == 'entropy_batch':
-            pred_mean, pred_var, predictions = tabpfn_ensemble_predictions(
-                X, Y, candidates, n_ensemble_samples, device, logger
+            pred_mean, pred_var, predictions = compute_uncertainty_mc_dropout(
+                model, candidates, stats, mc_samples, device, logger, return_predictions=True
             )
             top_indices = select_entropy_batch_mc(
                 candidates, predictions, pred_mean, pred_var,
@@ -1019,9 +1138,9 @@ def main(testing, n_iterations, n_candidates, n_select, n_ensemble_samples, n_da
                 device=device, logger=logger
             )
         elif selection_strategy == 'top_k_tol_only':
-            pred_mean = torch.from_numpy(al_res['candidates']['mean']).float().unsqueeze(1)
-            pred_var = torch.from_numpy(al_res['candidates']['var']).float().unsqueeze(1)
-            logger.info(f"Uncertainty stats: mean={pred_var.mean():.6f}, max={pred_var.max():.6f}")
+            pred_mean, pred_var = compute_uncertainty_mc_dropout(
+                model, candidates, stats, mc_samples, device, logger
+            )
             top_indices = select_top_uncertain_tol_only(
                 candidates, pred_mean, pred_var, n_select,
                 threshold=threshold_transformed,
@@ -1029,10 +1148,9 @@ def main(testing, n_iterations, n_candidates, n_select, n_ensemble_samples, n_da
                 logger=logger,
             )
         else:
-            pred_mean = torch.from_numpy(al_res['candidates']['mean']).float().unsqueeze(1)
-            pred_var = torch.from_numpy(al_res['candidates']['var']).float().unsqueeze(1)
-            logger.info(f"Uncertainty stats: mean={pred_var.mean():.6f}, max={pred_var.max():.6f}")
-
+            pred_mean, pred_var = compute_uncertainty_mc_dropout(
+                model, candidates, stats, mc_samples, device, logger
+            )
             top_indices = select_top_uncertain_filtered(
                 candidates, pred_mean, pred_var, n_select,
                 threshold=threshold_transformed,
@@ -1044,9 +1162,8 @@ def main(testing, n_iterations, n_candidates, n_select, n_ensemble_samples, n_da
         logger.info(f"Selected {len(top_indices)} points via {selection_strategy} (requested: {n_select}, available: {len(candidates)})")
 
         # ---- Candidate uncertainty plots (AL + Baseline) ----
-        # Baseline variance comes from the baseline worker's candidate pass.
-        # AL variance comes from `pred_var` above (ensemble for entropy_batch,
-        # native for top_k).
+        # Subsample the candidate pool for the baseline recomputation to keep
+        # plotting cheap (baseline uses MC dropout which scales with pool size).
         try:
             _plot_pool_size = min(len(candidates), 20_000)
             _plot_idx = torch.randperm(len(candidates))[:_plot_pool_size]
@@ -1054,9 +1171,10 @@ def main(testing, n_iterations, n_candidates, n_select, n_ensemble_samples, n_da
             _plot_al_var = pred_var[_plot_idx]
             plot_candidate_uncertainty(_plot_cands, _plot_al_var, al_hist_dir,
                                        "AL", iteration, logger)
-            _base_pred_var = torch.from_numpy(base_res['candidates']['var']).float().unsqueeze(1)
-            _base_pred_var = _base_pred_var[_plot_idx]
-            plot_candidate_uncertainty(_plot_cands, _base_pred_var, baseline_hist_dir,
+            _, _base_plot_var = compute_uncertainty_mc_dropout(
+                baseline_model, _plot_cands, baseline_stats, mc_samples, device, logger
+            )
+            plot_candidate_uncertainty(_plot_cands, _base_plot_var, baseline_hist_dir,
                                        "Baseline", iteration, logger)
         except Exception as e:
             logger.warning(f"Candidate uncertainty plot failed: {e}")
@@ -1068,10 +1186,10 @@ def main(testing, n_iterations, n_candidates, n_select, n_ensemble_samples, n_da
             "iteration": iteration,
             "points": candidates[top_indices].numpy().tolist(),
             "uncertainties": pred_var[top_indices].squeeze().numpy().tolist(),
-            "al_best_val_loss": al_val_loss_val,
-            "al_r2_score": al_r2_val,
-            "baseline_best_val_loss": base_val_loss_val,
-            "baseline_r2_score": base_r2_val,
+            "al_best_val_loss": al_results['best_val_loss'],
+            "al_r2_score": al_results['r2_score'],
+            "baseline_best_val_loss": baseline_results['best_val_loss'],
+            "baseline_r2_score": baseline_results['r2_score'],
         })
 
         # Generate new models if requested, with retry logic
@@ -1099,8 +1217,8 @@ def main(testing, n_iterations, n_candidates, n_select, n_ensemble_samples, n_da
                     attempt_candidates = generate_candidate_pool(n_candidates, method=candidate_generation, seed=attempt_seed)
 
                     if selection_strategy == 'entropy_batch':
-                        attempt_mean, attempt_pred_var, attempt_preds = tabpfn_ensemble_predictions(
-                            X, Y, attempt_candidates, n_ensemble_samples, device, logger
+                        attempt_mean, attempt_pred_var, attempt_preds = compute_uncertainty_mc_dropout(
+                            model, attempt_candidates, stats, mc_samples, device, logger, return_predictions=True
                         )
                         attempt_indices = select_entropy_batch_mc(
                             attempt_candidates, attempt_preds, attempt_mean, attempt_pred_var,
@@ -1110,33 +1228,27 @@ def main(testing, n_iterations, n_candidates, n_select, n_ensemble_samples, n_da
                             proximity_sampling=proximity_sampling,
                             device=device, logger=logger
                         )
+                    elif selection_strategy == 'top_k_tol_only':
+                        attempt_mean, attempt_pred_var = compute_uncertainty_mc_dropout(
+                            model, attempt_candidates, stats, mc_samples, device, logger
+                        )
+                        attempt_indices = select_top_uncertain_tol_only(
+                            attempt_candidates, attempt_mean, attempt_pred_var, n_select,
+                            threshold=threshold_transformed,
+                            tolerance_sampling=tolerance_sampling,
+                            logger=logger,
+                        )
                     else:
-                        # Retry path for top_k variants: the per-iteration AL
-                        # worker (thread or sequential call) only predicted on
-                        # the original candidate pool, so we need a local AL
-                        # model to evaluate the retry pool. Lazy-fit once per
-                        # iteration (al_model_retry is reset to None at the
-                        # top of the iteration loop).
-                        if al_model_retry is None:
-                            al_model_retry, _ = fit_tabpfn(X, Y, device=device)
-                        attempt_y_pred, attempt_var = tabpfn_predict_with_variance(al_model_retry, attempt_candidates)
-                        attempt_mean = torch.from_numpy(attempt_y_pred).float().unsqueeze(1)
-                        attempt_pred_var = torch.from_numpy(attempt_var).float().unsqueeze(1)
-                        if selection_strategy == 'top_k_tol_only':
-                            attempt_indices = select_top_uncertain_tol_only(
-                                attempt_candidates, attempt_mean, attempt_pred_var, n_select,
-                                threshold=threshold_transformed,
-                                tolerance_sampling=tolerance_sampling,
-                                logger=logger,
-                            )
-                        else:
-                            attempt_indices = select_top_uncertain_filtered(
-                                attempt_candidates, attempt_mean, attempt_pred_var, n_select,
-                                threshold=threshold_transformed,
-                                tolerance_sampling=tolerance_sampling,
-                                proximity_sampling=proximity_sampling,
-                                logger=logger,
-                            )
+                        attempt_mean, attempt_pred_var = compute_uncertainty_mc_dropout(
+                            model, attempt_candidates, stats, mc_samples, device, logger
+                        )
+                        attempt_indices = select_top_uncertain_filtered(
+                            attempt_candidates, attempt_mean, attempt_pred_var, n_select,
+                            threshold=threshold_transformed,
+                            tolerance_sampling=tolerance_sampling,
+                            proximity_sampling=proximity_sampling,
+                            logger=logger,
+                        )
 
                     param_names = [p.replace("IN_", "") for p in PARAM_ORDER]
                     df = pd.DataFrame(attempt_candidates[attempt_indices].numpy(), columns=param_names)
@@ -1226,7 +1338,9 @@ def main(testing, n_iterations, n_candidates, n_select, n_ensemble_samples, n_da
                                      al_hist_dir, "AL_new", iteration, logger,
                                      fixed_axes=True)
 
-        # No checkpoints to update — TabPFN is re-fitted each iteration
+        # Update previous checkpoints for warm-starting next iteration
+        prev_al_checkpoint = al_checkpoint_path
+        prev_baseline_checkpoint = baseline_checkpoint_path
 
         # ---- Checkpoint run state for resume -------------------------------
         from pmssm.resume import save_state, capture_rng
@@ -1303,29 +1417,31 @@ def main(testing, n_iterations, n_candidates, n_select, n_ensemble_samples, n_da
         logger.info(f"Single iteration - AL: val_loss={al_val_losses[0]:.6f}, R²={al_r2_scores[0]:.4f}")
         logger.info(f"Single iteration - Baseline: val_loss={baseline_val_losses[0]:.6f}, R²={baseline_r2_scores[0]:.4f}")
 
-    # ---- Representative-points trajectory plot (+ CSV) ----
+    # Representative-points trajectory plot (+ CSV)
     if repr_log:
-        try:
-            _rep_out, _rep_csv = plot_representative_trajectories(
-                repr_log, repr_points['Y'], repr_points['cls'], repr_points['labels'],
-                _target_value, output_dir, y_transform='log', target='DMRD',
-            )
-            logger.info(f"Representative-points trajectory: {_rep_out}")
-            logger.info(f"Representative-points CSV: {_rep_csv}")
-        except Exception as _e:
-            logger.warning(f"Representative-points plot failed: {_e}")
+        _rep_out, _rep_csv = plot_representative_trajectories(
+            repr_log, repr_points['Y'], repr_points['cls'], repr_points['labels'],
+            target_value, output_dir, y_transform=y_transform, target='DMRD',
+        )
+        logger.info(f"Representative-points trajectory: {_rep_out}")
+        logger.info(f"Representative-points CSV: {_rep_csv}")
 
     # Save summary
     summary = {
         "timestamp": timestamp,
         "config": {
-            "model": "TabPFN",
             "n_iterations": n_iterations,
             "n_candidates": n_candidates,
             "n_select": n_select,
-            "n_ensemble_samples": n_ensemble_samples,
+            "mc_samples": mc_samples,
+            "epochs": epochs,
+            "dropout": dropout,
             "generate_data": generate_data,
             "selection_strategy": selection_strategy,
+            "early_stopping": early_stopping,
+            "patience": patience,
+            "warm_starting": warm_starting,
+            "compute_full_metrics": compute_full_metrics,
             "seed": seed,
         },
         "iterations": all_selected_points,
@@ -1342,7 +1458,7 @@ def main(testing, n_iterations, n_candidates, n_select, n_ensemble_samples, n_da
         json.dump(summary, f, indent=2)
 
     logger.info("=" * 60)
-    logger.info("TabPFN Active Learning Complete")
+    logger.info("Active Learning Complete")
     logger.info("=" * 60)
     logger.info(f"Results saved to: {output_dir}")
     logger.info(f"Summary: {summary_path}")

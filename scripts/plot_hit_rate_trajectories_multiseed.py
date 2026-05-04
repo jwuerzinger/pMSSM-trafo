@@ -58,6 +58,7 @@ MODEL_COLORS = {
     "exact_gp":    "tab:orange",
     "deep_gp":     "tab:green",
     "tabpfn":      "tab:red",
+    "dnn":         "tab:purple",
 }
 STRATEGY_COLORS = {
     "top_k":          "tab:blue",
@@ -606,6 +607,16 @@ def _load_iter_model(model_type: str, role: str, iter_dir: Path,
         model.load_state_dict(torch.load(ckpt_path, map_location=device))
         return model.to(device)
 
+    if model_type == "dnn":
+        if not ckpt_path.exists():
+            return None
+        from pmssm.models import PMSSMFeedForward  # noqa: PLC0415
+        # Architecture must match active_learning_dnn.py defaults.
+        model = PMSSMFeedForward(n_params=19, d_model=64, num_layers=4,
+                                 dim_feedforward=256, dropout=dropout)
+        model.load_state_dict(torch.load(ckpt_path, map_location=device))
+        return model.to(device)
+
     if model_type in ("exact_gp", "deep_gp", "sparse_gp"):
         if not ckpt_path.exists():
             return None
@@ -662,9 +673,9 @@ def _accuracy_for_iter(model_type: str, role: str, iter_dir: Path,
     target = run_kwargs.get("target", "DMRD") or "DMRD"
     from pmssm.data import transform_y  # noqa: PLC0415
 
-    if model_type == "transformer":
+    if model_type in ("transformer", "dnn"):
         from pmssm.data import compute_stats  # noqa: PLC0415
-        # Match active_learning.py: stats from the train set with idx_train = arange(n_train)
+        # Match active_learning(_dnn).py: stats from the train set with idx_train = arange(n_train)
         idx_tr = torch.arange(len(X_tr))
         stats = compute_stats(X_tr, Y_tr.unsqueeze(-1), idx_tr)
     else:
@@ -678,7 +689,9 @@ def _accuracy_for_iter(model_type: str, role: str, iter_dir: Path,
         Y_true_t = transform_y(Y_d.float(), target=target).numpy().ravel().astype(np.float64)
 
         ds_t0 = time.time()
-        if model_type == "transformer":
+        if model_type in ("transformer", "dnn"):
+            # PMSSMFeedForward shares the (B,19)->(B,1) interface so the same
+            # mean/std-normalised forward path works for both architectures.
             y_pred_t = _predict_transformer_t(model, X_d.float(), stats, device)
         elif model_type in ("exact_gp", "deep_gp", "sparse_gp"):
             jitter = float(run_kwargs.get("jitter", 1e-3) or 1e-3)

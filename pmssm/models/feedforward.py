@@ -13,7 +13,8 @@ class PMSSMFeedForward(nn.Module):
     Traditional feedforward neural network for pMSSM regression.
 
     Uses separate embedding for each input parameter followed by
-    fully-connected layers.
+    fully-connected layers. Dropout is applied after each ReLU so
+    MC-Dropout inference can be used for uncertainty estimation.
     """
     def __init__(
         self,
@@ -21,19 +22,21 @@ class PMSSMFeedForward(nn.Module):
         d_model=64,
         num_layers=4,
         dim_feedforward=256,
-        dropout=0.1,
+        dropout=0.0,
     ):
         super().__init__()
 
         # Embed each scalar parameter
         self.input_embed = nn.Linear(1, d_model)
 
-        # Build a stack of fully connected layers
+        # Build a stack of fully connected layers with dropout for MC sampling
         layers = []
         in_features = n_params * d_model
         for _ in range(num_layers):
             layers.append(nn.Linear(in_features, dim_feedforward))
             layers.append(nn.ReLU())
+            if dropout > 0:
+                layers.append(nn.Dropout(p=dropout))
             in_features = dim_feedforward
         self.fc_layers = nn.Sequential(*layers)
 

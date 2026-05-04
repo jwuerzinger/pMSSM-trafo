@@ -1,0 +1,7 @@
+2026-05-04 18:12:16 [AL] Training on device: cpu
+2026-05-04 18:12:16 [AL] Training set size: 1600, Validation set size: 400
+2026-05-04 18:12:42 [AL] MLP                  | Epoch 0000 | Train MSE = 15.415463 | Val MSE = 11.866266 | LR = 2.999816e-04
+2026-05-04 18:12:58 [AL] MLP                  | Epoch 0001 | Train MSE = 9.737099 | Val MSE = 5.434851 | LR = 2.999262e-04
+2026-05-04 18:13:13 [AL] MLP                  | Epoch 0002 | Train MSE = 7.020042 | Val MSE = 6.667872 | LR = 2.998340e-04
+2026-05-04 18:13:28 [AL] MLP                  | Epoch 0003 | Train MSE = 5.986655 | Val MSE = 5.360029 | LR = 2.997050e-04
+2026-05-04 18:13:43 [AL] MLP                  | Epoch 0004 | Train MSE = 5.637909 | Val MSE = 5.528622 | LR = 2.995391e-04

@@ -53,6 +53,31 @@ assert y_pred.shape == (4, 1), f"Expected shape (4, 1), got {y_pred.shape}"
 print(f"   ✓ PMSSMFeedForward works! Output shape: {y_pred.shape}")
 print(f"   ✓ Parameters: {sum(p.numel() for p in model3.parameters()):,}")
 
+# Test 3b: PMSSMFeedForward MC-dropout stochasticity (active_learning_dnn pipeline).
+# Verify that with dropout > 0 and model.train(), forward passes are non-deterministic.
+print("\n3b. Testing PMSSMFeedForward MC-dropout stochasticity...")
+torch.manual_seed(0)
+model3_drop = pmssm.PMSSMFeedForward(
+    d_model=64,
+    num_layers=4,
+    dim_feedforward=256,
+    dropout=0.5,
+)
+model3_drop.train()  # keep dropout active for MC sampling
+with torch.no_grad():
+    y_a = model3_drop(x_test)
+    y_b = model3_drop(x_test)
+assert not torch.allclose(y_a, y_b), \
+    "Expected MC-dropout to produce non-deterministic outputs in train() mode"
+# In eval mode, forward should be deterministic.
+model3_drop.eval()
+with torch.no_grad():
+    y_c = model3_drop(x_test)
+    y_d = model3_drop(x_test)
+assert torch.allclose(y_c, y_d), \
+    "Expected eval() mode to produce deterministic outputs"
+print(f"   ✓ MC-dropout stochasticity works (train: variable, eval: deterministic)")
+
 # Test 4: Backward pass
 print("\n4. Testing backward pass...")
 optimizer = torch.optim.AdamW(model1.parameters(), lr=1e-4)
