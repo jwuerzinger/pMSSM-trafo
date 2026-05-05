@@ -46,6 +46,8 @@ MODEL_COLORS = {
     "deep_gp":     "tab:green",
     "tabpfn":      "tab:red",
     "dnn":         "tab:purple",
+    "transformer_oracle": "tab:blue",
+    "deep_gp_oracle":     "tab:green",
 }
 WARM_LS = {
     "warm":   "-",

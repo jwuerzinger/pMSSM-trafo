@@ -59,7 +59,13 @@ MODEL_COLORS = {
     "deep_gp":     "tab:green",
     "tabpfn":      "tab:red",
     "dnn":         "tab:purple",
+    # Oracle (theoretical-limit) variants — same colour as parent so curves
+    # group visually; linestyle disambiguates (see ORACLE_LS below).
+    "transformer_oracle": "tab:blue",
+    "deep_gp_oracle":     "tab:green",
 }
+# Linestyle override for *_oracle model rows (dotted, regardless of warm/cold).
+ORACLE_LS = ":"
 STRATEGY_COLORS = {
     "top_k":          "tab:blue",
     "top_k_tol_only": "tab:orange",
@@ -732,6 +738,14 @@ def _classification_accuracy_trajectory(run, run_dir: str, seed: int,
     and run inference. The result is also written back to
     `<run_dir>/accuracy_trajectory.json`.
     """
+    # Oracle / theoretical-limit runs are tagged "<model>_oracle" in the
+    # manifest so they appear as separate plot entries, but their on-disk
+    # checkpoints are saved by the same per-model AL pipeline, so the
+    # _load_iter_model dispatch only knows the bare model name. Strip the
+    # _oracle suffix before any downstream dispatch.
+    if model_type.endswith("_oracle"):
+        model_type = model_type[: -len("_oracle")]
+
     run_dir_p = Path(run_dir)
     cache = {} if refresh else _load_accuracy_cache(run_dir_p)
 

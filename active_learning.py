@@ -40,6 +40,7 @@ from pmssm import (
     load_mcmc_data,
     make_split,
     compute_stats,
+    split_mcmc_for_oracle,
     PMSSMDataset,
     # Models
     PMSSMTransformer,
@@ -196,6 +197,11 @@ def load_config_with_sweep(config_file, sweep_index=None):
 @click.option('--entropy-pool-size', default=5000, type=int, help="Focused pool size for entropy_batch pre-filtering.")
 @click.option('--candidate-generation', default='lhs', type=click.Choice(['uniform', 'lhs']),
               help="Candidate pool generation method: uniform random or Latin Hypercube Sampling (default: lhs).")
+@click.option('--candidate-source', default='pool',
+              type=click.Choice(['pool', 'mcmc']),
+              help="Candidate source: 'pool' (LHS/uniform, default) or 'mcmc' "
+                   "(theoretical-limit / oracle mode — restrict candidates to "
+                   "the pre-loaded MCMC dataset; --generate-data is forced off).")
 @click.option('--proximity-sampling', default=0.1, type=float,
               help="Gaussian proximity weighting width around target value (0 to disable, default: 0.1).")
 @click.option('--tolerance-sampling', default=1.0, type=float,
@@ -236,7 +242,7 @@ def load_config_with_sweep(config_file, sweep_index=None):
               help="Comma-separated GPU IDs for AL and baseline models (default: 2,3).")
 @click.option('--seed', default=42, type=int,
               help="Master random seed propagated to torch / numpy / candidate pool (default: 42).")
-def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, dropout, n_datasets, n_samples, val_fraction, output_dir, generate_data, min_gen_fraction, max_gen_attempts, gen_workers, selection_strategy, entropy_blur, entropy_beta, entropy_pool_size, candidate_generation, proximity_sampling, tolerance_sampling, target_value, config_file, sweep_index, early_stopping, patience, warm_starting, eval_data_path, compute_full_metrics, y_transform, mcmc_data_dir, static_eval_size, data_dir, use_mcmc_loader, train_baseline, resume_from, n_additional_iterations, gpu_ids, seed):
+def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, dropout, n_datasets, n_samples, val_fraction, output_dir, generate_data, min_gen_fraction, max_gen_attempts, gen_workers, selection_strategy, entropy_blur, entropy_beta, entropy_pool_size, candidate_generation, candidate_source, proximity_sampling, tolerance_sampling, target_value, config_file, sweep_index, early_stopping, patience, warm_starting, eval_data_path, compute_full_metrics, y_transform, mcmc_data_dir, static_eval_size, data_dir, use_mcmc_loader, train_baseline, resume_from, n_additional_iterations, gpu_ids, seed):
     """
     Active learning pipeline for pMSSM relic density prediction.
 
@@ -260,6 +266,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
             'entropy_beta': 'entropy_beta',
             'entropy_pool_size': 'entropy_pool_size',
             'candidate_generation': 'candidate_generation',
+            'candidate_source': 'candidate_source',
             'proximity_sampling': 'proximity_sampling',
             'tolerance_sampling': 'tolerance_sampling',
             'target_value': 'target_value',
@@ -296,6 +303,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
         entropy_beta = locals().get('entropy_beta', entropy_beta)
         entropy_pool_size = locals().get('entropy_pool_size', entropy_pool_size)
         candidate_generation = locals().get('candidate_generation', candidate_generation)
+        candidate_source = locals().get('candidate_source', candidate_source)
         proximity_sampling = locals().get('proximity_sampling', proximity_sampling)
         tolerance_sampling = locals().get('tolerance_sampling', tolerance_sampling)
         target_value = locals().get('target_value', target_value)
@@ -416,6 +424,33 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
         X_mcmc, Y_mcmc, F_mcmc = load_mcmc_data(data_dir=mcmc_data_dir, logger=logger,
                                                 return_lsp_fracs=True)
         logger.info(f"MCMC evaluation dataset: {len(X_mcmc)} samples from {mcmc_data_dir}")
+
+    # ---- Theoretical-limit / oracle mode ---------------------------------
+    # When --candidate-source=mcmc, restrict per-iteration candidates to
+    # points already in the MCMC dataset. To keep the existing MCMC eval
+    # signals unbiased, hold out 10% of MCMC as eval and use the rest as
+    # the candidate pool. SPheno generation is forced off (every selected
+    # MCMC point is by definition labelled and valid).
+    X_mcmc_pool = Y_mcmc_pool = F_mcmc_pool = None
+    mcmc_pool_idx = mcmc_eval_idx = None
+    mcmc_consumed_mask = None
+    if candidate_source == 'mcmc':
+        if mcmc_data_dir is None or X_mcmc is None:
+            raise click.UsageError(
+                "--candidate-source=mcmc requires --mcmc-data-dir to load the candidate pool"
+            )
+        if generate_data:
+            logger.info("Forced --no-generate-data because --candidate-source=mcmc "
+                        "(MCMC points are already labelled).")
+            generate_data = False
+        (X_mcmc_pool, Y_mcmc_pool, F_mcmc_pool,
+         X_mcmc, Y_mcmc, F_mcmc,
+         mcmc_pool_idx, mcmc_eval_idx) = split_mcmc_for_oracle(
+            X_mcmc, Y_mcmc, F_mcmc, eval_fraction=0.1, seed=seed,
+        )
+        mcmc_consumed_mask = torch.zeros(len(X_mcmc_pool), dtype=torch.bool)
+        logger.info(f"Oracle mode: {len(X_mcmc_pool)} candidates / {len(X_mcmc)} eval "
+                    f"(MCMC split 90/10, seed={seed})")
 
     # Store full dataset for baseline random sampling (before any truncation)
     X_full, Y_full, F_full = X.clone(), Y.clone(), F.clone()
@@ -587,6 +622,13 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
         baseline_on_static_random_losses = saved["baseline_on_static_random_losses"]
         baseline_on_static_random_r2 = saved["baseline_on_static_random_r2"]
         eval_r2_scores = saved.get("eval_r2_scores", [])
+        # Restore oracle-mode state if the resumed run was an oracle run.
+        if candidate_source == 'mcmc' and "mcmc_consumed_mask" in saved:
+            mcmc_consumed_mask = saved["mcmc_consumed_mask"]
+            mcmc_pool_idx = saved.get("mcmc_pool_idx", mcmc_pool_idx)
+            mcmc_eval_idx = saved.get("mcmc_eval_idx", mcmc_eval_idx)
+            logger.info(f"Resumed oracle state: {int(mcmc_consumed_mask.sum())}/"
+                        f"{len(mcmc_consumed_mask)} candidates consumed")
         # Previous checkpoints for warm-starting
         prev_al_checkpoint = Path(resume_from) / f"iteration_{saved['iteration']:03d}" / "al_model_checkpoint.pt"
         prev_baseline_checkpoint = Path(resume_from) / f"iteration_{saved['iteration']:03d}" / "baseline_model_checkpoint.pt"
@@ -1109,8 +1151,21 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
             logger.info(f"Metrics saved to {metrics_path}")
 
         # Generate candidate pool and select uncertain points
-        logger.info(f"Generating {n_candidates} candidate points using {candidate_generation} sampling...")
-        candidates = generate_candidate_pool(n_candidates, method=candidate_generation, seed=seed * 10_000 + iteration)
+        cand_pool_idx = None  # only set in oracle mode; used for direct augmentation
+        if candidate_source == 'mcmc':
+            avail = (~mcmc_consumed_mask).nonzero(as_tuple=False).squeeze(-1)
+            if len(avail) == 0:
+                raise RuntimeError("MCMC candidate pool exhausted before all iterations completed")
+            take = min(n_candidates, len(avail))
+            _g_cand = torch.Generator().manual_seed(seed * 10_000 + iteration)
+            sample = avail[torch.randperm(len(avail), generator=_g_cand)[:take]]
+            candidates = X_mcmc_pool[sample]
+            cand_pool_idx = sample
+            logger.info(f"Oracle: drew {take}/{len(avail)} unconsumed MCMC candidates "
+                        f"(consumed so far: {int(mcmc_consumed_mask.sum())}/{len(mcmc_consumed_mask)})")
+        else:
+            logger.info(f"Generating {n_candidates} candidate points using {candidate_generation} sampling...")
+            candidates = generate_candidate_pool(n_candidates, method=candidate_generation, seed=seed * 10_000 + iteration)
 
         # Convert target value to transformed space for threshold
         mean_X, std_X, mean_Y, std_Y = stats
@@ -1192,7 +1247,18 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
 
         # Generate new models if requested, with retry logic
         new_X, new_Y, new_F = None, None, None
-        if generate_data:
+        if candidate_source == 'mcmc':
+            # Oracle mode: every selected MCMC point is already labelled.
+            # Skip SPheno entirely and feed the labels straight into augmentation.
+            selected_pool_idx = cand_pool_idx[top_indices]
+            mcmc_consumed_mask[selected_pool_idx] = True
+            new_X = X_mcmc_pool[selected_pool_idx].clone()
+            new_Y = Y_mcmc_pool[selected_pool_idx].clone()
+            new_F = F_mcmc_pool[selected_pool_idx].clone()
+            all_selected_points[-1]["n_generated"] = len(new_X)
+            logger.info(f"Oracle: marked {len(selected_pool_idx)} MCMC pool indices as consumed "
+                        f"({int(mcmc_consumed_mask.sum())}/{len(mcmc_consumed_mask)} cumulative)")
+        elif generate_data:
             n_target = max(1, int(n_select * min_gen_fraction))
             logger.info(f"Generation target: {n_target} valid models ({min_gen_fraction*100:.0f}% of {n_select} selected, max {max_gen_attempts} attempts)")
 
@@ -1372,6 +1438,12 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
             "baseline_on_static_random_losses": baseline_on_static_random_losses,
             "baseline_on_static_random_r2": baseline_on_static_random_r2,
             "eval_r2_scores": eval_r2_scores,
+            # Oracle (mcmc-candidate) state — present only when the run was
+            # launched with --candidate-source mcmc; otherwise these are None
+            # and resume just leaves them as such.
+            "mcmc_consumed_mask": mcmc_consumed_mask,
+            "mcmc_pool_idx": mcmc_pool_idx,
+            "mcmc_eval_idx": mcmc_eval_idx,
             "rng": capture_rng(),
         })
         logger.info(f"[resume] state.pt saved (iteration {iteration})")

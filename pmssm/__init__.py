@@ -68,6 +68,7 @@ from .data import (
     unnormalize_x,
     transform_y,
     inverse_transform_y,
+    split_mcmc_for_oracle,
 )
 
 from .datasets import (
@@ -180,6 +181,7 @@ __all__ = [
     'unnormalize_x',
     'transform_y',
     'inverse_transform_y',
+    'split_mcmc_for_oracle',
 
     # Dataset classes
     'Dummy_PMSSMDataset',

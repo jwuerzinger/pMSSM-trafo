@@ -79,7 +79,8 @@ source "${REPO_ROOT}/slurm/resume_args.sh"
     --early-stopping \
     --patience 50 \
     --warm-starting ${RESUME_ARGS} \
-    --gpu-ids 0
+    --gpu-ids 0 \
+    ${AL_EXTRA_ARGS:-}
 
 echo "=========================================="
 echo " Done: $(date)"

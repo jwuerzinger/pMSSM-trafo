@@ -357,3 +357,31 @@ def inverse_transform_y(Y_t, target="DMRD"):
 
     true_value = TARGET_CONFIG[target]["true_value"]
     return true_value * torch.exp(Y_t)
+
+
+def split_mcmc_for_oracle(X, Y, F, eval_fraction=0.1, seed=42):
+    """Deterministically split the MCMC dataset into a candidate pool and an
+    eval slice for the theoretical-limit / oracle AL mode.
+
+    The pool slice is what the AL surrogate sees as candidates each iteration;
+    the eval slice replaces ``X_mcmc, Y_mcmc, F_mcmc`` everywhere they're used
+    today (cross-eval, accuracy capture, representative-points trajectory) so
+    training data and eval data stay disjoint.
+
+    Returns:
+        (X_pool, Y_pool, F_pool, X_eval, Y_eval, F_eval, pool_idx, eval_idx)
+        where ``pool_idx`` and ``eval_idx`` are LongTensors of indices into
+        the original X/Y/F (saved to state.pt for resume).
+    """
+    n = len(X)
+    if n == 0:
+        raise ValueError("split_mcmc_for_oracle: empty MCMC dataset")
+    n_eval = max(1, int(round(n * eval_fraction)))
+    perm = torch.randperm(n, generator=torch.Generator().manual_seed(int(seed)))
+    eval_idx = perm[:n_eval]
+    pool_idx = perm[n_eval:]
+    return (
+        X[pool_idx], Y[pool_idx], F[pool_idx],
+        X[eval_idx], Y[eval_idx], F[eval_idx],
+        pool_idx, eval_idx,
+    )

@@ -57,6 +57,7 @@ done
 # ---- Dispatch to per-model submit script ------------------------------------
 case "${AL_MODEL}" in
     transformer) PER_MODEL_SCRIPT=slurm/submit_al_transformer.sh;;
+    dnn)         PER_MODEL_SCRIPT=slurm/submit_al_dnn.sh;;
     deep_gp)     PER_MODEL_SCRIPT=slurm/submit_al_gp_deep.sh;;
     exact_gp)    PER_MODEL_SCRIPT=slurm/submit_al_gp_exact.sh;;
     tabpfn)      PER_MODEL_SCRIPT=slurm/submit_al_tabpfn.sh;;

@@ -67,6 +67,11 @@ SUBMIT_SLEEP_SEC="${SUBMIT_SLEEP_SEC:-0}"
 DRY_RUN="${DRY_RUN:-0}"
 TABPFN_ALLOW_ENTROPY="${TABPFN_ALLOW_ENTROPY:-0}"
 BUNDLE_SEEDS="${BUNDLE_SEEDS:-0}"
+# OUTPUT_TAG (optional) is appended to the model column in the manifest and
+# to the output dir, e.g. OUTPUT_TAG=oracle -> "transformer_oracle". The
+# AL_MODEL dispatch key (which selects the per-model submit script) is
+# unaffected and uses the bare model name.
+OUTPUT_TAG="${OUTPUT_TAG:-}"
 
 echo "[sweep] sweep_id=${SWEEP_ID}"
 echo "[sweep] models=${MODELS}"
@@ -74,6 +79,7 @@ echo "[sweep] strategies=${STRATEGIES}"
 echo "[sweep] warm_modes=${WARM_MODES}"
 echo "[sweep] seeds=${SEEDS}"
 echo "[sweep] dry_run=${DRY_RUN}"
+[[ -n "${OUTPUT_TAG}" ]] && echo "[sweep] output_tag=${OUTPUT_TAG}"
 echo "[sweep] manifest=${MANIFEST}"
 
 N_SUBMITTED=0
@@ -88,6 +94,16 @@ for model in ${MODELS//,/ }; do
         tabpfn)      submit_script="slurm/submit_al_tabpfn.sh";      model_tag="tabpfn";;
         *) echo "[error] unknown model: ${model}"; exit 1;;
     esac
+
+    # OUTPUT_TAG (e.g. "oracle") suffixes the manifest model column and the
+    # output dir name, so theoretical-limit / variant runs are visually
+    # distinct from regular sweeps. AL_MODEL stays equal to model_tag below
+    # (the per-model submit-script dispatch key is the bare model name).
+    if [[ -n "${OUTPUT_TAG}" ]]; then
+        manifest_model="${model_tag}_${OUTPUT_TAG}"
+    else
+        manifest_model="${model_tag}"
+    fi
 
     # Per-model axis gating
     if [[ "${model}" == "tabpfn" ]]; then
@@ -119,7 +135,7 @@ for model in ${MODELS//,/ }; do
                 # rows sharing job_id (one per seed) so plotting/bookkeeping
                 # stays row-per-seed.
                 submit_time="$(date +%Y%m%d_%H%M%S)"
-                al_output_base="/ptmp/jwuerzin/output/active_learning_${model_tag}_${strategy}_${warm}"
+                al_output_base="/ptmp/jwuerzin/output/active_learning_${manifest_model}_${strategy}_${warm}"
 
                 # Per-model resource footprint. All bundles request gpu:2 per
                 # node — the other models use both GPUs, and TabPFN drives
@@ -148,7 +164,7 @@ for model in ${MODELS//,/ }; do
 
                 if [[ "${DRY_RUN}" == "1" ]]; then
                     JOB_ID="DRY"
-                    echo "[dry-run bundle] ${model_tag}/${strategy}/${warm}  seeds=${SEEDS}"
+                    echo "[dry-run bundle] ${manifest_model}/${strategy}/${warm}  seeds=${SEEDS}"
                     echo "                 nodes=${n_seeds} gres=${gres}  base=${al_output_base}"
                 else
                     JOB_ID=$(sbatch --parsable \
@@ -159,7 +175,7 @@ for model in ${MODELS//,/ }; do
                         --exclusive \
                         --export=ALL \
                         slurm/submit_al_bundled.sh)
-                    echo "[bundled]   ${JOB_ID}  ${model_tag}/${strategy}/${warm} × ${n_seeds} seeds"
+                    echo "[bundled]   ${JOB_ID}  ${manifest_model}/${strategy}/${warm} × ${n_seeds} seeds"
                 fi
 
                 # One manifest row per seed, sharing the bundle's job_id.
@@ -169,7 +185,7 @@ for model in ${MODELS//,/ }; do
                 for seed in ${SEEDS//,/ }; do
                     expected_dir="${al_output_base}_seed${seed}_${SWEEP_ID}"
                     if [[ "${DRY_RUN}" != "1" ]]; then
-                        echo "${SWEEP_ID},${submit_time},${model_tag},${strategy},${warm},${seed},${JOB_ID},${expected_dir},submitted,${slurm_log}" >> "${MANIFEST}"
+                        echo "${SWEEP_ID},${submit_time},${manifest_model},${strategy},${warm},${seed},${JOB_ID},${expected_dir},submitted,${slurm_log}" >> "${MANIFEST}"
                     fi
                     N_SUBMITTED=$((N_SUBMITTED + 1))
                 done
@@ -183,7 +199,7 @@ for model in ${MODELS//,/ }; do
                 # the path unique per (config, seed). submit_time below captures
                 # the actual per-job sbatch time for the manifest.
                 submit_time="$(date +%Y%m%d_%H%M%S)"
-                expected_dir="/ptmp/jwuerzin/output/active_learning_${model_tag}_${strategy}_${warm}_seed${seed}_${SWEEP_ID}"
+                expected_dir="/ptmp/jwuerzin/output/active_learning_${manifest_model}_${strategy}_${warm}_seed${seed}_${SWEEP_ID}"
 
                 # Assemble the args we inject. AL_EXTRA_ARGS is spliced at the
                 # very end of each per-model submit script, so last-wins Click
@@ -211,12 +227,12 @@ for model in ${MODELS//,/ }; do
                         --gres="${gres}" \
                         --export=ALL,AL_OUTPUT_DIR="${expected_dir}",AL_EXTRA_ARGS="${extra_args}" \
                         "${submit_script}")
-                    echo "[submitted] ${JOB_ID}  ${model_tag}/${strategy}/${warm}/seed${seed}"
+                    echo "[submitted] ${JOB_ID}  ${manifest_model}/${strategy}/${warm}/seed${seed}"
                 fi
 
-                slurm_log="logs/al_${model_tag}_${JOB_ID}.out"
+                slurm_log="logs/al_${manifest_model}_${JOB_ID}.out"
                 if [[ "${DRY_RUN}" != "1" ]]; then
-                    echo "${SWEEP_ID},${submit_time},${model_tag},${strategy},${warm},${seed},${JOB_ID},${expected_dir},submitted,${slurm_log}" >> "${MANIFEST}"
+                    echo "${SWEEP_ID},${submit_time},${manifest_model},${strategy},${warm},${seed},${JOB_ID},${expected_dir},submitted,${slurm_log}" >> "${MANIFEST}"
                 fi
                 N_SUBMITTED=$((N_SUBMITTED + 1))
 
