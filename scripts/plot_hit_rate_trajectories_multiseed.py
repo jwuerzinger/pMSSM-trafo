@@ -1237,9 +1237,13 @@ def plot_models_per_strategy(traj, tols, uncertainty, true_val, out_dir,
     horizontal grey reference line ("random scan (full pool)") is drawn.
     """
     written = []
-    strategies = sorted({s for (_, s, _) in traj})
+    # Oracle (theoretical-limit) cells are folded into per-model plots only;
+    # exclude them from per-strategy comparisons so the model-vs-model panel
+    # isn't mixing realistic and oracle curves with the same colour.
+    strategies = sorted({s for (m, s, _) in traj if not m.endswith("_oracle")})
     for strat in strategies:
-        cfgs = [(m, s, w) for (m, s, w) in traj if s == strat]
+        cfgs = [(m, s, w) for (m, s, w) in traj
+                if s == strat and not m.endswith("_oracle")]
         if not cfgs:
             continue
         fig, axes = plt.subplots(1, len(tols), figsize=(6 * len(tols), 5),
@@ -1303,17 +1307,27 @@ def plot_strategies_per_model(traj, tols, uncertainty, true_val, out_dir,
     horizontal grey "random scan (full pool)" reference line is drawn.
     """
     written = []
-    models = sorted({m for (m, _, _) in traj})
+    all_models = sorted({m for (m, _, _) in traj})
+    # Skip top-level loop over *_oracle models — they are folded into the
+    # parent model's figure below (e.g. transformer_oracle rows are drawn on
+    # hit_rate_model_transformer.png with an "(oracle)" suffix and dotted
+    # linestyle). The standalone hit_rate_model_<model>_oracle.png is still
+    # written if the user wants the oracle-only view, by re-running with a
+    # filter or invoking this function directly with that traj subset.
+    models = [m for m in all_models if not m.endswith("_oracle")]
     for model in models:
         cfgs = [(m, s, w) for (m, s, w) in traj if m == model]
-        if not cfgs:
+        oracle_cfgs = [(m, s, w) for (m, s, w) in traj if m == f"{model}_oracle"]
+        if not cfgs and not oracle_cfgs:
             continue
         fig, axes = plt.subplots(1, len(tols), figsize=(6 * len(tols), 5),
                                  sharey=False, squeeze=False)
         axes = list(axes.flat)
         _setup_axes(axes, tols, true_val, title_word, ylabel)
-        fig.suptitle(f"Model: {model} — strategy & warm-start comparison",
-                     fontsize=12)
+        title = f"Model: {model} — strategy & warm-start comparison"
+        if oracle_cfgs:
+            title += "  (+ oracle, dotted)"
+        fig.suptitle(title, fontsize=12)
 
         for ax, tol in zip(axes, tols):
             for (m, s, w) in sorted(cfgs):
@@ -1340,6 +1354,22 @@ def plot_strategies_per_model(traj, tols, uncertainty, true_val, out_dir,
                         uncertainty=uncertainty,
                         linewidth=1.4, fill_alpha=0.0, alpha=0.75,
                     )
+            # Overlay oracle (theoretical-limit) variants for this model in
+            # the same axes, distinguished by a dotted linestyle and "(oracle)"
+            # in the label so the curves stand out from the regular ones.
+            for (m, s, w) in sorted(oracle_cfgs):
+                if tol not in traj[(m, s, w)]:
+                    continue
+                iters_ax, Y = traj[(m, s, w)][tol]
+                _draw_curve(
+                    ax, iters_ax, Y,
+                    color=STRATEGY_COLORS.get(s, "gray"),
+                    linestyle=":",
+                    marker=WARM_MARKER.get(w, "x"),
+                    label=f"{s}-{w} (oracle, n={len(Y)})",
+                    uncertainty=uncertainty,
+                    linewidth=2.0,
+                )
             if prevalence is not None and tol in prevalence:
                 ax.axhline(prevalence[tol], color="black", linestyle=":", linewidth=1.4,
                            label="random scan (full pool)")
@@ -1386,7 +1416,10 @@ def plot_best_per_model(traj, tols, uncertainty, true_val, out_dir,
     its model colour. If `prevalence` is provided ({tol: rate}), a horizontal
     grey reference line is drawn on each panel.
     """
-    models = sorted({m for (m, _, _) in traj})
+    # Oracle (theoretical-limit) variants are folded into per-model plots only;
+    # exclude them from the best-per-model headline so the comparison stays
+    # apples-to-apples across regular surrogates.
+    models = sorted({m for (m, _, _) in traj if not m.endswith("_oracle")})
     picks = []  # (model, strat, warm, tol_used, score)
     for model in models:
         chosen = _best_setting_for_model(traj, model, tols)
