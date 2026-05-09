@@ -1300,20 +1300,26 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, v
             # Compute variance for logging (already have entropy)
             pred_var = torch.tensor(per_point_entropy)
 
-            # In oracle mode, map the selected (physical) points back to MCMC
-            # pool indices so we can mark them consumed and pull labels.
+            # In oracle mode, map the selected points back to MCMC pool indices
+            # so we can mark them consumed and pull labels. We match in
+            # *normalized* space — selected_points_norm came directly from
+            # candidates_norm inside select_entropy_batch, so float drift is
+            # negligible. Matching in physical space failed because the
+            # round-trip selected_points_norm → unnormalize_x → physical
+            # introduced ~1e-7 drift, breaking exact equality.
             if candidate_source == 'mcmc':
-                # Find each selected point in the candidate pool by exact match.
-                # Floats — but they came directly from X_mcmc_pool so equality holds.
-                _cand_np = _candidates_phys.numpy()
-                _sel_np = selected_points_phys.numpy()
+                _cands_norm_np = candidates_norm.cpu().numpy()
+                _sel_norm_np = selected_points_norm.cpu().numpy()
                 _sel_pool_idx = []
-                for row in _sel_np:
-                    matches = np.where(np.all(_cand_np == row, axis=1))[0]
-                    if len(matches) == 0:
-                        raise RuntimeError("Oracle: selected entropy-batch point not found in MCMC candidate pool")
-                    _sel_pool_idx.append(int(cand_pool_idx[matches[0]].item()))
-                # Stash indices for the augmentation step (one per selected point).
+                for row in _sel_norm_np:
+                    diffs = np.abs(_cands_norm_np - row).max(axis=1)
+                    nearest = int(diffs.argmin())
+                    if diffs[nearest] > 1e-6:
+                        raise RuntimeError(
+                            f"Oracle: drift {diffs[nearest]:.3e} too large at row "
+                            f"{row[:3]}…; selected entropy-batch point not from MCMC pool"
+                        )
+                    _sel_pool_idx.append(int(cand_pool_idx[nearest].item()))
                 _oracle_selected_pool_idx = torch.tensor(_sel_pool_idx, dtype=torch.long)
             else:
                 _oracle_selected_pool_idx = None
