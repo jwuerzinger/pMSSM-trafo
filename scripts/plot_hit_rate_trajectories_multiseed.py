@@ -981,6 +981,148 @@ def _collect_accuracy_trajectories(df, picks, target: str, X_full: np.ndarray,
     return out
 
 
+def plot_classification_accuracy_oracle_comparison(traj_acc: dict, picks,
+                                                   out_dir: Path,
+                                                   uncertainty: str) -> list:
+    """Oracle counterpart of `plot_classification_accuracy_best_per_model`.
+
+    For each regular best-per-model pick whose `<model>_oracle` counterpart has
+    accuracy data in `traj_acc`, render the same per-dataset accuracy plot
+    showing the regular AL+baseline curves (solid/dashed) alongside the oracle
+    AL+baseline curves (dotted/dash-dot). One PNG per eval dataset:
+    `accuracy_oracle_comparison_<ds>.png`.
+
+    Returns the written paths.
+    """
+    written = []
+    dataset_titles = {
+        "static_random": "Static random eval set",
+        "mcmc": "MCMC eval set",
+        "train": "Per-model own train set",
+        "val": "Per-model own validation set",
+    }
+
+    # Identify oracle picks: for each base model whose <model>_oracle has
+    # entries in traj_acc, find the (s, w) cell present (there should only
+    # be one — submit_strategy_sweep.sh OUTPUT_TAG=oracle launched a single
+    # cell per oracle model). Score by picking the same way as for regular
+    # models would be unnecessary: just take the single (s, w) available.
+    oracle_models = sorted({m for (m, _, _) in traj_acc.keys()
+                            if m.endswith("_oracle")})
+    oracle_picks = []  # (base_model, s, w)
+    for om in oracle_models:
+        base = om[: -len("_oracle")]
+        oracle_cfgs = [(s, w) for (m, s, w) in traj_acc.keys() if m == om]
+        if oracle_cfgs:
+            s, w = sorted(oracle_cfgs)[0]
+            oracle_picks.append((base, s, w))
+
+    if not oracle_picks:
+        return written
+
+    # Only keep regular picks whose base model has an oracle counterpart, so
+    # the plot stays focused on the comparison the user asked for.
+    pickable_models = {base for (base, _, _) in oracle_picks}
+    regular_picks = [(m, s, w, _tu, _sc) for (m, s, w, _tu, _sc) in picks
+                     if m in pickable_models]
+    if not regular_picks:
+        return written
+
+    pick_summary = "; ".join(
+        f"{m}: {s}-{w}" for (m, s, w, _tu, _sc) in regular_picks
+    )
+    oracle_summary = "; ".join(
+        f"{m}_oracle: {s}-{w}" for (m, s, w) in oracle_picks
+    )
+
+    for ds in ACC_DATASETS:
+        fig, ax = plt.subplots(1, 1, figsize=(7.5, 5))
+        ax.set_title(f"Classification accuracy (oracle comparison) — {dataset_titles[ds]}")
+        ax.set_xlabel("Iteration")
+        ax.set_ylabel("Accuracy (Ωh² ≷ 0.12)")
+        ax.grid(alpha=0.3)
+
+        any_data = False
+        y_lo, y_hi = float("inf"), float("-inf")
+        n_seeds_per_label: dict[str, int] = {}
+
+        def _draw_pair(m_for_color: str, m_label: str, cfg: tuple, is_oracle: bool):
+            nonlocal any_data, y_lo, y_hi
+            if cfg not in traj_acc:
+                return
+            for role in ACC_ROLES:
+                role_traj = traj_acc[cfg].get(role, {})
+                if ds not in role_traj:
+                    continue
+                iters_ax, Y = role_traj[ds]
+                role_label = "AL" if role == "al" else "baseline"
+                label = f"{m_label} ({role_label})"
+                n_seeds_per_label[label] = int((~np.isnan(Y)).any(axis=1).sum())
+                # Regular: solid (AL) / dashed (baseline). Oracle: dotted (AL)
+                # / dash-dot (baseline). Same colour per base model.
+                if not is_oracle:
+                    ls = "-" if role == "al" else "--"
+                    mk = "o" if role == "al" else "s"
+                    lw = 1.6 if role == "al" else 1.3
+                else:
+                    ls = ":" if role == "al" else (0, (3, 1, 1, 1))
+                    mk = "*" if role == "al" else "x"
+                    lw = 2.0 if role == "al" else 1.3
+                _draw_curve(
+                    ax, iters_ax, Y,
+                    color=MODEL_COLORS.get(m_for_color, "gray"),
+                    linestyle=ls,
+                    marker=mk,
+                    label=label,
+                    uncertainty=uncertainty,
+                    linewidth=lw,
+                    fill_alpha=0.14 if role == "al" else 0.06,
+                    alpha=1.0 if role == "al" else 0.85,
+                )
+                any_data = True
+                mean = np.nanmean(Y, axis=0)
+                if np.isfinite(mean).any():
+                    y_lo = min(y_lo, float(np.nanmin(mean)))
+                    y_hi = max(y_hi, float(np.nanmax(mean)))
+
+        for (m, s, w, _tu, _sc) in regular_picks:
+            _draw_pair(m, m, (m, s, w), is_oracle=False)
+        for (base, s, w) in oracle_picks:
+            _draw_pair(base, f"{base}_oracle", (f"{base}_oracle", s, w),
+                       is_oracle=True)
+
+        if not any_data:
+            plt.close(fig)
+            continue
+
+        if np.isfinite(y_lo) and np.isfinite(y_hi):
+            pad = max(0.02, (y_hi - y_lo) * 0.15)
+            ax.set_ylim(max(0.0, y_lo - pad), min(1.0, y_hi + pad))
+        else:
+            ax.set_ylim(0, 1.02)
+
+        seen = {}
+        for h, l in zip(*ax.get_legend_handles_labels()):
+            l_with_n = f"{l}, n={n_seeds_per_label.get(l, 0)}"
+            seen.setdefault(l_with_n, h)
+        if seen:
+            ax.legend(seen.values(), seen.keys(),
+                      loc="best", fontsize=9, frameon=True, ncol=1,
+                      framealpha=0.9)
+
+        if pick_summary or oracle_summary:
+            footnote = f"Regular picks: {pick_summary}    |    {oracle_summary}"
+            fig.text(0.5, 0.01, footnote, ha="center", fontsize=8, color="gray")
+
+        fig.tight_layout(rect=(0, 0.05, 1, 1))
+        out_path = out_dir / f"accuracy_oracle_comparison_{ds}.png"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        fig.savefig(out_path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        written.append(out_path)
+    return written
+
+
 def plot_classification_accuracy_best_per_model(traj_acc: dict, picks, out_dir: Path,
                                                 uncertainty: str) -> list:
     """Render four PNGs (static_random, mcmc, train, val) — accuracy vs iteration.
@@ -1307,27 +1449,20 @@ def plot_strategies_per_model(traj, tols, uncertainty, true_val, out_dir,
     horizontal grey "random scan (full pool)" reference line is drawn.
     """
     written = []
-    all_models = sorted({m for (m, _, _) in traj})
-    # Skip top-level loop over *_oracle models — they are folded into the
-    # parent model's figure below (e.g. transformer_oracle rows are drawn on
-    # hit_rate_model_transformer.png with an "(oracle)" suffix and dotted
-    # linestyle). The standalone hit_rate_model_<model>_oracle.png is still
-    # written if the user wants the oracle-only view, by re-running with a
-    # filter or invoking this function directly with that traj subset.
-    models = [m for m in all_models if not m.endswith("_oracle")]
+    # Oracle (theoretical-limit) cells are NOT shown on per-model strategy
+    # plots — they go into the standalone `*_oracle_comparison.png` plot
+    # alongside the regular best-pick curves for transformer and deep_gp.
+    models = sorted({m for (m, _, _) in traj if not m.endswith("_oracle")})
     for model in models:
         cfgs = [(m, s, w) for (m, s, w) in traj if m == model]
-        oracle_cfgs = [(m, s, w) for (m, s, w) in traj if m == f"{model}_oracle"]
-        if not cfgs and not oracle_cfgs:
+        if not cfgs:
             continue
         fig, axes = plt.subplots(1, len(tols), figsize=(6 * len(tols), 5),
                                  sharey=False, squeeze=False)
         axes = list(axes.flat)
         _setup_axes(axes, tols, true_val, title_word, ylabel)
-        title = f"Model: {model} — strategy & warm-start comparison"
-        if oracle_cfgs:
-            title += "  (+ oracle, dotted)"
-        fig.suptitle(title, fontsize=12)
+        fig.suptitle(f"Model: {model} — strategy & warm-start comparison",
+                     fontsize=12)
 
         for ax, tol in zip(axes, tols):
             for (m, s, w) in sorted(cfgs):
@@ -1354,22 +1489,6 @@ def plot_strategies_per_model(traj, tols, uncertainty, true_val, out_dir,
                         uncertainty=uncertainty,
                         linewidth=1.4, fill_alpha=0.0, alpha=0.75,
                     )
-            # Overlay oracle (theoretical-limit) variants for this model in
-            # the same axes, distinguished by a dotted linestyle and "(oracle)"
-            # in the label so the curves stand out from the regular ones.
-            for (m, s, w) in sorted(oracle_cfgs):
-                if tol not in traj[(m, s, w)]:
-                    continue
-                iters_ax, Y = traj[(m, s, w)][tol]
-                _draw_curve(
-                    ax, iters_ax, Y,
-                    color=STRATEGY_COLORS.get(s, "gray"),
-                    linestyle=":",
-                    marker=WARM_MARKER.get(w, "x"),
-                    label=f"{s}-{w} (oracle, n={len(Y)})",
-                    uncertainty=uncertainty,
-                    linewidth=2.0,
-                )
             if prevalence is not None and tol in prevalence:
                 ax.axhline(prevalence[tol], color="black", linestyle=":", linewidth=1.4,
                            label="random scan (full pool)")
@@ -1383,16 +1502,41 @@ def plot_strategies_per_model(traj, tols, uncertainty, true_val, out_dir,
     return written
 
 
-def _best_setting_for_model(traj, model, tols):
+def _best_setting_for_model(traj, model, tols, iter_completeness=0.9):
     """Pick the (strategy, warm) for `model` with highest mean final-iter hit rate.
 
     Tries the strictest tolerance first; if no config has data there, falls back
     to progressively looser tolerances. Returns (strategy, warm, tol_used, score)
     or None if no eligible config exists.
+
+    `iter_completeness` (0..1) filters out cells whose padded trajectory length
+    is shorter than `iter_completeness * max_iters` across the model's cells.
+    This prevents a cell that timed out early (e.g. TabPFN entropy_batch at
+    iter 11/40) from beating a properly-completed cell on its mean-final
+    score, which would otherwise be measured at the early cell's iter and at
+    the completed cell's iter 40 — not the same comparison. Set to 0.0 to
+    disable the filter.
     """
     candidates = [(m, s, w) for (m, s, w) in traj if m == model]
     if not candidates:
         return None
+
+    # Compute per-cell trajectory length (max iter reached, ignoring NaN seeds)
+    # by inspecting the iter axis from the first available tol.
+    iters_per_cand = {}
+    for c in candidates:
+        for tol in tols:
+            if tol in traj[c]:
+                iters_ax, _ = traj[c][tol]
+                iters_per_cand[c] = int(iters_ax[-1]) if len(iters_ax) else 0
+                break
+    if iters_per_cand:
+        max_iters = max(iters_per_cand.values())
+        threshold = int(max_iters * float(iter_completeness))
+        eligible = [c for c in candidates if iters_per_cand.get(c, 0) >= threshold]
+        if eligible:
+            candidates = eligible
+
     for tol in sorted(tols):  # strictest first
         scored = []
         for (m, s, w) in candidates:
@@ -1404,6 +1548,84 @@ def _best_setting_for_model(traj, model, tols):
             (s, w), score = max(scored, key=lambda kv: kv[1])
             return s, w, tol, score
     return None
+
+
+def plot_oracle_comparison(traj, tols, uncertainty, true_val, out_dir,
+                           file_prefix, title_word, ylabel,
+                           prevalence=None):
+    """Render the theoretical-limit oracle comparison plot.
+
+    Shows, side by side on the same axes per tolerance panel:
+      - For each base model that has an `<model>_oracle` counterpart in
+        `traj` (typically `transformer` and `deep_gp`):
+          • the regular-pipeline best (strategy, warm) trajectory (solid)
+          • the corresponding oracle trajectory (dotted, "(oracle)" label)
+
+    This is the talk's headline "what AL would achieve given a perfect
+    candidate pre-filter" comparison. Returns the written paths.
+    """
+    written = []
+    oracle_models = sorted({m for (m, _, _) in traj if m.endswith("_oracle")})
+    if not oracle_models:
+        return written
+
+    fig, axes = plt.subplots(1, len(tols), figsize=(6 * len(tols), 5),
+                             sharey=False, squeeze=False)
+    axes = list(axes.flat)
+    _setup_axes(axes, tols, true_val, title_word, ylabel)
+    fig.suptitle(
+        "Oracle comparison: regular AL vs theoretical limit "
+        "(candidates restricted to MCMC pool)",
+        fontsize=12,
+    )
+
+    for ax, tol in zip(axes, tols):
+        for oracle_model in oracle_models:
+            base_model = oracle_model[: -len("_oracle")]
+
+            # 1) Regular pipeline: pick the model's best (strategy, warm) by hit rate
+            chosen = _best_setting_for_model(traj, base_model, tols)
+            if chosen is not None:
+                s, w, _tu, _sc = chosen
+                cfg = (base_model, s, w)
+                if cfg in traj and tol in traj[cfg]:
+                    iters_ax, Y = traj[cfg][tol]
+                    _draw_curve(
+                        ax, iters_ax, Y,
+                        color=MODEL_COLORS.get(base_model, "gray"),
+                        linestyle="-",
+                        marker="o",
+                        label=f"{base_model}: {s}-{w} (n={len(Y)})",
+                        uncertainty=uncertainty,
+                    )
+
+            # 2) Oracle counterpart — there should be exactly one (s, w) cell
+            oracle_cfgs = [(m, s, w) for (m, s, w) in traj if m == oracle_model]
+            for (m, s, w) in sorted(oracle_cfgs):
+                if tol not in traj[(m, s, w)]:
+                    continue
+                iters_ax, Y = traj[(m, s, w)][tol]
+                _draw_curve(
+                    ax, iters_ax, Y,
+                    color=MODEL_COLORS.get(base_model, "gray"),
+                    linestyle=":",
+                    marker="*",
+                    label=f"{oracle_model}: {s}-{w} (n={len(Y)})",
+                    uncertainty=uncertainty,
+                    linewidth=2.0,
+                )
+
+        if prevalence is not None and tol in prevalence:
+            ax.axhline(prevalence[tol], color="black", linestyle=":", linewidth=1.4,
+                       label="random scan (full pool)")
+            ax.text(0.99, prevalence[tol], f" {prevalence[tol]:.4f}",
+                    transform=ax.get_yaxis_transform(), ha="right", va="bottom",
+                    fontsize=8, color="black")
+
+    out_path = out_dir / f"{file_prefix}_oracle_comparison.png"
+    _finalize(fig, axes, out_path)
+    written.append(out_path)
+    return written
 
 
 def plot_best_per_model(traj, tols, uncertainty, true_val, out_dir,
@@ -1610,6 +1832,13 @@ def main(manifest, sweep_id, output_dir, uncertainty, target, tolerances,
         )
         written += paths
         picks_by_metric[metric_name] = picks
+        # Theoretical-limit oracle plot — regular best + matching oracle for
+        # each model that has an oracle counterpart in the traj.
+        written += plot_oracle_comparison(
+            traj, tols, uncertainty, true_val, out_dir,
+            file_prefix=file_prefix, title_word=title_word, ylabel=ylabel,
+            prevalence=prevalence,
+        )
 
     # ── Classification-accuracy trajectories (opt-in, expensive on first run) ─
     if compute_accuracy:
@@ -1692,8 +1921,28 @@ def main(manifest, sweep_id, output_dir, uncertainty, target, tolerances,
                         Y_mcmc = torch.empty(0, dtype=torch.float32)
                     Y_full_arr = np.asarray(Y_full_local)
                     X_full_arr = np.asarray(X_full)
+                    # Build synthetic "picks" for oracle cells so the same
+                    # _collect_accuracy_trajectories pass also fills traj_acc
+                    # entries keyed on (transformer_oracle, …) etc. There's
+                    # typically one (strategy, warm) cell per oracle model.
+                    oracle_rows = df[df["model"].str.endswith("_oracle")]
+                    oracle_picks: list = []
+                    for om in sorted(oracle_rows["model"].unique()):
+                        om_df = oracle_rows[oracle_rows["model"] == om]
+                        # Take the (strategy, warm) cell with the most seed runs.
+                        cell_counts = (om_df.groupby(["strategy", "warm_start"])
+                                       .size().sort_values(ascending=False))
+                        if cell_counts.empty:
+                            continue
+                        (s, w), _n = list(cell_counts.items())[0]
+                        oracle_picks.append((om, s, w, min(tols), float("nan")))
+                    if oracle_picks:
+                        click.echo(f"[accuracy] including {len(oracle_picks)} oracle "
+                                   f"pick(s): "
+                                   + ", ".join(f"{m}-{s}-{w}"
+                                                for (m, s, w, _, _) in oracle_picks))
                     traj_acc = _collect_accuracy_trajectories(
-                        df, picks, target, X_full_arr, Y_full_arr,
+                        df, picks + oracle_picks, target, X_full_arr, Y_full_arr,
                         X_static, Y_static, X_mcmc, Y_mcmc, threshold_t,
                         device=accuracy_device, min_seeds=min_seeds,
                         refresh=accuracy_cache_refresh,
@@ -1701,6 +1950,11 @@ def main(manifest, sweep_id, output_dir, uncertainty, target, tolerances,
                     )
                     if traj_acc:
                         written += plot_classification_accuracy_best_per_model(
+                            traj_acc, picks, out_dir, uncertainty,
+                        )
+                        # Oracle comparison plots — only produced if any
+                        # *_oracle entries are present in traj_acc.
+                        written += plot_classification_accuracy_oracle_comparison(
                             traj_acc, picks, out_dir, uncertainty,
                         )
                     else:
