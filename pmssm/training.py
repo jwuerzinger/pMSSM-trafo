@@ -159,7 +159,8 @@ def train_model_worker(gpu_id, X, Y, idx_train, idx_val, epochs, dropout,
                       plots_dir=None, checkpoint_path=None,
                       warm_start_path=None, early_stopping=True, patience=200,
                       y_transform='zscore', target='DMRD', lsp_fracs=None,
-                      arch='transformer'):
+                      arch='transformer',
+                      dnn_d_model=64, dnn_num_layers=4, dnn_dim_feedforward=256):
     """
     Worker function for multiprocessing neural-network training.
 
@@ -245,9 +246,9 @@ def train_model_worker(gpu_id, X, Y, idx_train, idx_val, epochs, dropout,
     if arch == 'dnn':
         model = PMSSMFeedForward(
             n_params=19,
-            d_model=64,
-            num_layers=4,
-            dim_feedforward=256,
+            d_model=dnn_d_model,
+            num_layers=dnn_num_layers,
+            dim_feedforward=dnn_dim_feedforward,
             dropout=dropout,
         )
     elif arch == 'transformer':

@@ -236,7 +236,13 @@ def load_config_with_sweep(config_file, sweep_index=None):
               help="Comma-separated GPU IDs for AL and baseline models (default: 2,3).")
 @click.option('--seed', default=42, type=int,
               help="Master random seed propagated to torch / numpy / candidate pool (default: 42).")
-def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, dropout, n_datasets, n_samples, val_fraction, output_dir, generate_data, min_gen_fraction, max_gen_attempts, gen_workers, selection_strategy, entropy_blur, entropy_beta, entropy_pool_size, candidate_generation, proximity_sampling, tolerance_sampling, target_value, config_file, sweep_index, early_stopping, patience, warm_starting, eval_data_path, compute_full_metrics, y_transform, mcmc_data_dir, static_eval_size, data_dir, use_mcmc_loader, train_baseline, resume_from, n_additional_iterations, gpu_ids, seed):
+@click.option('--d-model', default=64, type=int,
+              help="DNN per-parameter embedding dim (default: 64).")
+@click.option('--num-layers', default=4, type=int,
+              help="DNN hidden layer count (default: 4).")
+@click.option('--dim-feedforward', default=256, type=int,
+              help="DNN hidden layer width (default: 256).")
+def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, dropout, n_datasets, n_samples, val_fraction, output_dir, generate_data, min_gen_fraction, max_gen_attempts, gen_workers, selection_strategy, entropy_blur, entropy_beta, entropy_pool_size, candidate_generation, proximity_sampling, tolerance_sampling, target_value, config_file, sweep_index, early_stopping, patience, warm_starting, eval_data_path, compute_full_metrics, y_transform, mcmc_data_dir, static_eval_size, data_dir, use_mcmc_loader, train_baseline, resume_from, n_additional_iterations, gpu_ids, seed, d_model, num_layers, dim_feedforward):
     """
     Active learning pipeline for pMSSM relic density prediction (DNN variant).
 
@@ -268,6 +274,9 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
             'warm_starting': 'warm_starting',
             'compute_full_metrics': 'compute_full_metrics',
             'y_transform': 'y_transform',
+            'd_model': 'd_model',
+            'num_layers': 'num_layers',
+            'dim_feedforward': 'dim_feedforward',
         }
 
         # Override locals with config values
@@ -275,7 +284,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
             if cfg_key in cfg:
                 # Type conversion
                 val = cfg[cfg_key]
-                if cfg_key in ('n_iterations', 'n_candidates', 'n_select', 'mc_samples', 'epochs', 'entropy_pool_size', 'patience'):
+                if cfg_key in ('n_iterations', 'n_candidates', 'n_select', 'mc_samples', 'epochs', 'entropy_pool_size', 'patience', 'd_model', 'num_layers', 'dim_feedforward'):
                     val = int(val)
                 elif cfg_key in ('dropout', 'entropy_blur', 'entropy_beta', 'proximity_sampling', 'target_value'):
                     val = float(val)
@@ -304,6 +313,9 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
         warm_starting = locals().get('warm_starting', warm_starting)
         compute_full_metrics = locals().get('compute_full_metrics', compute_full_metrics)
         y_transform = locals().get('y_transform', y_transform)
+        d_model = locals().get('d_model', d_model)
+        num_layers = locals().get('num_layers', num_layers)
+        dim_feedforward = locals().get('dim_feedforward', dim_feedforward)
 
     # Propagate master seed to torch / numpy / python-random
     torch.manual_seed(seed)
@@ -358,6 +370,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
     logger.info(f"  mc_samples: {mc_samples}")
     logger.info(f"  epochs: {epochs}")
     logger.info(f"  dropout: {dropout}")
+    logger.info(f"  arch: PMSSMFeedForward(d_model={d_model}, num_layers={num_layers}, dim_feedforward={dim_feedforward})")
     logger.info(f"  n_datasets: {n_datasets}")
     logger.info(f"  n_samples: {n_samples if n_samples else 'all'}")
     logger.info(f"  val_fraction: {val_fraction}")
@@ -778,7 +791,9 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
             train_model_worker(device, X_combined, Y_combined, idx_train_al, idx_val_al, epochs, dropout,
                              al_queue, "AL", iter_dir, iter_plots_dir, al_checkpoint_path,
                              al_warm_start, early_stopping, patience, y_transform, "DMRD",
-                             F_combined, arch='dnn')
+                             F_combined, arch='dnn',
+                             dnn_d_model=d_model, dnn_num_layers=num_layers,
+                             dnn_dim_feedforward=dim_feedforward)
             al_results = al_queue.get()
             baseline_results = dict(nan_baseline_results)
         elif use_parallel:
@@ -791,7 +806,10 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
                 args=(AL_GPU_ID, X_combined, Y_combined, idx_train_al, idx_val_al, epochs, dropout, al_queue, "AL",
                       iter_dir, iter_plots_dir, al_checkpoint_path, al_warm_start,
                       early_stopping, patience, y_transform, "DMRD", F_combined),
-                kwargs={'arch': 'dnn'},
+                kwargs={'arch': 'dnn',
+                        'dnn_d_model': d_model,
+                        'dnn_num_layers': num_layers,
+                        'dnn_dim_feedforward': dim_feedforward},
             )
             baseline_process = mp.Process(
                 target=train_model_worker,
@@ -799,7 +817,10 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
                       dropout, baseline_queue, "Baseline", iter_dir, iter_plots_dir,
                       baseline_checkpoint_path, baseline_warm_start, early_stopping, patience,
                       y_transform, "DMRD", F_baseline_combined),
-                kwargs={'arch': 'dnn'},
+                kwargs={'arch': 'dnn',
+                        'dnn_d_model': d_model,
+                        'dnn_num_layers': num_layers,
+                        'dnn_dim_feedforward': dim_feedforward},
             )
 
             al_process.start()
@@ -819,7 +840,9 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
             train_model_worker(device, X_combined, Y_combined, idx_train_al, idx_val_al, epochs, dropout,
                              al_queue, "AL", iter_dir, iter_plots_dir, al_checkpoint_path,
                              al_warm_start, early_stopping, patience, y_transform, "DMRD",
-                             F_combined, arch='dnn')
+                             F_combined, arch='dnn',
+                             dnn_d_model=d_model, dnn_num_layers=num_layers,
+                             dnn_dim_feedforward=dim_feedforward)
             al_results = al_queue.get()
 
             logger.info("Training Baseline model (random samples)...")
@@ -828,7 +851,9 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
                              epochs, dropout, baseline_queue, "Baseline", iter_dir,
                              iter_plots_dir, baseline_checkpoint_path, baseline_warm_start,
                              early_stopping, patience, y_transform, "DMRD",
-                             F_baseline_combined, arch='dnn')
+                             F_baseline_combined, arch='dnn',
+                             dnn_d_model=d_model, dnn_num_layers=num_layers,
+                             dnn_dim_feedforward=dim_feedforward)
             baseline_results = baseline_queue.get()
 
         # Log results
@@ -854,7 +879,8 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
         # This avoids training the AL model a second time.
         stats = compute_stats(X_combined, Y_combined, idx_train_al)
         model = PMSSMFeedForward(
-            n_params=19, d_model=64, num_layers=4, dim_feedforward=256, dropout=dropout
+            n_params=19, d_model=d_model, num_layers=num_layers,
+            dim_feedforward=dim_feedforward, dropout=dropout,
         )
         model.load_state_dict(torch.load(al_checkpoint_path, map_location=device))
         logger.info(f"Loaded AL model from {al_checkpoint_path} for MC Dropout uncertainty estimation")
@@ -894,7 +920,8 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
 
             baseline_stats = compute_stats(X_baseline_combined, Y_baseline_combined, idx_train_base)
             baseline_model = PMSSMFeedForward(
-                n_params=19, d_model=64, num_layers=4, dim_feedforward=256, dropout=dropout)
+                n_params=19, d_model=d_model, num_layers=num_layers,
+                dim_feedforward=dim_feedforward, dropout=dropout)
             baseline_model.load_state_dict(torch.load(baseline_checkpoint_path, map_location=device))
             base_cross_loss, base_cross_r2, base_cross_yt, base_cross_yp = cross_evaluate_transformer(
                 baseline_model, baseline_stats, X_val, Y_val,

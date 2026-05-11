@@ -718,134 +718,344 @@ def plot_candidate_uncertainty(candidates, pred_var, output_dir, model_name, ite
         logger.info(f"{model_name} candidate uncertainty plot saved to {plot_path}")
 
 
-def plot_iteration_metrics(iterations, al_metrics, baseline_metrics, output_dir, logger):
-    """
-    Plot validation loss, R² score, and dataset sizes across active learning iterations.
+def plot_iteration_metrics(iterations, al_metrics, baseline_metrics, output_dir,
+                           logger, title_suffix=None, filename="iteration_metrics.png",
+                           show_raw=False):
+    """Per-run trajectory plot — 2×3 grid for readability.
+
+    Layout::
+
+        ┌──────────────────┬──────────────────┬──────────────────┐
+        │ (0,0)            │ (0,1)            │ (0,2)            │
+        │ Own-set Loss     │ Shared-eval Loss │ Dataset size     │
+        │ (4 lines)        │ (≤6 lines)       │ (4 lines)        │
+        ├──────────────────┼──────────────────┼──────────────────┤
+        │ (1,0)            │ (1,1)            │ (1,2)            │
+        │ Own-set R²       │ Shared-eval R²   │ Δ R²             │
+        │ (4 lines, linear │ (symlog: linear  │ (AL − Baseline   │
+        │  ylim auto)      │  in [-1,1])      │  on each eval)   │
+        └──────────────────┴──────────────────┴──────────────────┘
+
+    Conventions
+    -----------
+    Per-pipeline (own-set) panels (col 0):
+      Colour:    blue = AL,  red = Baseline
+      Linestyle: solid = train, dashed = val
+    Shared-eval / Δ panels (cols 1 + 2):
+      Colour:    green = cross-val, magenta = MCMC, cyan = static_random
+      Linestyle: solid = AL, dashed = Baseline   (Δ panel: solid only)
+
+    `title_suffix` (e.g. "exact_gp / entropy_batch / warm / seed1") is appended
+    to the figure suptitle so the file is self-describing.
 
     Args:
-        iterations: List of iteration numbers
-        al_metrics: Dict with 'train_losses', 'val_losses', 'r2_scores', 'n_train', 'n_val' for active learning
-        baseline_metrics: Dict with 'train_losses', 'val_losses', 'r2_scores', 'n_train', 'n_val' for baseline
-        output_dir: Output directory for plots
-        logger: Logger instance
+        iterations: List of iteration numbers.
+        al_metrics: dict — keys (all lists indexed by iter):
+            train_losses, val_losses, train_r2_scores (optional), r2_scores,
+            cross_val_losses, cross_val_r2, mcmc_eval_losses, mcmc_eval_r2,
+            static_random_eval_losses, static_random_eval_r2, n_train, n_val.
+        baseline_metrics: same schema.
+        output_dir: directory to save into.
+        logger: Logger instance.
+        title_suffix: optional string appended to figure title.
+        filename: output PNG filename (default 'iteration_metrics.png').
     """
-    _, axes = plt.subplots(1, 3, figsize=(18, 5))
-    ax1, ax2, ax3 = axes
+    import numpy as _np
 
-    # Show a label every 5 iterations; fall back to every iteration for short runs
+    fig, axes = plt.subplots(2, 3, figsize=(16, 9), sharex=False)
+    (ax_loss_own, ax_loss_shr, ax_n) = axes[0]
+    (ax_r2_own, ax_r2_shr, ax_delta) = axes[1]
+
+    # Tick step
     tick_step = 5 if len(iterations) > 10 else 1
     label_ticks = [i for i in iterations if i % tick_step == 0]
-    if iterations[0] not in label_ticks:
+    if iterations and iterations[0] not in label_ticks:
         label_ticks = [iterations[0]] + label_ticks
 
-    # Plot 1: Train/Validation Loss
-    ax1.plot(iterations, al_metrics['train_losses'], 'b-', linewidth=2, marker='o', markersize=6, label='AL Train')
-    ax1.plot(iterations, al_metrics['val_losses'], 'b--', linewidth=2, marker='s', markersize=6, label='AL Validation')
-    ax1.plot(iterations, baseline_metrics['train_losses'], 'r-', linewidth=2, marker='o', markersize=6, label='Baseline Train')
-    ax1.plot(iterations, baseline_metrics['val_losses'], 'r--', linewidth=2, marker='s', markersize=6, label='Baseline Validation')
-    if al_metrics.get('cross_val_losses'):
-        ax1.plot(iterations, al_metrics['cross_val_losses'], 'g:', linewidth=2, marker='^', markersize=6, label='AL on Base Val')
-    if baseline_metrics.get('cross_val_losses'):
-        ax1.plot(iterations, baseline_metrics['cross_val_losses'], 'g--', linewidth=2, marker='v', markersize=6, label='Base on AL Val')
-    # Static evaluation datasets
-    if al_metrics.get('mcmc_eval_losses'):
-        ax1.plot(iterations, al_metrics['mcmc_eval_losses'], 'm-', linewidth=1.5, marker='D', markersize=5, label='AL on MCMC')
-    if baseline_metrics.get('mcmc_eval_losses'):
-        ax1.plot(iterations, baseline_metrics['mcmc_eval_losses'], 'm--', linewidth=1.5, marker='d', markersize=5, label='Base on MCMC')
-    if al_metrics.get('static_random_eval_losses'):
-        ax1.plot(iterations, al_metrics['static_random_eval_losses'], 'c-', linewidth=1.5, marker='P', markersize=5, label='AL on Static Rnd')
-    if baseline_metrics.get('static_random_eval_losses'):
-        ax1.plot(iterations, baseline_metrics['static_random_eval_losses'], 'c--', linewidth=1.5, marker='p', markersize=5, label='Base on Static Rnd')
-    ax1.set_xlabel('Iteration', fontsize=12)
-    ax1.set_ylabel('Best Loss (MSE)', fontsize=12)
-    ax1.set_title('Train/Validation Loss vs Iteration', fontsize=14)
-    ax1.grid(True, which='major', alpha=0.3)
-    ax1.grid(True, which='minor', alpha=0.15)
-    ax1.set_xticks(label_ticks)
-    ax1.set_xticks(iterations, minor=True)
-    ax1.set_yscale('log')
-    ax1.legend(fontsize=9)
+    # Rolling-mean window. Five iterations smooths the typical 3-5-iter noise
+    # cycles in the per-iteration metrics (especially own-set loss / R² for
+    # transformer + DNN, and Δ R² for catastrophic regimes) while preserving
+    # genuine ~10-iter trends like exact_gp's late-iter collapse. For short
+    # runs we drop the smoothing entirely.
+    ROLL_WIN = 5 if len(iterations) >= 10 else 1
 
-    # Plot 2: R² Score (training, validation, and cross-validation)
-    if al_metrics.get('train_r2_scores'):
-        ax2.plot(iterations, al_metrics['train_r2_scores'], 'b-', linewidth=2, marker='o', markersize=6, label='AL Train')
-    ax2.plot(iterations, al_metrics['r2_scores'], 'b--', linewidth=2, marker='s', markersize=6, label='AL Validation')
-    if baseline_metrics.get('train_r2_scores'):
-        ax2.plot(iterations, baseline_metrics['train_r2_scores'], 'r-', linewidth=2, marker='o', markersize=6, label='Baseline Train')
-    ax2.plot(iterations, baseline_metrics['r2_scores'], 'r--', linewidth=2, marker='s', markersize=6, label='Baseline Validation')
-    if al_metrics.get('cross_val_r2'):
-        ax2.plot(iterations, al_metrics['cross_val_r2'], 'g:', linewidth=2, marker='^', markersize=6, label='AL on Base Val')
-    if baseline_metrics.get('cross_val_r2'):
-        ax2.plot(iterations, baseline_metrics['cross_val_r2'], 'g--', linewidth=2, marker='v', markersize=6, label='Base on AL Val')
-    # Static evaluation datasets
-    if al_metrics.get('mcmc_eval_r2'):
-        ax2.plot(iterations, al_metrics['mcmc_eval_r2'], 'm-', linewidth=1.5, marker='D', markersize=5, label='AL on MCMC')
-    if baseline_metrics.get('mcmc_eval_r2'):
-        ax2.plot(iterations, baseline_metrics['mcmc_eval_r2'], 'm--', linewidth=1.5, marker='d', markersize=5, label='Base on MCMC')
-    if al_metrics.get('static_random_eval_r2'):
-        ax2.plot(iterations, al_metrics['static_random_eval_r2'], 'c-', linewidth=1.5, marker='P', markersize=5, label='AL on Static Rnd')
-    if baseline_metrics.get('static_random_eval_r2'):
-        ax2.plot(iterations, baseline_metrics['static_random_eval_r2'], 'c--', linewidth=1.5, marker='p', markersize=5, label='Base on Static Rnd')
-    ax2.set_xlabel('Iteration', fontsize=12)
-    ax2.set_ylabel('R² Score', fontsize=12)
-    ax2.set_title('R² Score vs Iteration', fontsize=14)
-    ax2.grid(True, which='major', alpha=0.3)
-    ax2.grid(True, which='minor', alpha=0.15)
-    ax2.set_xticks(label_ticks)
-    ax2.set_xticks(iterations, minor=True)
-    all_r2 = al_metrics['r2_scores'] + baseline_metrics['r2_scores']
-    all_r2 += al_metrics.get('train_r2_scores', []) + baseline_metrics.get('train_r2_scores', [])
-    all_r2 += al_metrics.get('cross_val_r2', []) + baseline_metrics.get('cross_val_r2', [])
-    all_r2 += al_metrics.get('mcmc_eval_r2', []) + baseline_metrics.get('mcmc_eval_r2', [])
-    all_r2 += al_metrics.get('static_random_eval_r2', []) + baseline_metrics.get('static_random_eval_r2', [])
-    finite_r2 = [v for v in all_r2 if v is not None and not (v != v) and abs(v) != float('inf')]
-    r2_lower = -1.0
-    ax2.set_ylim(r2_lower, 1.05)
+    def _rolling_mean(ys, w):
+        """Centred moving average ignoring NaNs. Returns same length as `ys`."""
+        if w <= 1:
+            return ys
+        n = len(ys)
+        out = [_np.nan] * n
+        half = w // 2
+        for i in range(n):
+            lo = max(0, i - half)
+            hi = min(n, i + half + 1)
+            window = [v for v in ys[lo:hi] if v == v]
+            if window:
+                out[i] = sum(window) / len(window)
+        return out
 
-    # Collect all (iteration, r2_value, color) pairs to check for below-limit points
-    _r2_series = [
-        (al_metrics.get('train_r2_scores', []), 'b'),
-        (al_metrics['r2_scores'], 'b'),
-        (baseline_metrics.get('train_r2_scores', []), 'r'),
-        (baseline_metrics['r2_scores'], 'r'),
-        (al_metrics.get('cross_val_r2', []), 'g'),
-        (baseline_metrics.get('cross_val_r2', []), 'g'),
-        (al_metrics.get('mcmc_eval_r2', []), 'm'),
-        (baseline_metrics.get('mcmc_eval_r2', []), 'm'),
-        (al_metrics.get('static_random_eval_r2', []), 'c'),
-        (baseline_metrics.get('static_random_eval_r2', []), 'c'),
+    def _plot(ax, ys, *, color, linestyle, label):
+        """Plot the rolling-mean curve as the primary line; optionally also
+        draw the raw data behind it (faint).
+
+        Controlled by the outer `show_raw` kwarg. Markers are intentionally
+        omitted — every-nth markers were confusing per user feedback.
+        """
+        if not ys or all(v is None for v in ys):
+            return
+        ys_clean = [_np.nan if (v is None or v != v) else float(v) for v in ys]
+        if show_raw:
+            # Faint raw line so outliers remain visible
+            ax.plot(iterations, ys_clean,
+                    color=color, linestyle=linestyle, linewidth=0.9,
+                    alpha=0.30, label=None)
+        # Rolling-mean overlay (the primary visual element)
+        smoothed = _rolling_mean(ys_clean, ROLL_WIN)
+        ax.plot(iterations, smoothed,
+                color=color, linestyle=linestyle, linewidth=2.0,
+                label=label)
+
+    def _style_axis(ax, ylabel, title):
+        ax.set_xlabel("Iteration", fontsize=11)
+        ax.set_ylabel(ylabel, fontsize=11)
+        ax.set_title(title, fontsize=12)
+        ax.grid(True, which="major", alpha=0.3)
+        ax.grid(True, which="minor", alpha=0.15)
+        ax.set_xticks(label_ticks)
+        if iterations:
+            ax.set_xticks(iterations, minor=True)
+
+    # ─── (0,0) Own-set Loss ────────────────────────────────────────────────
+    _plot(ax_loss_own, al_metrics.get("train_losses"),
+          color="tab:blue", linestyle="-", label="AL train")
+    _plot(ax_loss_own, al_metrics.get("val_losses"),
+          color="tab:blue", linestyle="--", label="AL val")
+    _plot(ax_loss_own, baseline_metrics.get("train_losses"),
+          color="tab:red", linestyle="-", label="Base train")
+    _plot(ax_loss_own, baseline_metrics.get("val_losses"),
+          color="tab:red", linestyle="--", label="Base val")
+    _style_axis(ax_loss_own, "MSE (own-set)", "Own-set loss")
+    # Always log-scale loss panels — MSE is positive-definite and typically
+    # spans multiple decades; linear scale bunches everything at the bottom.
+    # Compute y-limits excluding iter 1 (commonly an undertraining outlier
+    # that drags one axis edge by 4+ decades).
+    _loss_for_ylim = []
+    for k in ("train_losses", "val_losses"):
+        for m in (al_metrics, baseline_metrics):
+            vs = m.get(k, []) or []
+            for v in vs[1:] if len(vs) > 1 else vs:
+                if v is not None and v == v and v > 0:
+                    _loss_for_ylim.append(float(v))
+    if _loss_for_ylim:
+        ax_loss_own.set_yscale("log")
+        lo = min(_loss_for_ylim)
+        hi = max(_loss_for_ylim)
+        ax_loss_own.set_ylim(lo * 0.5, hi * 2)
+    ax_loss_own.legend(fontsize=8, loc="best", framealpha=0.85, ncol=2)
+
+    # ─── (0,1) Shared-eval Loss ──────────────────────────────────────────
+    # green = cross-val, magenta = MCMC, cyan = static_random; solid=AL,
+    # dashed=Baseline.
+    eval_sets = [
+        ("cross_val_losses", "tab:green", "Cross-val"),
+        ("mcmc_eval_losses", "tab:purple", "MCMC"),
+        ("static_random_eval_losses", "tab:cyan", "Static rnd"),
     ]
-    for r2_vals, color in _r2_series:
-        if not r2_vals:
+    has_shr_loss = False
+    for key, color, label in eval_sets:
+        if al_metrics.get(key):
+            _plot(ax_loss_shr, al_metrics[key],
+                  color=color, linestyle="-",
+                  label=f"AL on {label}")
+            has_shr_loss = True
+        if baseline_metrics.get(key):
+            _plot(ax_loss_shr, baseline_metrics[key],
+                  color=color, linestyle="--",
+                  label=f"Base on {label}")
+            has_shr_loss = True
+    _style_axis(ax_loss_shr, "MSE (transformed)", "Shared-eval loss")
+    # Always log-scale (positive-definite MSE); exclude iter 1 from ylim.
+    _shr_loss_vals = []
+    for key, _c, _l in eval_sets:
+        for m in (al_metrics, baseline_metrics):
+            vs = m.get(key, []) or []
+            for v in vs[1:] if len(vs) > 1 else vs:
+                if v is not None and v == v and v > 0:
+                    _shr_loss_vals.append(float(v))
+    if _shr_loss_vals:
+        ax_loss_shr.set_yscale("log")
+        lo = min(_shr_loss_vals)
+        hi = max(_shr_loss_vals)
+        ax_loss_shr.set_ylim(lo * 0.5, hi * 2)
+    if has_shr_loss:
+        ax_loss_shr.legend(fontsize=8, loc="best", framealpha=0.85, ncol=2)
+    else:
+        ax_loss_shr.text(0.5, 0.5, "no shared-eval data",
+                          transform=ax_loss_shr.transAxes,
+                          ha="center", va="center", color="gray")
+
+    # ─── (0,2) Dataset size ───────────────────────────────────────────────
+    _plot(ax_n, al_metrics.get("n_train"),
+          color="tab:blue", linestyle="-", label="AL train")
+    _plot(ax_n, al_metrics.get("n_val"),
+          color="tab:blue", linestyle="--", label="AL val")
+    _plot(ax_n, baseline_metrics.get("n_train"),
+          color="tab:red", linestyle="-", label="Base train")
+    _plot(ax_n, baseline_metrics.get("n_val"),
+          color="tab:red", linestyle="--", label="Base val")
+    _style_axis(ax_n, "Number of samples", "Dataset size")
+    ax_n.legend(fontsize=8, loc="best", framealpha=0.85, ncol=2)
+
+    # ─── (1,0) Own-set R² ─────────────────────────────────────────────────
+    _plot(ax_r2_own, al_metrics.get("train_r2_scores"),
+          color="tab:blue", linestyle="-", label="AL train")
+    _plot(ax_r2_own, al_metrics.get("r2_scores"),
+          color="tab:blue", linestyle="--", label="AL val")
+    _plot(ax_r2_own, baseline_metrics.get("train_r2_scores"),
+          color="tab:red", linestyle="-", label="Base train")
+    _plot(ax_r2_own, baseline_metrics.get("r2_scores"),
+          color="tab:red", linestyle="--", label="Base val")
+    _style_axis(ax_r2_own, "R² (own-set)", "Own-set R²")
+    # Compute y-limits excluding iter 1 to ignore undertraining outliers.
+    _own_r2 = []
+    for k in ("train_r2_scores", "r2_scores"):
+        for m in (al_metrics, baseline_metrics):
+            vs = m.get(k, []) or []
+            for v in vs[1:] if len(vs) > 1 else vs:
+                if v is not None and v == v and abs(v) != float("inf"):
+                    _own_r2.append(float(v))
+    if _own_r2:
+        ylo, yhi = min(_own_r2), max(_own_r2)
+        pad = max(0.05, 0.1 * (yhi - ylo))
+        ax_r2_own.set_ylim(max(-1.05, ylo - pad), min(1.05, yhi + pad))
+    ax_r2_own.legend(fontsize=8, loc="best", framealpha=0.85, ncol=2)
+    ax_r2_own.axhline(0, color="gray", linewidth=0.8, alpha=0.5)
+
+    # ─── (1,1) Shared-eval R² (symlog so catastrophic collapses are legible) ──
+    r2_sets = [
+        ("cross_val_r2", "tab:green", "Cross-val"),
+        ("mcmc_eval_r2", "tab:purple", "MCMC"),
+        ("static_random_eval_r2", "tab:cyan", "Static rnd"),
+    ]
+    has_shr_r2 = False
+    _shr_r2_vals = []
+    for key, color, label in r2_sets:
+        if al_metrics.get(key):
+            _plot(ax_r2_shr, al_metrics[key],
+                  color=color, linestyle="-",
+                  label=f"AL on {label}")
+            has_shr_r2 = True
+            _shr_r2_vals.extend(
+                float(v) for v in al_metrics[key]
+                if v is not None and v == v and abs(v) != float("inf")
+            )
+        if baseline_metrics.get(key):
+            _plot(ax_r2_shr, baseline_metrics[key],
+                  color=color, linestyle="--",
+                  label=f"Base on {label}")
+            has_shr_r2 = True
+            _shr_r2_vals.extend(
+                float(v) for v in baseline_metrics[key]
+                if v is not None and v == v and abs(v) != float("inf")
+            )
+    _style_axis(ax_r2_shr, "R² (shared eval)", "Shared-eval R²")
+    if has_shr_r2 and _shr_r2_vals:
+        # Exclude iter 1 for ylim determination (avoid undertraining outliers
+        # pushing the symlog axis to absurd ranges).
+        _ylim_vals = []
+        for key, _c, _l in r2_sets:
+            for m in (al_metrics, baseline_metrics):
+                vs = m.get(key, []) or []
+                for v in vs[1:] if len(vs) > 1 else vs:
+                    if v is not None and v == v and abs(v) != float("inf"):
+                        _ylim_vals.append(float(v))
+        if not _ylim_vals:
+            _ylim_vals = _shr_r2_vals
+        ymin, ymax = min(_ylim_vals), max(_ylim_vals)
+        ax_r2_shr.set_yscale("symlog", linthresh=1.0)
+        # Tight ylim: only pad the side that has data extending toward it.
+        # For exact_gp's catastrophic case, ymin ≈ -160 (heavy pad needed)
+        # while ymax ≈ 0.6 (don't pad up to 1.0+ — that's empty whitespace).
+        upper = max(ymax * 1.05, ymax + 0.05) if ymax > 0 else 0.05
+        lower = ymin - 0.10 * max(abs(ymin), 1)
+        ax_r2_shr.set_ylim(lower, upper)
+        ax_r2_shr.axhline(0, color="gray", linewidth=0.8, alpha=0.5)
+        ax_r2_shr.legend(fontsize=8, loc="best", framealpha=0.85, ncol=2)
+    else:
+        ax_r2_shr.text(0.5, 0.5, "no shared-eval data",
+                       transform=ax_r2_shr.transAxes,
+                       ha="center", va="center", color="gray")
+
+    # ─── (1,2) Δ R²  (AL minus Baseline on each shared eval) ──────────────
+    delta_sets = [
+        ("cross_val_r2", "tab:green", "Cross-val"),
+        ("mcmc_eval_r2", "tab:purple", "MCMC"),
+        ("static_random_eval_r2", "tab:cyan", "Static rnd"),
+    ]
+    has_delta = False
+    _delta_vals = []
+    for key, color, label in delta_sets:
+        al_v = al_metrics.get(key) or []
+        bs_v = baseline_metrics.get(key) or []
+        if not al_v or not bs_v:
             continue
-        for it, val in zip(iterations, r2_vals):
-            if val is not None and val == val and val < r2_lower:
-                ax2.annotate('', xy=(it, r2_lower), xytext=(it, r2_lower + 0.08),
-                             arrowprops=dict(arrowstyle='->', color=color, lw=2))
+        n = min(len(al_v), len(bs_v), len(iterations))
+        if n == 0:
+            continue
+        delta = []
+        for i in range(n):
+            a, b = al_v[i], bs_v[i]
+            if a is None or b is None or a != a or b != b:
+                delta.append(_np.nan)
+            else:
+                delta.append(float(a) - float(b))
+        if show_raw:
+            # Faint raw line so outlier spikes remain visible
+            ax_delta.plot(iterations[:n], delta,
+                          color=color, linestyle="-", linewidth=0.9,
+                          alpha=0.30)
+        # Rolling-mean overlay carries the legend entry
+        smoothed_delta = _rolling_mean(delta, ROLL_WIN)
+        ax_delta.plot(iterations[:n], smoothed_delta,
+                      color=color, linestyle="-", linewidth=2.0,
+                      label=f"{label}")
+        has_delta = True
+        _delta_vals.extend(v for v in delta if v == v)
+    _style_axis(ax_delta, "Δ R² = AL − Baseline", "Δ R² across shared evals")
+    ax_delta.axhline(0, color="black", linewidth=0.8, alpha=0.7)
+    if has_delta and _delta_vals:
+        # Drop iter 1 from ylim calculation (commonly very noisy on small data).
+        _delta_for_ylim = [v for v in _delta_vals if v == v]
+        if len(_delta_for_ylim) > 5:
+            # Use 95th percentile of |Δ| to set the ylim, so iter-1 spikes
+            # don't blow up the axis range
+            absvals = sorted(abs(v) for v in _delta_for_ylim)
+            absmax = absvals[int(len(absvals) * 0.95)]
+        else:
+            absmax = max(abs(v) for v in _delta_for_ylim)
+        ax_delta.set_yscale("symlog", linthresh=1.0)
+        ax_delta.set_ylim(-absmax * 1.2 - 0.5, absmax * 1.2 + 0.5)
+        ax_delta.legend(fontsize=8, loc="best", framealpha=0.85, ncol=2)
+    else:
+        ax_delta.text(0.5, 0.5, "no shared-eval data",
+                      transform=ax_delta.transAxes,
+                      ha="center", va="center", color="gray")
 
-    ax2.legend(fontsize=9)
+    # Suptitle (model/strategy/warm/seed if provided)
+    suptitle = "Active-learning iteration metrics"
+    if title_suffix:
+        suptitle += f"\n{title_suffix}"
+    fig.suptitle(suptitle, fontsize=13)
 
-    # Plot 3: Dataset Sizes
-    ax3.plot(iterations, al_metrics['n_train'], 'b-', linewidth=2, marker='o', markersize=6, label='AL Train')
-    ax3.plot(iterations, al_metrics['n_val'], 'b--', linewidth=2, marker='s', markersize=6, label='AL Validation')
-    ax3.plot(iterations, baseline_metrics['n_train'], 'r-', linewidth=2, marker='o', markersize=6, label='Baseline Train')
-    ax3.plot(iterations, baseline_metrics['n_val'], 'r--', linewidth=2, marker='s', markersize=6, label='Baseline Validation')
-    ax3.set_xlabel('Iteration', fontsize=12)
-    ax3.set_ylabel('Number of Samples', fontsize=12)
-    ax3.set_title('Dataset Size vs Iteration', fontsize=14)
-    ax3.grid(True, which='major', alpha=0.3)
-    ax3.grid(True, which='minor', alpha=0.15)
-    ax3.set_xticks(label_ticks)
-    ax3.set_xticks(iterations, minor=True)
-    ax3.legend(fontsize=9)
+    plt.tight_layout(rect=(0, 0, 1, 0.97))
 
-    plt.tight_layout()
+    plot_path = Path(output_dir) / filename
+    plt.savefig(plot_path, dpi=130, bbox_inches="tight")
+    plt.close(fig)
 
-    plot_path = Path(output_dir) / "iteration_metrics.png"
-    plt.savefig(plot_path, dpi=150, bbox_inches='tight')
-    plt.close()
-
-    logger.info(f"Saved iteration metrics plot to {plot_path}")
+    if logger:
+        logger.info(f"Saved iteration metrics plot to {plot_path}")
+    return plot_path
 
 
 # ===== Advanced Diagnostics (GP-specific) =====

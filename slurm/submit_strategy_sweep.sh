@@ -29,6 +29,9 @@
 #   BUNDLE_SEEDS (1 = submit one multi-node bundle per (model, strategy, warm)
 #                 cell that runs all requested seeds in parallel via srun;
 #                 default 0 = one sbatch per (cell, seed))
+#   EXTRA_AL_ARGS Extra CLI flags appended verbatim to every per-seed run (e.g.
+#                 architecture overrides like --d-model 64 --num-layers 3
+#                 --dim-feedforward 400). Empty by default.
 #
 # Usage:
 #   bash slurm/submit_strategy_sweep.sh                     # full sweep
@@ -67,6 +70,7 @@ SUBMIT_SLEEP_SEC="${SUBMIT_SLEEP_SEC:-0}"
 DRY_RUN="${DRY_RUN:-0}"
 TABPFN_ALLOW_ENTROPY="${TABPFN_ALLOW_ENTROPY:-0}"
 BUNDLE_SEEDS="${BUNDLE_SEEDS:-0}"
+EXTRA_AL_ARGS="${EXTRA_AL_ARGS:-}"
 # OUTPUT_TAG (optional) is appended to the model column in the manifest and
 # to the output dir, e.g. OUTPUT_TAG=oracle -> "transformer_oracle". The
 # AL_MODEL dispatch key (which selects the per-model submit script) is
@@ -80,6 +84,7 @@ echo "[sweep] warm_modes=${WARM_MODES}"
 echo "[sweep] seeds=${SEEDS}"
 echo "[sweep] dry_run=${DRY_RUN}"
 [[ -n "${OUTPUT_TAG}" ]] && echo "[sweep] output_tag=${OUTPUT_TAG}"
+[[ -n "${EXTRA_AL_ARGS}" ]] && echo "[sweep] extra_al_args=${EXTRA_AL_ARGS}"
 echo "[sweep] manifest=${MANIFEST}"
 
 N_SUBMITTED=0
@@ -161,6 +166,7 @@ for model in ${MODELS//,/ }; do
                 export AL_SEEDS="${SEEDS}"
                 export AL_OUTPUT_BASE="${al_output_base}"
                 export AL_SWEEP_ID="${SWEEP_ID}"
+                export AL_EXTRA_ARGS_BASE="${EXTRA_AL_ARGS}"
 
                 if [[ "${DRY_RUN}" == "1" ]]; then
                     JOB_ID="DRY"
@@ -208,6 +214,9 @@ for model in ${MODELS//,/ }; do
                 extra_args="--seed ${seed} --selection-strategy ${strategy}"
                 if [[ -n "${WARM_FLAG}" ]]; then
                     extra_args="${extra_args} ${WARM_FLAG}"
+                fi
+                if [[ -n "${EXTRA_AL_ARGS}" ]]; then
+                    extra_args="${extra_args} ${EXTRA_AL_ARGS}"
                 fi
 
                 # Choose GRES (tabpfn runs on 1 GPU; others on 2)
