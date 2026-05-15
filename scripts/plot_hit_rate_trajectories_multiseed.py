@@ -59,6 +59,7 @@ MODEL_COLORS = {
     "deep_gp":     "tab:green",
     "tabpfn":      "tab:red",
     "dnn":         "tab:purple",
+    "dnn_match_trafo": "tab:pink",
     # Oracle (theoretical-limit) variants — same colour as parent so curves
     # group visually; linestyle disambiguates (see ORACLE_LS below).
     "transformer_oracle": "tab:blue",
@@ -620,6 +621,16 @@ def _load_iter_model(model_type: str, role: str, iter_dir: Path,
         # Architecture must match active_learning_dnn.py defaults.
         model = PMSSMFeedForward(n_params=19, d_model=64, num_layers=4,
                                  dim_feedforward=256, dropout=dropout)
+        model.load_state_dict(torch.load(ckpt_path, map_location=device))
+        return model.to(device)
+
+    if model_type == "dnn_match_trafo":
+        if not ckpt_path.exists():
+            return None
+        from pmssm.models import PMSSMFeedForward  # noqa: PLC0415
+        # Hyperparams chosen to roughly match transformer's parameter budget.
+        model = PMSSMFeedForward(n_params=19, d_model=64, num_layers=3,
+                                 dim_feedforward=400, dropout=dropout)
         model.load_state_dict(torch.load(ckpt_path, map_location=device))
         return model.to(device)
 

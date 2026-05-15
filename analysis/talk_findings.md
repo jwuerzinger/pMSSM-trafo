@@ -38,6 +38,8 @@ tabpfn      vs dnn          : z = -16.75 **
 
 Only `deep_gp vs exact_gp` is within seed variance; everything else is highly significant.
 
+Multi-seed SEM bands (`iteration_metrics_seeds_*.png`) visually confirm the pairwise gaps: no two architectures with z > 1.96 in the table have visually overlapping bands. The conclusion is robust at the level the eye reads.
+
 ### 3. Wall-clock cost favours deep_gp on both axes
 
 | arch | per-iter (s) | total (h) | oracle calls/h |
@@ -106,6 +108,41 @@ The mechanism:
 
 This is the cleanest example I've seen in the data of **AL biasing the training distribution into a regime that activates a latent model-misspecification problem**. It does not happen with deep_gp because deep kernel learning lets effective lengthscales vary across input space — the misspecification is absent. For the talk, this is a perfect specific-mechanism slide: "AL is not metric-neutral; it interacts with the surrogate's expressivity in ways that depend on the underlying physics."
 
+The multi-seed plot (`iteration_metrics_seeds_exact_gp_entropy_batch_warm.png`) confirms the mechanism is reproducible: the SEM band on AL val R² fans out from σ ≈ 0.05 (iter 1–14) to σ ≈ 0.30 (iter 15+) — different seeds collapse to different magnitudes, but every seed collapses. The mechanism is reproducible; only the severity is stochastic.
+
+### 5c. Why deep_gp also takes an MCMC hit — same mechanism, weaker dose
+
+The cross-architecture Δ R² MCMC ranking sorts cleanly along a misspecification axis:
+
+```
+transformer    +47.0   clean win
+tabpfn         +14.0   win
+dnn             −8.6   mild loss
+deep_gp        −22.8   moderate loss
+exact_gp      −159.2   catastrophic loss
+```
+
+The GP family suffers; the NN family does not. This is the §5b lengthscale-collapse mechanism on a sliding scale:
+
+- **exact_gp**: single global RBF, fully stationary → boundary-concentrated AL data collapses lengthscales → MCMC R² explodes negative.
+- **deep_gp**: deep kernel learning partially decouples lengthscales across the feature space → the collapse is muted (~7× smaller magnitude than exact_gp) but still present.
+- **transformer**: attention is genuinely input-dependent, no kernel/lengthscale structure to collapse → clean MCMC win.
+- **dnn**: dropout-regularised MLP, no kernel structure → mild loss from overfitting boundary-concentrated data, bounded.
+
+So deep_gp's MCMC Δ is a *residual, weakened* version of exact_gp's pathology. The deep kernel transformation softens the misspecification but does not fully escape it.
+
+**How wins-hit-rate and loses-MCMC-R² coexist**: GP posterior variance and posterior mean are decoupled. Variance reflects "where the model hasn't seen data yet" and stays clean as long as unexplored regions exist — so deep_gp's *acquisition signal* remains informative. The mean, by contrast, depends on the fitted lengthscales, which collapse. So:
+
+- deep_gp's variance correctly says "this region near 0.12 is unfamiliar" → AL picks good points → high hit_rate ✓
+- deep_gp's mean predictions on the MCMC eval set degrade over iterations as the kernel memorises boundary-concentrated training data → MCMC Δ negative ✗
+
+This is a known feature of variance-based AL with GPs: acquisition can succeed under a moderately misspecified mean.
+
+**Talk framing**: this strengthens the cross-metric ranking-instability headline. *Selecting* good points and *predicting* them accurately are different skills, served by different parts of the surrogate. The GP family wins selection (robust variance signal); the NN family wins prediction (no lengthscale-collapse pathology). The "best" architecture depends on the downstream goal:
+
+- Goal = "find as many allowed BSM points as possible per oracle call" → **deep_gp**.
+- Goal = "build an accurate emulator of Ωh² across the full parameter space" → **transformer**.
+
 ### 5. Best-pick margins are mostly secure
 
 Top-2 cell margins per architecture (in SEM units):
@@ -120,6 +157,53 @@ Top-2 cell margins per architecture (in SEM units):
 
 All picks defensible. TabPFN and exact_gp are within 1.3 SEM of their runners-up — worth mentioning ("top pick is the one we'd report, but second-place is essentially equivalent").
 
+### 6. Parameter-budget ablation: matching the transformer's parameter budget does not close the gap
+
+To test whether the transformer's advantage comes from architecture (attention) or just from a larger parameter count, we ran an ablation: a DNN (`PMSSMFeedForward`) with hyperparameters scaled toward the transformer's parameter budget. Full 5-seed sweep across all 6 (strategy, warm) cells.
+
+**Configs and parameter counts:**
+
+| arch | d_model | num_layers | dim_feedforward | total params |
+|---|---:|---:|---:|---:|
+| transformer | 128 | 3 | 512 | **803,330** |
+| dnn_match_trafo | 64 | 3 | 400 | **808,129** |
+| dnn (stock) | 64 | 4 | 256 | **509,313** |
+
+The `dnn_match_trafo` config is parameter-budget-matched to the transformer (~808k vs 803k, <1% gap). Stock dnn has ~63% of that count.
+
+**Caveat — parameter *geometry* still differs**: the stock and matched DNN flatten the 19 features into a 1216-dim vector and project once into `dim_feedforward`. The transformer keeps a separate `d_model=128` embedding per feature and reuses attention/FFN blocks across all 19 positions. So this ablation matches *parameter count* but not *parameter layout* — it bounds the contribution of "more parameters" from above without fully isolating "attention" as the active ingredient.
+
+| arch | best pick | hit_rate@10% | acc_static_random | acc_mcmc | per-iter (s) |
+|---|---|---|---|---|---:|
+| transformer | entropy_batch/cold | **0.0646 ± 0.0013** | **0.9824 ± 0.0010** | **0.6140 ± 0.0059** | 533 |
+| dnn | entropy_batch/cold | 0.0527 ± 0.0007 | 0.9760 ± 0.0006 | 0.6060 ± 0.0013 | 400 |
+| **dnn_match_trafo** | top_k/cold | **0.0498 ± 0.0024** | **0.9729 ± 0.0021** | **0.5840 ± 0.0106** | **134** |
+
+**Headline: the matched-budget DNN does not narrow the architecture gap on any metric.** It is statistically tied with the stock DNN on hit_rate (`z = +1.16`, NS) and slightly *worse* on classification accuracy. On the matched cell (entropy_batch/cold), the stock DNN beats `dnn_match_trafo` significantly (0.0527 vs 0.0476, `z ≈ 4.5`). Pairwise vs transformer: `z = +5.38 **` on hit_rate — still highly significant, and the prediction accuracy gap is unchanged.
+
+**Talk framing**: the transformer's advantage is **architectural**, not parameter-budget. Scaling a DNN to the transformer's parameter count does not transfer the gain. Attention is doing real work — likely by exploiting the soft per-input-feature weighting that the DNN's fixed dense layers cannot replicate (consistent with the multi-modal physics in §5b: different pMSSM regions have different dominant features, which attention can re-weight per-input but a stationary MLP cannot).
+
+**Surprising side-finding**: `dnn_match_trafo` is **4× faster per iteration** than stock dnn (134 s vs 400 s), despite having a comparable parameter count. Reason is likely training-side (fewer layers → shorter sequential backward pass + more parallelism in the wider dim_feedforward). This makes `dnn_match_trafo` the **fastest non-oracle architecture in the sweep** at 13 433 oracle calls/h — though the per-iter speed doesn't compensate for the lower selection skill at fixed iteration budget.
+
+**One useful win**: `dnn_match_trafo` is AL>Baseline on **all three** shared-eval metrics (`+0.170 static_random`, `+13.4 MCMC`, `+0.814 cross-val`), where stock dnn loses on MCMC (`−8.6`). So the matched-budget DNN cleans up the AL>Baseline picture for the DNN family — at the cost of slightly lower hit_rate. Likely the wider network has enough capacity to fit MCMC-region structure without over-specialising to AL boundary points.
+
+---
+
+## Methodology notes (defensive footnotes)
+
+### Normalisation is identical across architectures
+
+Transformer and DNN dispatch into the same `train_model_worker` in `pmssm/training.py`; only the model class differs (`PMSSMTransformerTabular` vs `PMSSMFeedForward`, selected via the `arch` kwarg). Both pipelines apply:
+
+- **Inputs**: z-score using `compute_stats(X, Y, idx_train)` → `(mean_X, std_X)`, applied through `PMSSMDataset`.
+- **Target**: `y_transform='log'` → `log(Y / 0.12)` then z-scored with `(mean_Y, std_Y)` computed on the transformed target.
+
+GP pipelines (exact / deep) use the same input z-scoring and the same log-target via `PMSSMDataset`. **Any cross-architecture performance gap is not a normalisation artefact** — the preprocessing is shared code.
+
+### Why we lean on shared-eval metrics, not own-val
+
+Normalisation stats are recomputed on `idx_train` each AL iteration. Because AL and Baseline have different training sets, they see slightly different `(mean_Y, std_Y)`. This means **own-val losses are not directly comparable across AL vs Baseline** — even at fixed architecture. It's the structural reason we report shared-eval (`static_random`, `MCMC`, cross-val) for AL-vs-Baseline comparisons, and only use own-val to track within-arm convergence.
+
 ---
 
 ## Recommended talk slides
@@ -130,6 +214,7 @@ All picks defensible. TabPFN and exact_gp are within 1.3 SEM of their runners-up
 4. **Wall-clock cost** (Table 4): deep_gp wins both speed and hit_rate.
 5. **Oracle / theoretical limit**: candidate-pool ceiling discussion. (Supporting slide, not headline.)
 6. **Open questions / outliers**: exact_gp's AL < Baseline on shared eval; TabPFN's instability.
+7. **Parameter-budget ablation** (§6): matched-budget DNN does not close the transformer gap → "attention is doing real work, not just absorbing parameters". Punchy 1-slide defensive add-on.
 
 ## What to NOT lead with
 
@@ -141,6 +226,7 @@ All picks defensible. TabPFN and exact_gp are within 1.3 SEM of their runners-up
 ## Open items to address before talk
 
 - [x] A, B, D, E, G analyses complete (this file)
+- [x] **Parameter-budget ablation** — `dnn_match_trafo` 5-seed × 6 cells sweep complete (§6); strengthens the architecture-comparison thesis.
 - [ ] **F (proximity-reward ablation, OPTIONAL)** — would strengthen the oracle slide but talk has enough story without it. Recommend skipping unless 1-2h of focused time becomes available.
-- [ ] **C (deep_gp_oracle iter 40)** — resume jobs 8611792–8611796 queued; oracle_comparison plots will need re-rendering once they complete (~6h wall-clock + queue wait).
+- [x] **C (deep_gp_oracle iter 40)** — resume jobs TIMEOUT'd at iter 30 (only +1 iter in 12h; per-iter cost ~10× transformer_oracle). Oracle-comparison plot now annotated as asymmetric by necessity; the per-iter cost asymmetry is itself a finding (deep_gp_oracle is uniquely expensive because entropy_batch posterior-variance scales with training-set size).
 - [ ] **H (reproducibility snapshot)** — git commit + README pointer.

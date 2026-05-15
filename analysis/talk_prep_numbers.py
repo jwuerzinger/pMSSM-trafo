@@ -155,7 +155,7 @@ def _mean_sem(xs):
 
 # ── architecture-level pick: best (strategy, warm) per metric ────────────────
 
-REGULAR_MODELS = ("transformer", "deep_gp", "exact_gp", "tabpfn", "dnn")
+REGULAR_MODELS = ("transformer", "deep_gp", "exact_gp", "tabpfn", "dnn", "dnn_match_trafo")
 PRIMARY_METRIC = "hit_rate"  # used to pick the canonical "best" cell
 
 
