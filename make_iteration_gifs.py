@@ -59,6 +59,21 @@ def collect_frame_pairs(iter_dirs, pattern_al, pattern_base):
     return pairs
 
 
+def collect_single_frames(iter_dirs, pattern):
+    """Collect a single plot file per iteration directly under plots/.
+
+    Returns list of (path, iter_num) for iterations where the file exists.
+    """
+    frames = []
+    for d in iter_dirs:
+        plot_dir = d / "plots"
+        matches = sorted(plot_dir.glob(pattern)) if plot_dir.exists() else []
+        if matches:
+            iter_num = int(re.search(r"(\d+)", d.name).group(1))
+            frames.append((matches[0], iter_num))
+    return frames
+
+
 def make_side_by_side(img_left, img_right, label_left, label_right, iteration):
     """Combine two images side-by-side with labels and iteration number."""
     # Resize to same height
@@ -103,6 +118,42 @@ def make_side_by_side(img_left, img_right, label_left, label_right, iteration):
     canvas.paste(img_right, (img_left.width + gap, header_h))
 
     return canvas
+
+
+def make_single_gif(frames, output_path, fps=2):
+    """Create an animated GIF from a list of (path, iter_num) frames."""
+    if len(frames) < 2:
+        print(f"  Skipping {output_path.name}: only {len(frames)} frame(s)")
+        return
+
+    imgs = []
+    for path, iter_num in frames:
+        img = Image.open(path).convert("RGBA")
+        font_size = max(22, img.height // 40)
+        font = get_font(font_size)
+        header_h = font_size + 16
+        canvas = Image.new("RGBA", (img.width, header_h + img.height), (255, 255, 255, 255))
+        draw = ImageDraw.Draw(canvas)
+        iter_label = f"Iteration {iter_num}"
+        bbox = draw.textbbox((0, 0), iter_label, font=font)
+        tw = bbox[2] - bbox[0]
+        draw.text((canvas.width - tw - 12, 6), iter_label, fill=(100, 100, 100, 255), font=font)
+        canvas.paste(img, (0, header_h))
+        imgs.append(canvas)
+
+    target_size = imgs[0].size
+    imgs = [img.resize(target_size, Image.LANCZOS) if img.size != target_size else img
+            for img in imgs]
+
+    duration_ms = int(1000 / fps)
+    imgs[0].save(
+        output_path,
+        save_all=True,
+        append_images=imgs[1:],
+        duration=duration_ms,
+        loop=0,
+    )
+    print(f"  Saved {output_path} ({len(imgs)} frames, {fps} fps)")
 
 
 def make_gif(frame_pairs, output_path, fps=2):
@@ -179,6 +230,16 @@ def generate_gifs(run_dir, fps=2, logger=None):
         if pairs:
             gif_path = gif_dir / f"{name}.gif"
             make_gif(pairs, gif_path, fps=fps)
+
+    # Single-image plots that live directly under iteration_NNN/plots/.
+    single_plot_types = [
+        ("scatterplots_iter_*.png", "scatterplots"),
+    ]
+    for pattern, name in single_plot_types:
+        frames = collect_single_frames(iter_dirs, pattern)
+        if frames:
+            gif_path = gif_dir / f"{name}.gif"
+            make_single_gif(frames, gif_path, fps=fps)
 
     log(f"GIFs saved to {gif_dir}")
 

@@ -22,6 +22,7 @@ Each metric produces three figures (one panel per tolerance):
 from __future__ import annotations
 
 import json
+import re
 import sys
 import time
 from pathlib import Path
@@ -36,6 +37,7 @@ except (AttributeError, ValueError):
 
 import click
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
 import numpy as np
 import pandas as pd
 import torch
@@ -52,6 +54,14 @@ from pmssm import TARGET_CONFIG  # noqa: E402
 _N_SAMPLES_DEFAULT = 2000
 _N_SELECT_DEFAULT = 500
 
+# Run3ModelGen validity rate, set by main() after parsing the AL log.
+# When set, _desired_per_iter divides the initial-set count by this rate so the
+# initial chunk is charged in attempt-units (consistent with the per-iter
+# `n_select` increments which are already in attempt-units). Without this the
+# initial 2000 valid samples are a free pass that biases iter-1 hits/desired
+# upward by ~1/p_valid and only fully dilutes by iter ~40.
+_DESIRED_P_VALID: float | None = None
+
 
 MODEL_COLORS = {
     "transformer": "tab:blue",
@@ -67,6 +77,17 @@ MODEL_COLORS = {
 }
 # Linestyle override for *_oracle model rows (dotted, regardless of warm/cold).
 ORACLE_LS = ":"
+# Friendly display labels used in legends.
+MODEL_DISPLAY = {
+    "transformer":         "Transformer",
+    "exact_gp":            "Exact GP",
+    "deep_gp":             "Deep GP",
+    "tabpfn":              "TabPFN",
+    "dnn":                 "DNN",
+    "dnn_match_trafo":     "DNN (matched)",
+    "transformer_oracle":  "Transformer (oracle)",
+    "deep_gp_oracle":      "Deep GP (oracle)",
+}
 STRATEGY_COLORS = {
     "top_k":          "tab:blue",
     "top_k_tol_only": "tab:orange",
@@ -147,7 +168,7 @@ def _desired_per_iter(run) -> list[int]:
             n_select_per_iter.append(len(pts) or _N_SELECT_DEFAULT)
 
     desired = []
-    cum = n_samples
+    cum = n_samples / _DESIRED_P_VALID if _DESIRED_P_VALID is not None else float(n_samples)
     for i in range(len(al_n_train)):
         desired.append(cum)
         n_sel = n_select_per_iter[i] if i < len(n_select_per_iter) else _N_SELECT_DEFAULT
@@ -160,6 +181,16 @@ def _hits_per_desired_trajectory(run, true_value, tol):
 
     Numerator at iter (i+1) = #{ Y[:al_n_train[i]] within `tol` of `true_value` }
     Denominator at iter (i+1) = `_desired_per_iter(run)[i]`
+
+    Iter-1 override: at i=0 the surrogate has not yet selected anything, so the
+    initial training set is i.i.d. with the random-scan baseline. To keep the
+    comparison apples-to-apples there, the iter-1 denominator drops the val
+    chunk and uses `al_n_train[0] / p_valid` only — the same train-only
+    denominator the random-baseline trajectory uses (which is then scaled by
+    p_valid in main()). Without this override, AL iter-1 sits ~20% below the
+    random line purely because val samples cost budget without contributing to
+    the numerator. From iter 2 on the full denominator (initial in
+    attempt-units + cumulative attempt-unit selections) is used as before.
 
     Returns (iters, rates) with the same `iters` axis as `compute_hit_rate_trajectory`.
     """
@@ -174,7 +205,10 @@ def _hits_per_desired_trajectory(run, true_value, tol):
             Y_slice = Y_slice.numpy()
         Y_slice = np.asarray(Y_slice).ravel()
         hits = int(np.sum(np.abs(Y_slice - true_value) / true_value < tol))
-        denom = desired[i] if i < len(desired) else (n_clip or 1)
+        if i == 0 and _DESIRED_P_VALID is not None:
+            denom = n_clip / _DESIRED_P_VALID
+        else:
+            denom = desired[i] if i < len(desired) else (n_clip or 1)
         if denom <= 0:
             continue
         iters.append(i + 1)
@@ -378,19 +412,49 @@ def _baseline_hits_per_desired_trajectory(run_dir: str, seed: int, Y_full: np.nd
                                           true_value: float, tol: float):
     """Random-scan reference for the hits/desired panel.
 
-    Uses the *baseline's own sample count* as denominator (= the hit rate of
-    the random-baseline samples). The AL hits/desired metric exists to
-    penalise physics-generation failures, but the baseline draws from a
-    pre-filtered pool with no failures — the honest baseline is therefore the
-    pool prevalence (i.e. the same value as the hit_rate panel), not
-    `hits / desired`, which artificially shrinks because `baseline_n_train` is
-    coupled to AL's smaller `al_n_train`, not the full physics budget.
+    Returns the *per-valid-sample* hit rate, identical to the hit_rate
+    baseline. Callers that want a per-attempt rate (apples-to-apples with the
+    AL hits/desired numerator, which is divided by the surrogate's requested
+    count and therefore implicitly pays for Run3ModelGen failures) must
+    multiply the returned rates by `p_valid` (Run3ModelGen validity rate from
+    the AL log: `Filter ...: N_valid / N_total samples kept`). The main()
+    plotting loop does this scaling for the hits_per_desired metric.
     """
     return _baseline_hit_rate_trajectory(run_dir, seed, Y_full, true_value, tol)
 
 
 def _pool_prevalence(Y_full: np.ndarray, true_value: float, tols) -> dict:
     return {float(t): float(np.mean(np.abs(Y_full - true_value) / true_value < t)) for t in tols}
+
+
+_VALIDITY_RE = re.compile(
+    r"Filter \(MO_Omega > 0 & < 1 & SP_m_h != -1\):\s*(\d+)\s*/\s*(\d+)\s*samples kept"
+)
+
+
+def _extract_validity_rate(run_dirs) -> tuple[float | None, int | None, int | None, str | None]:
+    """Parse Run3ModelGen validity rate from the first AL log we can find.
+
+    The filter line is logged once per run at startup. All runs that share a
+    raw-pool data dir share the same validity rate, so we return the first
+    match. Returns (p_valid, n_valid, n_total, source_log) or all-None.
+    """
+    for run_dir in run_dirs:
+        log_path = Path(run_dir) / "active_learning.log"
+        if not log_path.exists():
+            continue
+        try:
+            with open(log_path) as fh:
+                for line in fh:
+                    m = _VALIDITY_RE.search(line)
+                    if m:
+                        n_valid, n_total = int(m.group(1)), int(m.group(2))
+                        if n_total <= 0:
+                            continue
+                        return n_valid / n_total, n_valid, n_total, str(log_path)
+        except Exception:
+            continue
+    return None, None, None, None
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -1039,13 +1103,6 @@ def plot_classification_accuracy_oracle_comparison(traj_acc: dict, picks,
     if not regular_picks:
         return written
 
-    pick_summary = "; ".join(
-        f"{m}: {s}-{w}" for (m, s, w, _tu, _sc) in regular_picks
-    )
-    oracle_summary = "; ".join(
-        f"{m}_oracle: {s}-{w}" for (m, s, w) in oracle_picks
-    )
-
     for ds in ACC_DATASETS:
         fig, ax = plt.subplots(1, 1, figsize=(7.5, 5))
         ax.set_title(f"Classification accuracy (oracle comparison) — {dataset_titles[ds]}")
@@ -1055,9 +1112,11 @@ def plot_classification_accuracy_oracle_comparison(traj_acc: dict, picks,
 
         any_data = False
         y_lo, y_hi = float("inf"), float("-inf")
-        n_seeds_per_label: dict[str, int] = {}
+        model_order: list[str] = []
+        # Keys are (base_model, is_oracle, role) → seed count for that curve.
+        n_seeds_per_curve: dict[tuple[str, bool, str], int] = {}
 
-        def _draw_pair(m_for_color: str, m_label: str, cfg: tuple, is_oracle: bool):
+        def _draw_pair(m_for_color: str, cfg: tuple, is_oracle: bool):
             nonlocal any_data, y_lo, y_hi
             if cfg not in traj_acc:
                 return
@@ -1066,9 +1125,11 @@ def plot_classification_accuracy_oracle_comparison(traj_acc: dict, picks,
                 if ds not in role_traj:
                     continue
                 iters_ax, Y = role_traj[ds]
-                role_label = "AL" if role == "al" else "baseline"
-                label = f"{m_label} ({role_label})"
-                n_seeds_per_label[label] = int((~np.isnan(Y)).any(axis=1).sum())
+                if m_for_color not in model_order:
+                    model_order.append(m_for_color)
+                n_seeds_per_curve[(m_for_color, is_oracle, role)] = int(
+                    (~np.isnan(Y)).any(axis=1).sum()
+                )
                 # Regular: solid (AL) / dashed (baseline). Oracle: dotted (AL)
                 # / dash-dot (baseline). Same colour per base model.
                 if not is_oracle:
@@ -1084,7 +1145,7 @@ def plot_classification_accuracy_oracle_comparison(traj_acc: dict, picks,
                     color=MODEL_COLORS.get(m_for_color, "gray"),
                     linestyle=ls,
                     marker=mk,
-                    label=label,
+                    label=None,
                     uncertainty=uncertainty,
                     linewidth=lw,
                     fill_alpha=0.14 if role == "al" else 0.06,
@@ -1097,10 +1158,9 @@ def plot_classification_accuracy_oracle_comparison(traj_acc: dict, picks,
                     y_hi = max(y_hi, float(np.nanmax(mean)))
 
         for (m, s, w, _tu, _sc) in regular_picks:
-            _draw_pair(m, m, (m, s, w), is_oracle=False)
+            _draw_pair(m, (m, s, w), is_oracle=False)
         for (base, s, w) in oracle_picks:
-            _draw_pair(base, f"{base}_oracle", (f"{base}_oracle", s, w),
-                       is_oracle=True)
+            _draw_pair(base, (f"{base}_oracle", s, w), is_oracle=True)
 
         if not any_data:
             plt.close(fig)
@@ -1112,20 +1172,38 @@ def plot_classification_accuracy_oracle_comparison(traj_acc: dict, picks,
         else:
             ax.set_ylim(0, 1.02)
 
-        seen = {}
-        for h, l in zip(*ax.get_legend_handles_labels()):
-            l_with_n = f"{l}, n={n_seeds_per_label.get(l, 0)}"
-            seen.setdefault(l_with_n, h)
-        if seen:
-            ax.legend(seen.values(), seen.keys(),
-                      loc="best", fontsize=9, frameon=True, ncol=1,
-                      framealpha=0.9)
+        # Split legend: "Model" (colour swatches) + "Curve" (linestyle key).
+        model_handles = []
+        for m in model_order:
+            counts = [n for (mm, _o, _r), n in n_seeds_per_curve.items() if mm == m]
+            n_str = f"n={max(counts)}" if counts else "n=0"
+            model_handles.append(Line2D(
+                [0], [0], color=MODEL_COLORS.get(m, "gray"), lw=2.4,
+                label=f"{MODEL_DISPLAY.get(m, m)} ({n_str})",
+            ))
+        role_handles = [
+            Line2D([0], [0], color="black", linestyle="-",  marker="o",
+                   markersize=5, label="AL"),
+            Line2D([0], [0], color="black", linestyle="--", marker="s",
+                   markersize=5, label="baseline"),
+            Line2D([0], [0], color="black", linestyle=":",  marker="*",
+                   markersize=6, label="AL (oracle)"),
+            Line2D([0], [0], color="black", linestyle=(0, (3, 1, 1, 1)),
+                   marker="x", markersize=5, label="baseline (oracle)"),
+        ]
+        leg_model = ax.legend(
+            handles=model_handles, loc="lower right",
+            fontsize=9, frameon=True, framealpha=0.9,
+            title="Model", title_fontsize=10,
+        )
+        ax.add_artist(leg_model)
+        ax.legend(
+            handles=role_handles, loc="upper left",
+            fontsize=9, frameon=True, framealpha=0.9,
+            title="Curve", title_fontsize=10,
+        )
 
-        if pick_summary or oracle_summary:
-            footnote = f"Regular picks: {pick_summary}    |    {oracle_summary}"
-            fig.text(0.5, 0.01, footnote, ha="center", fontsize=8, color="gray")
-
-        fig.tight_layout(rect=(0, 0.05, 1, 1))
+        fig.tight_layout()
         out_path = out_dir / f"accuracy_oracle_comparison_{ds}.png"
         out_dir.mkdir(parents=True, exist_ok=True)
         fig.savefig(out_path, dpi=150, bbox_inches="tight")
@@ -1151,10 +1229,7 @@ def plot_classification_accuracy_best_per_model(traj_acc: dict, picks, out_dir: 
         "train": "Per-model own train set",
         "val": "Per-model own validation set",
     }
-    pick_summary = ", ".join(
-        f"{m}: {s}-{w}" for (m, s, w, _tu, _sc) in picks
-        if (m, s, w) in traj_acc
-    )
+    data_efficiency_all: dict[str, dict[str, dict]] = {}
     for ds in ACC_DATASETS:
         fig, ax = plt.subplots(1, 1, figsize=(7.5, 5))
         ax.set_title(f"Classification accuracy — {dataset_titles[ds]}")
@@ -1164,7 +1239,11 @@ def plot_classification_accuracy_best_per_model(traj_acc: dict, picks, out_dir: 
 
         any_data = False
         y_lo, y_hi = float("inf"), float("-inf")
-        n_seeds_per_label: dict[str, int] = {}
+        model_order: list[str] = []
+        n_seeds_per_role: dict[tuple[str, str], int] = {}
+        # Per-model curve cache for the data-efficiency calculation.
+        # m -> role -> (iters_ax, mean_per_iter)
+        per_model_means: dict[str, dict[str, tuple[np.ndarray, np.ndarray]]] = {}
         for (m, s, w, _tu, _sc) in picks:
             cfg = (m, s, w)
             if cfg not in traj_acc:
@@ -1174,15 +1253,15 @@ def plot_classification_accuracy_best_per_model(traj_acc: dict, picks, out_dir: 
                 if ds not in role_traj:
                     continue
                 iters_ax, Y = role_traj[ds]
-                role_label = "AL" if role == "al" else "baseline"
-                label = f"{m} ({role_label})"
-                n_seeds_per_label[label] = int((~np.isnan(Y)).any(axis=1).sum())
+                if m not in model_order:
+                    model_order.append(m)
+                n_seeds_per_role[(m, role)] = int((~np.isnan(Y)).any(axis=1).sum())
                 _draw_curve(
                     ax, iters_ax, Y,
                     color=MODEL_COLORS.get(m, "gray"),
                     linestyle="-" if role == "al" else "--",
                     marker="o" if role == "al" else "s",
-                    label=label,
+                    label=None,
                     uncertainty=uncertainty,
                     linewidth=1.6 if role == "al" else 1.3,
                     fill_alpha=0.14 if role == "al" else 0.06,
@@ -1190,6 +1269,7 @@ def plot_classification_accuracy_best_per_model(traj_acc: dict, picks, out_dir: 
                 )
                 any_data = True
                 mean = np.nanmean(Y, axis=0)
+                per_model_means.setdefault(m, {})[role] = (np.asarray(iters_ax), mean)
                 if np.isfinite(mean).any():
                     y_lo = min(y_lo, float(np.nanmin(mean)))
                     y_hi = max(y_hi, float(np.nanmax(mean)))
@@ -1198,6 +1278,60 @@ def plot_classification_accuracy_best_per_model(traj_acc: dict, picks, out_dir: 
             plt.close(fig)
             continue
 
+        # ── Data-efficiency: iter at which AL mean accuracy first matches the
+        # baseline's final-iteration mean accuracy. Gain = baseline_iter /
+        # al_match_iter. Printed and saved to JSON.
+        ds_eff: dict[str, dict] = {}
+        eff_lines: list[str] = []
+        for m in model_order:
+            roles = per_model_means.get(m, {})
+            if "al" not in roles or "baseline" not in roles:
+                continue
+            bl_iters, bl_mean = roles["baseline"]
+            al_iters, al_mean = roles["al"]
+            finite_bl = np.where(np.isfinite(bl_mean))[0]
+            if not len(finite_bl):
+                continue
+            last_idx = finite_bl[-1]
+            target_iter = int(bl_iters[last_idx])
+            target_acc = float(bl_mean[last_idx])
+            valid_al = np.isfinite(al_mean) & (al_mean >= target_acc)
+            if valid_al.any():
+                match_idx = int(np.argmax(valid_al))  # first True
+                match_iter = int(al_iters[match_idx])
+                gain = target_iter / max(match_iter, 1)
+                eff_lines.append(
+                    f"  {MODEL_DISPLAY.get(m, m):<22s} target acc {target_acc:.4f} @ "
+                    f"baseline iter {target_iter:>3d} → AL reaches it at iter "
+                    f"{match_iter:>3d}  (gain {gain:5.2f}x)"
+                )
+                ds_eff[m] = {
+                    "target_iter": target_iter,
+                    "target_acc": target_acc,
+                    "al_match_iter": match_iter,
+                    "gain": gain,
+                }
+            else:
+                al_best = float(np.nanmax(al_mean)) if np.isfinite(al_mean).any() else float("nan")
+                eff_lines.append(
+                    f"  {MODEL_DISPLAY.get(m, m):<22s} target acc {target_acc:.4f} @ "
+                    f"baseline iter {target_iter:>3d} → AL never matched "
+                    f"(AL best mean {al_best:.4f})"
+                )
+                ds_eff[m] = {
+                    "target_iter": target_iter,
+                    "target_acc": target_acc,
+                    "al_match_iter": None,
+                    "gain": None,
+                    "al_best_mean": al_best,
+                }
+        if eff_lines:
+            click.echo(f"[data-efficiency] {dataset_titles[ds]}")
+            for line in eff_lines:
+                click.echo(line)
+        if ds_eff:
+            data_efficiency_all[ds] = ds_eff
+
         # Auto-zoom y-axis with 10% padding (or at least 0.02), clipped to [0, 1].
         if np.isfinite(y_lo) and np.isfinite(y_hi):
             pad = max(0.02, (y_hi - y_lo) * 0.15)
@@ -1205,29 +1339,50 @@ def plot_classification_accuracy_best_per_model(traj_acc: dict, picks, out_dir: 
         else:
             ax.set_ylim(0, 1.02)
 
-        seen = {}
-        for h, l in zip(*ax.get_legend_handles_labels()):
-            # Append seed count to deduplicated label so it stays compact.
-            l_with_n = f"{l}, n={n_seeds_per_label.get(l, 0)}"
-            seen.setdefault(l_with_n, h)
-        if seen:
-            ax.legend(seen.values(), seen.keys(),
-                      loc="best", fontsize=9, frameon=True, ncol=1,
-                      framealpha=0.9)
+        # Split legend into two compact blocks placed outside the axes:
+        #   "Model"  — one colour swatch per model, with seed count(s).
+        #   "Curve"  — linestyle key (solid=AL, dashed=baseline).
+        model_handles = []
+        for m in model_order:
+            n_al = n_seeds_per_role.get((m, "al"), 0)
+            n_bl = n_seeds_per_role.get((m, "baseline"), 0)
+            if n_al and n_bl and n_al != n_bl:
+                n_str = f"n={n_al}/{n_bl}"
+            else:
+                n_str = f"n={n_al or n_bl}"
+            model_handles.append(Line2D(
+                [0], [0], color=MODEL_COLORS.get(m, "gray"), lw=2.4,
+                label=f"{MODEL_DISPLAY.get(m, m)} ({n_str})",
+            ))
+        role_handles = [
+            Line2D([0], [0], color="black", linestyle="-",  marker="o",
+                   markersize=5, label="AL"),
+            Line2D([0], [0], color="black", linestyle="--", marker="s",
+                   markersize=5, label="baseline"),
+        ]
+        leg_model = ax.legend(
+            handles=model_handles, loc="lower right",
+            fontsize=9, frameon=True, framealpha=0.9,
+            title="Model", title_fontsize=10,
+        )
+        ax.add_artist(leg_model)
+        ax.legend(
+            handles=role_handles, loc="upper left",
+            fontsize=9, frameon=True, framealpha=0.9,
+            title="Curve", title_fontsize=10,
+        )
 
-        if pick_summary:
-            fig.text(0.5, 0.01,
-                     f"Best-per-model picks: {pick_summary}",
-                     ha="center", fontsize=8, color="gray")
-
-        # Reserve space at the bottom for the picks footnote, then save with
-        # bbox_inches='tight' so nothing gets clipped.
-        fig.tight_layout(rect=(0, 0.05, 1, 1))
+        fig.tight_layout()
         out_path = out_dir / f"accuracy_best_per_model_{ds}.png"
         out_dir.mkdir(parents=True, exist_ok=True)
         fig.savefig(out_path, dpi=150, bbox_inches="tight")
         plt.close(fig)
         written.append(out_path)
+    if data_efficiency_all:
+        eff_path = out_dir / "data_efficiency_best_per_model.json"
+        with open(eff_path, "w") as fh:
+            json.dump(data_efficiency_all, fh, indent=2, default=str)
+        click.echo(f"[data-efficiency] saved {eff_path}")
     return written
 
 
@@ -1348,9 +1503,11 @@ def _draw_curve(ax, iters_ax, Y, *, color, linestyle, marker, label,
 
 def _setup_axes(axes, tols, true_val, title_word, ylabel):
     for ax, tol in zip(axes, tols):
-        ax.set_title(f"{title_word} (|Ω − {true_val}| / {true_val} < {int(tol*100)}%)")
-        ax.set_xlabel("Iteration")
-        ax.set_ylabel(ylabel)
+        ax.set_title(f"{title_word} (|Ω − {true_val}| / {true_val} < {int(tol*100)}%)",
+                     fontsize=15)
+        ax.set_xlabel("Iteration", fontsize=14)
+        ax.set_ylabel(ylabel, fontsize=14)
+        ax.tick_params(axis="both", which="major", labelsize=12)
         ax.grid(alpha=0.3)
 
 
@@ -1366,19 +1523,56 @@ def _finalize(fig, axes, out_path):
 
     fig.tight_layout()
     if seen:
-        fig.subplots_adjust(right=0.80, wspace=0.28)
+        fig.subplots_adjust(right=0.74, wspace=0.28)
         fig.legend(seen.values(), seen.keys(),
-                   loc="center left", bbox_to_anchor=(0.81, 0.5),
-                   fontsize=8, frameon=True, borderaxespad=0.)
+                   loc="center left", bbox_to_anchor=(0.755, 0.5),
+                   fontsize=14, frameon=True, borderaxespad=0.)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
 
 
+def _finalize_split_legend(fig, axes, *, color_handles, style_handles,
+                           out_path, color_title="Model", style_title="Curve",
+                           color_loc="lower right", style_loc="upper left",
+                           panel_index=-1, fontsize=11, title_fontsize=12):
+    """Mirror of `_finalize` that places the legends *inside* the plot area
+    using the accuracy-plot style: a Model/colour-key legend in the lower-right
+    corner of one panel, and a Curve/linestyle-key legend in the upper-left.
+
+    `color_handles`/`style_handles` are pre-built Line2D lists. Pass an empty
+    list to skip the corresponding legend.
+    """
+    for ax in axes:
+        _, ymax = ax.get_ylim()
+        ax.set_ylim(0, max(ymax, 0.05) * 1.05)
+
+    target_ax = axes[panel_index]
+    fig.tight_layout()
+    if color_handles:
+        leg_c = target_ax.legend(
+            handles=color_handles, loc=color_loc,
+            fontsize=fontsize, frameon=True, framealpha=0.9,
+            title=color_title, title_fontsize=title_fontsize,
+        )
+        target_ax.add_artist(leg_c)
+    if style_handles:
+        target_ax.legend(
+            handles=style_handles, loc=style_loc,
+            fontsize=fontsize, frameon=True, framealpha=0.9,
+            title=style_title, title_fontsize=title_fontsize,
+        )
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
 def plot_models_per_strategy(traj, tols, uncertainty, true_val, out_dir,
                              file_prefix, title_word, ylabel,
-                             baseline_traj=None, prevalence=None):
+                             baseline_traj=None, prevalence=None,
+                             prevalence_label="random scan (full pool)"):
     """One figure per strategy; lines are (model, warm) combos for that strategy.
 
     Each figure has 1 row × len(tols) cols (default 3 panels: 10/20/50%).
@@ -1404,7 +1598,7 @@ def plot_models_per_strategy(traj, tols, uncertainty, true_val, out_dir,
         axes = list(axes.flat)
         _setup_axes(axes, tols, true_val, title_word, ylabel)
         fig.suptitle(f"Strategy: {strat} — model & warm-start comparison",
-                     fontsize=12)
+                     fontsize=16)
 
         for ax, tol in zip(axes, tols):
             for (m, s, w) in sorted(cfgs):
@@ -1416,37 +1610,52 @@ def plot_models_per_strategy(traj, tols, uncertainty, true_val, out_dir,
                     color=MODEL_COLORS.get(m, "gray"),
                     linestyle=WARM_LS.get(w, "-"),
                     marker=WARM_MARKER.get(w, "x"),
-                    label=f"{m}-{w} (n={len(Y)})",
+                    label=None,
                     uncertainty=uncertainty,
                 )
-                if baseline_traj is not None and (m, s, w) in baseline_traj \
-                        and tol in baseline_traj[(m, s, w)]:
-                    b_iters, b_Y = baseline_traj[(m, s, w)][tol]
-                    _draw_curve(
-                        ax, b_iters, b_Y,
-                        color=MODEL_COLORS.get(m, "gray"),
-                        linestyle="--",
-                        marker=None,
-                        label=f"{m}-{w}: random baseline",
-                        uncertainty=uncertainty,
-                        linewidth=1.4, fill_alpha=0.0, alpha=0.75,
-                    )
             if prevalence is not None and tol in prevalence:
                 ax.axhline(prevalence[tol], color="black", linestyle=":", linewidth=1.4,
-                           label="random scan (full pool)")
+                           label=None)
                 ax.text(0.99, prevalence[tol], f" {prevalence[tol]:.4f}",
                         transform=ax.get_yaxis_transform(), ha="right", va="bottom",
-                        fontsize=8, color="black")
+                        fontsize=10, color="black")
+
+        # Model legend (colour key) + Warm-start legend (linestyle/marker key).
+        models_present = list(dict.fromkeys(m for (m, _, _) in sorted(cfgs)))
+        color_handles = [
+            Line2D([0], [0], color=MODEL_COLORS.get(m, "gray"), lw=2.4,
+                   label=MODEL_DISPLAY.get(m, m))
+            for m in models_present
+        ]
+        warms_present = list(dict.fromkeys(w for (_, _, w) in sorted(cfgs)))
+        style_handles = [
+            Line2D([0], [0], color="black",
+                   linestyle=WARM_LS.get(w, "-"),
+                   marker=WARM_MARKER.get(w, "x"),
+                   markersize=5, label=w)
+            for w in warms_present
+        ]
+        if prevalence:
+            style_handles.append(Line2D(
+                [0], [0], color="black", linestyle=":", lw=1.4,
+                label=prevalence_label,
+            ))
 
         out_path = out_dir / f"{file_prefix}_strategy_{strat}.png"
-        _finalize(fig, axes, out_path)
+        _finalize_split_legend(
+            fig, axes,
+            color_handles=color_handles, style_handles=style_handles,
+            out_path=out_path,
+            color_title="Model", style_title="Warm-start",
+        )
         written.append(out_path)
     return written
 
 
 def plot_strategies_per_model(traj, tols, uncertainty, true_val, out_dir,
                               file_prefix, title_word, ylabel,
-                              baseline_traj=None, prevalence=None):
+                              baseline_traj=None, prevalence=None,
+                              prevalence_label="random scan (full pool)"):
     """One figure per model; lines are (strategy, warm) combos for that model.
 
     Mirror of `plot_models_per_strategy` with model and strategy roles swapped.
@@ -1473,7 +1682,7 @@ def plot_strategies_per_model(traj, tols, uncertainty, true_val, out_dir,
         axes = list(axes.flat)
         _setup_axes(axes, tols, true_val, title_word, ylabel)
         fig.suptitle(f"Model: {model} — strategy & warm-start comparison",
-                     fontsize=12)
+                     fontsize=16)
 
         for ax, tol in zip(axes, tols):
             for (m, s, w) in sorted(cfgs):
@@ -1485,30 +1694,43 @@ def plot_strategies_per_model(traj, tols, uncertainty, true_val, out_dir,
                     color=STRATEGY_COLORS.get(s, "gray"),
                     linestyle=WARM_LS.get(w, "-"),
                     marker=WARM_MARKER.get(w, "x"),
-                    label=f"{s}-{w} (n={len(Y)})",
+                    label=None,
                     uncertainty=uncertainty,
                 )
-                if baseline_traj is not None and (m, s, w) in baseline_traj \
-                        and tol in baseline_traj[(m, s, w)]:
-                    b_iters, b_Y = baseline_traj[(m, s, w)][tol]
-                    _draw_curve(
-                        ax, b_iters, b_Y,
-                        color=STRATEGY_COLORS.get(s, "gray"),
-                        linestyle="--",
-                        marker=None,
-                        label=f"{s}-{w}: random baseline",
-                        uncertainty=uncertainty,
-                        linewidth=1.4, fill_alpha=0.0, alpha=0.75,
-                    )
             if prevalence is not None and tol in prevalence:
                 ax.axhline(prevalence[tol], color="black", linestyle=":", linewidth=1.4,
-                           label="random scan (full pool)")
+                           label=None)
                 ax.text(0.99, prevalence[tol], f" {prevalence[tol]:.4f}",
                         transform=ax.get_yaxis_transform(), ha="right", va="bottom",
-                        fontsize=8, color="black")
+                        fontsize=10, color="black")
+
+        # Strategy legend (colour key) + Warm-start legend (linestyle key).
+        strategies_present = list(dict.fromkeys(s for (_, s, _) in sorted(cfgs)))
+        color_handles = [
+            Line2D([0], [0], color=STRATEGY_COLORS.get(s, "gray"), lw=2.4, label=s)
+            for s in strategies_present
+        ]
+        warms_present = list(dict.fromkeys(w for (_, _, w) in sorted(cfgs)))
+        style_handles = [
+            Line2D([0], [0], color="black",
+                   linestyle=WARM_LS.get(w, "-"),
+                   marker=WARM_MARKER.get(w, "x"),
+                   markersize=5, label=w)
+            for w in warms_present
+        ]
+        if prevalence:
+            style_handles.append(Line2D(
+                [0], [0], color="black", linestyle=":", lw=1.4,
+                label=prevalence_label,
+            ))
 
         out_path = out_dir / f"{file_prefix}_model_{model}.png"
-        _finalize(fig, axes, out_path)
+        _finalize_split_legend(
+            fig, axes,
+            color_handles=color_handles, style_handles=style_handles,
+            out_path=out_path,
+            color_title="Strategy", style_title="Warm-start",
+        )
         written.append(out_path)
     return written
 
@@ -1563,7 +1785,8 @@ def _best_setting_for_model(traj, model, tols, iter_completeness=0.9):
 
 def plot_oracle_comparison(traj, tols, uncertainty, true_val, out_dir,
                            file_prefix, title_word, ylabel,
-                           prevalence=None):
+                           prevalence=None,
+                           prevalence_label="random scan (full pool)"):
     """Render the theoretical-limit oracle comparison plot.
 
     Shows, side by side on the same axes per tolerance panel:
@@ -1587,9 +1810,13 @@ def plot_oracle_comparison(traj, tols, uncertainty, true_val, out_dir,
     fig.suptitle(
         "Oracle comparison: regular AL vs theoretical limit "
         "(candidates restricted to MCMC pool)",
-        fontsize=12,
+        fontsize=16,
     )
 
+    # Capture per-base-model picks + seed counts so we can build the legend
+    # once after drawing on every panel.
+    base_picks: dict[str, tuple[str, str, int]] = {}  # base_model -> (s, w, n)
+    oracle_picks: dict[str, tuple[str, str, int]] = {}  # base_model -> (s, w, n)
     for ax, tol in zip(axes, tols):
         for oracle_model in oracle_models:
             base_model = oracle_model[: -len("_oracle")]
@@ -1601,47 +1828,85 @@ def plot_oracle_comparison(traj, tols, uncertainty, true_val, out_dir,
                 cfg = (base_model, s, w)
                 if cfg in traj and tol in traj[cfg]:
                     iters_ax, Y = traj[cfg][tol]
+                    base_picks.setdefault(base_model, (s, w, len(Y)))
                     _draw_curve(
                         ax, iters_ax, Y,
                         color=MODEL_COLORS.get(base_model, "gray"),
                         linestyle="-",
                         marker="o",
-                        label=f"{base_model}: {s}-{w} (n={len(Y)})",
+                        label=None,
                         uncertainty=uncertainty,
                     )
 
             # 2) Oracle counterpart — there should be exactly one (s, w) cell
-            oracle_cfgs = [(m, s, w) for (m, s, w) in traj if m == oracle_model]
-            for (m, s, w) in sorted(oracle_cfgs):
+            ocfgs = [(m, s, w) for (m, s, w) in traj if m == oracle_model]
+            for (m, s, w) in sorted(ocfgs):
                 if tol not in traj[(m, s, w)]:
                     continue
                 iters_ax, Y = traj[(m, s, w)][tol]
+                oracle_picks.setdefault(base_model, (s, w, len(Y)))
                 _draw_curve(
                     ax, iters_ax, Y,
                     color=MODEL_COLORS.get(base_model, "gray"),
                     linestyle=":",
                     marker="*",
-                    label=f"{oracle_model}: {s}-{w} (n={len(Y)})",
+                    label=None,
                     uncertainty=uncertainty,
                     linewidth=2.0,
                 )
 
         if prevalence is not None and tol in prevalence:
             ax.axhline(prevalence[tol], color="black", linestyle=":", linewidth=1.4,
-                       label="random scan (full pool)")
+                       label=None)
             ax.text(0.99, prevalence[tol], f" {prevalence[tol]:.4f}",
                     transform=ax.get_yaxis_transform(), ha="right", va="bottom",
                     fontsize=8, color="black")
 
+    # Model legend (colour key) + Curve legend (regular vs oracle).
+    color_handles = []
+    for base_model in sorted({m[: -len("_oracle")] for m in oracle_models}):
+        # Show "(n=A; oracle n=B)" if both available; degrade otherwise.
+        parts = []
+        if base_model in base_picks:
+            s, w, n = base_picks[base_model]
+            parts.append(f"{s}-{w} (n={n})")
+        if base_model in oracle_picks:
+            s, w, n = oracle_picks[base_model]
+            parts.append(f"oracle n={n}")
+        label = MODEL_DISPLAY.get(base_model, base_model)
+        if parts:
+            label += " — " + "; ".join(parts)
+        color_handles.append(Line2D(
+            [0], [0], color=MODEL_COLORS.get(base_model, "gray"), lw=2.4,
+            label=label,
+        ))
+    style_handles = [
+        Line2D([0], [0], color="black", linestyle="-",  marker="o",
+               markersize=5, label="regular"),
+        Line2D([0], [0], color="black", linestyle=":",  marker="*",
+               markersize=6, lw=2.0, label="oracle"),
+    ]
+    if prevalence:
+        style_handles.append(Line2D(
+            [0], [0], color="black", linestyle=":", lw=1.4,
+            label=prevalence_label,
+        ))
+
     out_path = out_dir / f"{file_prefix}_oracle_comparison.png"
-    _finalize(fig, axes, out_path)
+    _finalize_split_legend(
+        fig, axes,
+        color_handles=color_handles, style_handles=style_handles,
+        out_path=out_path,
+        color_title="Model", style_title="Curve",
+    )
     written.append(out_path)
     return written
 
 
 def plot_best_per_model(traj, tols, uncertainty, true_val, out_dir,
                         file_prefix, title_word, ylabel,
-                        baseline_traj=None, prevalence=None):
+                        baseline_traj=None, prevalence=None,
+                        prevalence_label="random scan (full pool)"):
     """Single figure: one curve per model using its best (strategy, warm) setting.
 
     If `baseline_traj` is provided (same {(model, strat, warm): {tol: ...}}
@@ -1673,7 +1938,7 @@ def plot_best_per_model(traj, tols, uncertainty, true_val, out_dir,
     fig.suptitle(
         f"Best setting per model "
         f"(picked by mean final {title_word.lower()} @ tol={int(strict_tol*100)}%)",
-        fontsize=12,
+        fontsize=16,
     )
 
     for ax, tol in zip(axes, tols):
@@ -1687,30 +1952,40 @@ def plot_best_per_model(traj, tols, uncertainty, true_val, out_dir,
                 color=MODEL_COLORS.get(m, "gray"),
                 linestyle="-",
                 marker="o",
-                label=f"{m}: {s}-{w} (n={len(Y)})",
+                label=None,
                 uncertainty=uncertainty,
             )
-            if baseline_traj is not None and cfg in baseline_traj \
-                    and tol in baseline_traj[cfg]:
-                b_iters, b_Y = baseline_traj[cfg][tol]
-                _draw_curve(
-                    ax, b_iters, b_Y,
-                    color=MODEL_COLORS.get(m, "gray"),
-                    linestyle="--",
-                    marker=None,
-                    label=f"{m}: random baseline",
-                    uncertainty=uncertainty,
-                    linewidth=1.8, fill_alpha=0.0, alpha=0.85,
-                )
         if prevalence is not None and tol in prevalence:
             ax.axhline(prevalence[tol], color="black", linestyle=":", linewidth=1.4,
-                       label="random scan (full pool)")
-            ax.text(0.99, prevalence[tol], f" {prevalence[tol]:.4f}",
-                    transform=ax.get_yaxis_transform(), ha="right", va="bottom",
-                    fontsize=8, color="black")
+                       label=None)
+
+    # Build split legends: Model (colour key) + Curve (linestyle key).
+    color_handles = []
+    for (m, s, w, _tu, _sc) in picks:
+        n = 0
+        for tol in tols:
+            if tol in traj[(m, s, w)]:
+                n = len(traj[(m, s, w)][tol][1])
+                break
+        color_handles.append(Line2D(
+            [0], [0], color=MODEL_COLORS.get(m, "gray"), lw=2.4, marker="o",
+            markersize=5,
+            label=f"{MODEL_DISPLAY.get(m, m)} (n={n})",
+        ))
+    style_handles = []
+    if prevalence:
+        style_handles.append(Line2D(
+            [0], [0], color="black", linestyle=":", lw=1.4,
+            label=prevalence_label,
+        ))
 
     out_path = out_dir / f"{file_prefix}_best_per_model.png"
-    _finalize(fig, axes, out_path)
+    _finalize_split_legend(
+        fig, axes,
+        color_handles=color_handles, style_handles=style_handles,
+        out_path=out_path,
+        color_title=None, style_title="Reference",
+    )
 
     click.echo(f"[best-per-model picks: {title_word}]")
     for (m, s, w, tu, sc) in picks:
@@ -1796,50 +2071,102 @@ def main(manifest, sweep_id, output_dir, uncertainty, target, tolerances,
 
     Y_full = None
     prevalence = None
+    prevalence_per_attempt = None
+    p_valid = None
+    p_valid_info = None
     if baseline_data_dir:
         try:
             Y_full = _load_y_full(baseline_data_dir, target, out_dir)
             prevalence = _pool_prevalence(Y_full, true_val, tols)
+            p_valid, n_valid, n_total, log_src = _extract_validity_rate(
+                df["expected_run_dir"].dropna().tolist()
+            )
+            if p_valid is not None:
+                prevalence_per_attempt = {t: v * p_valid for t, v in prevalence.items()}
+                p_valid_info = {"p_valid": p_valid, "n_valid": n_valid,
+                                "n_total": n_total, "source_log": log_src}
+                global _DESIRED_P_VALID
+                _DESIRED_P_VALID = p_valid
+                click.echo(f"[baseline] Run3ModelGen validity (from {log_src}): "
+                           f"p_valid={p_valid:.4f} ({n_valid}/{n_total})")
+                click.echo(f"[baseline] AL hits/desired initial-chunk denominator "
+                           f"now divided by p_valid (was in valid units, now in "
+                           f"attempt units to match acquisition increments).")
+            else:
+                click.echo("[warn] could not parse Run3ModelGen validity rate from any "
+                           "active_learning.log; hits_per_desired baseline will fall "
+                           "back to raw pool prevalence (over-optimistic for random scan).",
+                           err=True)
             with open(out_dir / "random_baseline_prevalence.json", "w") as fh:
                 json.dump({"data_dir": baseline_data_dir, "target": target,
                            "true_value": true_val, "n_pool": int(len(Y_full)),
-                           "prevalence": {f"{t:.4f}": v for t, v in prevalence.items()}},
+                           "prevalence": {f"{t:.4f}": v for t, v in prevalence.items()},
+                           "p_valid": p_valid_info,
+                           "prevalence_per_attempt": (
+                               {f"{t:.4f}": v for t, v in prevalence_per_attempt.items()}
+                               if prevalence_per_attempt else None
+                           )},
                           fh, indent=2)
             click.echo(f"[baseline] pool prevalence (n={len(Y_full)}): "
                        + ", ".join(f"tol={int(t*100)}%→{r:.4f}" for t, r in prevalence.items()))
+            if prevalence_per_attempt is not None:
+                click.echo(f"[baseline] per-attempt rate (× p_valid={p_valid:.4f}): "
+                           + ", ".join(f"tol={int(t*100)}%→{r:.4f}"
+                                       for t, r in prevalence_per_attempt.items()))
         except Exception as exc:
             click.echo(f"[warn] could not load random baseline pool from {baseline_data_dir}: {exc}",
                        err=True)
             Y_full = None
             prevalence = None
+            prevalence_per_attempt = None
 
     written = []
     picks_by_metric: dict[str, list] = {}
+    traj_by_metric: dict[str, dict] = {}
     for metric_name, (traj_fn, file_prefix, ylabel, title_word, traj_fn_baseline) in METRICS.items():
         traj = _collect_trajectories(df, true_val, tols, min_seeds, traj_fn)
         if not traj:
             click.echo(f"[warn] metric '{metric_name}': no groups passed min-seeds filter; skipping",
                        err=True)
             continue
+        traj_by_metric[metric_name] = traj
         baseline_traj = None
         if Y_full is not None:
             baseline_traj = _collect_baseline_trajectories(
                 df, true_val, tols, min_seeds, traj_fn_baseline, Y_full,
             )
+        # For the per-attempt metric, the baseline trajectory comes back in
+        # per-valid-sample units (same as the hit_rate panel). Multiply by
+        # p_valid to match the AL hits/desired denominator, which already
+        # pays for Run3ModelGen failures (~55% of attempts at p_valid=0.445).
+        if (metric_name == "hits_per_desired" and baseline_traj is not None
+                and p_valid is not None):
+            for cfg, per_tol in baseline_traj.items():
+                for tol, (it_ax, Y) in per_tol.items():
+                    per_tol[tol] = (it_ax, Y * p_valid)
+        if metric_name == "hits_per_desired" and prevalence_per_attempt is not None:
+            prev_for_metric = prevalence_per_attempt
+            prev_label = "random scan (per-attempt)"
+        else:
+            prev_for_metric = prevalence
+            prev_label = "random scan (full pool)"
         written += plot_models_per_strategy(
             traj, tols, uncertainty, true_val, out_dir,
             file_prefix=file_prefix, title_word=title_word, ylabel=ylabel,
-            baseline_traj=baseline_traj, prevalence=prevalence,
+            baseline_traj=baseline_traj, prevalence=prev_for_metric,
+            prevalence_label=prev_label,
         )
         written += plot_strategies_per_model(
             traj, tols, uncertainty, true_val, out_dir,
             file_prefix=file_prefix, title_word=title_word, ylabel=ylabel,
-            baseline_traj=baseline_traj, prevalence=prevalence,
+            baseline_traj=baseline_traj, prevalence=prev_for_metric,
+            prevalence_label=prev_label,
         )
         paths, picks = plot_best_per_model(
             traj, tols, uncertainty, true_val, out_dir,
             file_prefix=file_prefix, title_word=title_word, ylabel=ylabel,
-            baseline_traj=baseline_traj, prevalence=prevalence,
+            baseline_traj=baseline_traj, prevalence=prev_for_metric,
+            prevalence_label=prev_label,
         )
         written += paths
         picks_by_metric[metric_name] = picks
@@ -1848,8 +2175,52 @@ def main(manifest, sweep_id, output_dir, uncertainty, target, tolerances,
         written += plot_oracle_comparison(
             traj, tols, uncertainty, true_val, out_dir,
             file_prefix=file_prefix, title_word=title_word, ylabel=ylabel,
-            prevalence=prevalence,
+            prevalence=prev_for_metric,
+            prevalence_label=prev_label,
         )
+
+    # ── Scan-efficiency improvement: AL → random ratio (per-attempt basis) ───
+    if (prevalence_per_attempt is not None
+            and "hits_per_desired" in picks_by_metric
+            and "hits_per_desired" in traj_by_metric):
+        traj_hd = traj_by_metric["hits_per_desired"]
+        rows = []
+        for (m, s, w, tu, _sc) in picks_by_metric["hits_per_desired"]:
+            cfg = (m, s, w)
+            for tol in tols:
+                if cfg not in traj_hd or tol not in traj_hd[cfg]:
+                    continue
+                _, Y = traj_hd[cfg][tol]
+                al_final = float(np.nanmean(Y, axis=0)[-1])
+                rand_rate = prevalence_per_attempt.get(tol)
+                if rand_rate is None or rand_rate <= 0:
+                    continue
+                rows.append({
+                    "model": m, "strategy": s, "warm_start": w,
+                    "tol": tol,
+                    "al_rate_per_attempt": al_final,
+                    "random_rate_per_attempt": rand_rate,
+                    "speedup": al_final / rand_rate,
+                    "n_seeds": int(Y.shape[0]),
+                })
+        with open(out_dir / "scan_efficiency_improvement.json", "w") as fh:
+            json.dump({
+                "p_valid": p_valid_info,
+                "prevalence_per_attempt": {f"{t:.4f}": v
+                                           for t, v in prevalence_per_attempt.items()},
+                "rows": rows,
+            }, fh, indent=2)
+        click.echo("[scan-efficiency] AL (per-attempt) ÷ random (per-attempt) "
+                   "at final iteration, best setting per model:")
+        for tol in tols:
+            tol_rows = [r for r in rows if r["tol"] == tol]
+            if not tol_rows:
+                continue
+            tol_rows.sort(key=lambda r: -r["speedup"])
+            line = "  tol={:>3d}%  ".format(int(tol * 100))
+            line += " | ".join(f"{r['model']:>12s} {r['speedup']:5.1f}×"
+                               for r in tol_rows)
+            click.echo(line)
 
     # ── Classification-accuracy trajectories (opt-in, expensive on first run) ─
     if compute_accuracy:
