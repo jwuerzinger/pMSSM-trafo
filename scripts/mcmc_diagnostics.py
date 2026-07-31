@@ -92,7 +92,8 @@ MODEL_DISPLAY = {
 # Loading
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _load_chains(data_dir: Path, params: list[str], skip_file_cut: bool):
+def _load_chains(data_dir: Path, params: list[str], skip_file_cut: bool,
+                 require_neutralino_lsp: bool = False):
     import uproot
     files = sorted(glob.glob(str(data_dir / "*.root")))
     if not files:
@@ -110,6 +111,9 @@ def _load_chains(data_dir: Path, params: list[str], skip_file_cut: bool):
                 continue
         sp_mh = t["SP_m_h"].array(library="np")
         mask = (y > 0) & (y < 1.0) & (sp_mh != -1)
+        if require_neutralino_lsp and "SP_LSP_type" in t.keys():
+            lsp = t["SP_LSP_type"].array(library="np")
+            mask = mask & ((lsp == 1) | (lsp == 2) | (lsp == 3))
         if not mask.any():
             continue
         cols = [t[p].array(library="np")[mask] for p in params]
@@ -236,11 +240,17 @@ def compute_diagnostics(
     params: list[str] = DEFAULT_FREE_PARAMS,
     skip_file_cut: bool = False,
     print_table: bool = True,
+    require_neutralino_lsp: bool = False,
 ) -> dict:
-    """Returns {param: {"rhat": float, "ess_bulk": float}} plus context."""
+    """Returns {param: {"rhat": float, "ess_bulk": float}} plus context.
+
+    When ``require_neutralino_lsp`` is True, additionally requires
+    ``SP_LSP_type in {1, 2, 3}`` on every ROOT sample.
+    """
     data_dir = Path(data_dir)
     chains, n_files, dropped_ns, dropped_bm = _load_chains(
-        data_dir, params, skip_file_cut
+        data_dir, params, skip_file_cut,
+        require_neutralino_lsp=require_neutralino_lsp,
     )
     if not chains:
         raise RuntimeError(f"no usable chains under {data_dir}")
@@ -297,10 +307,15 @@ def compute_diagnostics(
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _load_al_chains(run_dirs: list[str | Path],
-                    param_indices: list[int]) -> list[np.ndarray]:
+                    param_indices: list[int],
+                    require_neutralino_lsp: bool = False) -> list[np.ndarray]:
     """Load `state.pt` from each run dir; return one (N, len(param_indices))
     array per dir. The cumulative training X is in physical units, in the
     order points were added (initial random block, then per-iteration picks).
+
+    If ``require_neutralino_lsp`` is True, rows whose F (LSP composition)
+    tensor contains any NaN are dropped — these correspond to non-neutralino
+    LSPs (e.g. sneutrinos) as coerced by ``pmssm.data._load_lsp_fracs``.
     """
     try:
         import torch
@@ -316,6 +331,15 @@ def _load_al_chains(run_dirs: list[str | Path],
         if X is None:
             continue
         X = X.detach().cpu().numpy() if hasattr(X, "detach") else np.asarray(X)
+        if require_neutralino_lsp:
+            F = state.get("F")
+            if F is None:
+                # Older runs without F — leave as-is (no veto possible).
+                pass
+            else:
+                F = F.detach().cpu().numpy() if hasattr(F, "detach") else np.asarray(F)
+                keep = np.isfinite(F).all(axis=1)
+                X = X[keep]
         chains.append(X[:, list(param_indices)])
     return chains
 
@@ -346,13 +370,18 @@ def compare_and_plot(mcmc_dir: str | Path,
                      manifest_csv: str | Path,
                      out_dir: str | Path,
                      params: list[str] = DEFAULT_FREE_PARAMS,
-                     print_summary: bool = True) -> Path:
+                     print_summary: bool = True,
+                     require_neutralino_lsp: bool = False) -> Path:
     """Compute diagnostics for MCMC + each AL pick, render comparison plot.
 
-    Returns the path to the written PNG.
+    Returns the path to the written PNG. When ``require_neutralino_lsp`` is
+    True, both the MCMC reference set and every AL training set have their
+    non-neutralino rows (sneutrinos etc.) vetoed before chain statistics
+    are computed.
     """
     # 1) MCMC diagnostics
-    mcmc = compute_diagnostics(mcmc_dir, params=params, print_table=False)
+    mcmc = compute_diagnostics(mcmc_dir, params=params, print_table=False,
+                               require_neutralino_lsp=require_neutralino_lsp)
 
     # 2) AL diagnostics per model
     idx_map = {p: PARAM_ORDER.index(p) for p in params}
@@ -365,7 +394,8 @@ def compare_and_plot(mcmc_dir: str | Path,
         if not run_dirs:
             al_meta[model] = {"n_seeds": 0, "picked": picks_spec[model]}
             continue
-        chains = _load_al_chains(run_dirs, param_indices)
+        chains = _load_al_chains(run_dirs, param_indices,
+                                 require_neutralino_lsp=require_neutralino_lsp)
         res = diagnostics_from_chains(chains, params, min_len_threshold=100)
         if res is None:
             al_meta[model] = {"n_seeds": len(chains), "picked": picks_spec[model],
@@ -529,6 +559,10 @@ def _parse_args():
     p.add_argument("--output-dir", type=Path, default=None,
                    help="Where to write the comparison PNG/JSON. Required with "
                         "--al-manifest.")
+    p.add_argument("--require-neutralino-lsp", action="store_true",
+                   help="Post-hoc veto of non-neutralino LSPs: require "
+                        "SP_LSP_type in {1,2,3} on MCMC samples and drop "
+                        "state.pt rows whose F is NaN on the AL side.")
     return p.parse_args()
 
 
@@ -540,6 +574,7 @@ def main():
         params=params,
         skip_file_cut=args.no_file_cut,
         print_table=True,
+        require_neutralino_lsp=args.require_neutralino_lsp,
     )
     if args.al_manifest is not None:
         if args.output_dir is None:
@@ -552,6 +587,7 @@ def main():
             manifest_csv=args.al_manifest,
             out_dir=args.output_dir,
             params=params,
+            require_neutralino_lsp=args.require_neutralino_lsp,
         )
 
 

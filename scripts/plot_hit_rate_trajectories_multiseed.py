@@ -47,7 +47,19 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from analyse_runs import compute_hit_rate_trajectory, load_run  # noqa: E402
+from analyse_runs import compute_hit_rate_trajectory, load_run, filter_run_neutralino_lsp  # noqa: E402
+
+
+# Module-level toggle for the post-hoc neutralino-LSP veto. Set from main().
+_REQUIRE_NEUTRALINO_LSP = False
+
+
+def _load_run(run_dir):
+    """load_run + optional sneutrino veto controlled by main()'s CLI flag."""
+    run = load_run(run_dir)
+    if _REQUIRE_NEUTRALINO_LSP:
+        run = filter_run_neutralino_lsp(run)
+    return run
 from pmssm import TARGET_CONFIG  # noqa: E402
 
 # Defaults if a run's state.pt is missing the relevant fields.
@@ -994,7 +1006,7 @@ def _collect_accuracy_trajectories(df, picks, target: str, X_full: np.ndarray,
                        f"seed {seed_idx}/{n_seeds_total} (seed={seed}) -> {run_dir}")
             sys.stdout.flush()
             try:
-                run = load_run(run_dir)
+                run = _load_run(run_dir)
             except Exception as exc:
                 click.echo(f"[warn] accuracy: skip {run_dir}: {exc}", err=True)
                 sys.stdout.flush()
@@ -1421,7 +1433,7 @@ def _collect_trajectories(df, true_val, tols, min_seeds, traj_fn):
         runs = []
         for run_dir in sub["expected_run_dir"].dropna():
             try:
-                runs.append((run_dir, load_run(run_dir)))
+                runs.append((run_dir, _load_run(run_dir)))
             except Exception as exc:
                 click.echo(f"[warn] skip {run_dir}: {exc}", err=True)
         per_tol = {}
@@ -2051,11 +2063,24 @@ def plot_best_per_model(traj, tols, uncertainty, true_val, out_dir,
 @click.option("--accuracy-dropout", default=0.1, type=float, show_default=True,
               help="Dropout rate used to instantiate the transformer for "
                    "checkpoint loading (matches the AL training default).")
+@click.option("--require-neutralino-lsp/--no-require-neutralino-lsp",
+              default=False, show_default=True,
+              help="Post-hoc veto of non-neutralino LSPs (sneutrinos): drop "
+                   "training rows whose SP_LSP_type is not in {1,2,3} (i.e. "
+                   "F rows with NaN) before computing any metric. n_train_per_iter "
+                   "is rebased so per-iteration slicing stays consistent.")
 def main(manifest, sweep_id, output_dir, uncertainty, target, tolerances,
          min_seeds, include_status, baseline_data_dir,
          compute_accuracy, mcmc_data_dir, accuracy_device,
          accuracy_cache_refresh,
-         accuracy_static_eval_size, accuracy_dropout):
+         accuracy_static_eval_size, accuracy_dropout,
+         require_neutralino_lsp):
+    global _REQUIRE_NEUTRALINO_LSP
+    _REQUIRE_NEUTRALINO_LSP = bool(require_neutralino_lsp)
+    if _REQUIRE_NEUTRALINO_LSP:
+        click.echo("[filter] neutralino-LSP veto ENABLED — sneutrino rows will "
+                   "be dropped from every run's training set before metric "
+                   "computation.", err=True)
     df = pd.read_csv(manifest)
     if sweep_id:
         df = df[df["sweep_id"].astype(str) == str(sweep_id)]

@@ -40,6 +40,7 @@ from analyse_runs import (  # noqa: E402
     SCATTER_PAIRS,
     load_mcmc_numpy,
     load_run,
+    filter_run_neutralino_lsp,
     normalise_free_params,
 )
 from pmssm.config import PARAM_ORDER, TARGET_CONFIG  # noqa: E402
@@ -318,8 +319,14 @@ def _plot_one_cell(
                    "straddle Ω=0.12 or contain values below 0.04). Output "
                    "filenames get a `_rawmcmc` suffix so the standard "
                    "filtered plots are not overwritten.")
+@click.option("--require-neutralino-lsp/--no-require-neutralino-lsp",
+              default=False, show_default=True,
+              help="Post-hoc veto of non-neutralino LSPs (sneutrinos): drop "
+                   "training rows whose F is NaN before computing the "
+                   "pairwise densities. Independent of MCMC contour handling.")
 def main(manifest, mcmc_data_dir, sweep_id, output_dir, min_seeds,
-         include_status, n_bins, overlay_mcmc, mcmc_skip_file_cut):
+         include_status, n_bins, overlay_mcmc, mcmc_skip_file_cut,
+         require_neutralino_lsp):
     df = pd.read_csv(manifest)
     if sweep_id:
         df = df[df["sweep_id"].astype(str) == str(sweep_id)]
@@ -350,6 +357,8 @@ def main(manifest, mcmc_data_dir, sweep_id, output_dir, min_seeds,
         for run_dir in sub["expected_run_dir"].dropna():
             try:
                 run = load_run(run_dir)
+                if require_neutralino_lsp:
+                    run = filter_run_neutralino_lsp(run)
             except Exception as exc:
                 click.echo(f"[warn] skip {run_dir}: {exc}", err=True)
                 continue

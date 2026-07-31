@@ -166,6 +166,10 @@ class RunData:
     baseline_static_r2: list
     al_mcmc_r2: list
     baseline_mcmc_r2: list
+    F: "np.ndarray | None" = None
+    """(N, 3) tensor of neutralino [bino, wino, higgsino] fractions;
+    NaN rows correspond to non-neutralino LSPs. ``None`` if the run's
+    state.pt does not contain ``F`` (older AL drivers)."""
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -266,6 +270,15 @@ def load_run(run_dir: str | Path, label: str | None = None) -> RunData:
     Y = Y_t.numpy().ravel().astype(np.float64) if isinstance(Y_t, torch.Tensor) else np.asarray(Y_t, dtype=np.float64).ravel()
     X_free_norm = normalise_free_params(X)
 
+    # ── LSP-composition tensor F (bino/wino/higgsino fractions) ────────────────
+    # NaN rows indicate non-neutralino LSPs; the driver stores this alongside
+    # X/Y so downstream analyses can toggle a sneutrino veto post hoc.
+    F_t = state.get("F")
+    if F_t is not None:
+        F = F_t.numpy().astype(np.float32) if isinstance(F_t, torch.Tensor) else np.asarray(F_t, dtype=np.float32)
+    else:
+        F = None
+
     n_iters = int(state.get("iteration", 0))
 
     return RunData(
@@ -274,6 +287,7 @@ def load_run(run_dir: str | Path, label: str | None = None) -> RunData:
         X=X,
         Y=Y,
         X_free_norm=X_free_norm,
+        F=F,
         n_iters=n_iters,
         n_train_per_iter=_safe_list(state, "al_n_train"),
         al_r2=_safe_list(state, "al_r2_scores"),
@@ -282,6 +296,50 @@ def load_run(run_dir: str | Path, label: str | None = None) -> RunData:
         baseline_static_r2=_safe_list(state, "baseline_on_static_random_r2"),
         al_mcmc_r2=_safe_list(state, "al_on_mcmc_r2"),
         baseline_mcmc_r2=_safe_list(state, "baseline_on_mcmc_r2"),
+    )
+
+
+def filter_run_neutralino_lsp(run: "RunData") -> "RunData":
+    """Return a new ``RunData`` with sneutrino / non-neutralino rows removed.
+
+    Uses the LSP-composition tensor ``F`` (bino/wino/higgsino fractions):
+    rows with any NaN in F correspond to non-neutralino LSPs as coerced by
+    ``pmssm.data._load_lsp_fracs``. Points are kept iff F is all-finite.
+
+    ``n_train_per_iter`` is rebased: each iteration's cumulative count is
+    recomputed as the number of surviving points whose original position
+    falls within the corresponding iteration's slice. If ``F`` is missing
+    from the state file (older runs) the input run is returned unchanged.
+    """
+    if run.F is None:
+        return run
+    keep = np.isfinite(run.F).all(axis=1)
+    if keep.all():
+        return run
+    # New cumulative counts per iteration
+    new_ntrain: list[int] = []
+    prev_boundary = 0
+    for cum in run.n_train_per_iter:
+        # cum is the cumulative count in the ORIGINAL indexing at the end
+        # of some iteration; count survivors up to that position.
+        c = int(keep[:cum].sum())
+        new_ntrain.append(c)
+        prev_boundary = cum
+    return RunData(
+        label=run.label,
+        run_dir=run.run_dir,
+        X=run.X[keep],
+        Y=run.Y[keep],
+        X_free_norm=run.X_free_norm[keep],
+        F=run.F[keep],
+        n_iters=run.n_iters,
+        n_train_per_iter=new_ntrain,
+        al_r2=run.al_r2,
+        baseline_r2=run.baseline_r2,
+        al_static_r2=run.al_static_r2,
+        baseline_static_r2=run.baseline_static_r2,
+        al_mcmc_r2=run.al_mcmc_r2,
+        baseline_mcmc_r2=run.baseline_mcmc_r2,
     )
 
 
