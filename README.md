@@ -518,6 +518,28 @@ python analyse_runs.py \
 
 See [doc/ANALYSIS_METRICS.md](doc/ANALYSIS_METRICS.md) for a full description of all metrics, their interpretation, and CLI options.
 
+### Plot filename → script reference
+
+Every PNG under `analysis/all_runs/` (and equivalent output dirs) comes from one of the scripts below. Use this table to answer "which script made this plot?" for any file you see.
+
+| Filename pattern | Produced by |
+|---|---|
+| `hit_rate_best_per_model.png` · `hits_per_desired_best_per_model.png` | `scripts/plot_hit_rate_trajectories_multiseed.py` |
+| `hit_rate_strategy_<strategy>.png` · `hits_per_desired_strategy_<strategy>.png` | ↑ same |
+| `hit_rate_model_<model>.png` · `hits_per_desired_model_<model>.png` | ↑ same |
+| `hit_rate_oracle_comparison.png` · `hits_per_desired_oracle_comparison.png` | ↑ same |
+| `accuracy_best_per_model_<ds>.png` (`ds` ∈ `static_random`, `mcmc`, `train`, `val`) | ↑ same, with `--compute-accuracy` |
+| `accuracy_oracle_comparison_<ds>.png` | ↑ same |
+| `data_efficiency_best_per_model.json` · `scan_efficiency_improvement.json` · `random_baseline_prevalence.json` | ↑ same (byproducts) |
+| `hit_rate_seeds_<cfg>.png` · `hits_per_desired_seeds_<cfg>.png` | `scripts/plot_hit_rate_seeds_per_model.py` |
+| `iteration_metrics.png` · `iteration_metrics_seeds_<cfg>.png` · `iteration_metrics_progress.png` | `scripts/plot_iteration_metrics_seeds.py` |
+| `r2_trajectories.png` · `static_r2_*.png` · `val_r2_*.png` | `scripts/plot_r2_trajectories_multiseed.py` (and `analyse_runs.py` for `r2_trajectories.png`) |
+| `r2_mcmc_*.png` | `scripts/plot_r2_mcmc_trajectories_multiseed.py` |
+| `mmd2_*.png` | `scripts/plot_mmd2_trajectories_multiseed.py` |
+| `pairwise_density_<model>_<strat>_<warm>[_rawmcmc].png` | `scripts/plot_pairwise_input_summary.py` |
+| `pairwise_scatter.png` · `quality_summary.png` · `diversity_summary.png` · `param_variance_heatmap.png` · `param_entropy_heatmap.png` · `relic_density_summary.png` · `hist_dataset.png` | `analyse_runs.py` |
+| GIFs under any `<run>/gifs/` directory (`scatterplots.gif`, `losses.gif`, `true_vs_pred_*.gif`, …) | `make_iteration_gifs.py`, invoked automatically at the end of every AL run |
+
 ### MCMC convergence diagnostics
 
 ```bash
