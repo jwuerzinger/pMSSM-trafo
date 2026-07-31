@@ -210,14 +210,35 @@ def load_generated_data(ntuple_path, logger, return_lsp_fracs=False):
         Y = tree["MO_Omega"].array(library="np")
         sp_mh = tree["SP_m_h"].array(library="np")
 
-        # Combined filter matching pmssm.load_pmssm_data:
-        # valid relic density, sub-dominant DM, and valid Higgs mass
+        # Base filter: valid relic density, sub-dominant DM, valid Higgs mass.
         mask = (Y > 0) & (Y < 1.0) & (sp_mh != -1)
+
+        # Additional filter: require a neutralino LSP (bino/wino/higgsino;
+        # SP_LSP_type in {1, 2, 3} per Run3ModelGen's ntupling convention;
+        # values >=1e6 correspond to non-neutralino LSPs, e.g. sneutrinos
+        # SP_LSP_type in {1000012, 1000014}). This vetoes phenomenologically
+        # excluded LSP candidates before they enter the AL training set.
+        # If the branch is missing we fall back to the base filter and warn
+        # once so this remains a soft addition rather than a hard dependency.
+        if "SP_LSP_type" in tree.keys():
+            lsp_type = tree["SP_LSP_type"].array(library="np")
+            neutralino = (lsp_type == 1) | (lsp_type == 2) | (lsp_type == 3)
+            n_before_lsp = int(mask.sum())
+            mask = mask & neutralino
+            n_dropped = n_before_lsp - int(mask.sum())
+            if n_dropped:
+                logger.info(f"Neutralino-LSP filter dropped {n_dropped} non-neutralino points "
+                            f"(sneutrino or other) from {n_before_lsp} otherwise-valid models")
+        else:
+            logger.warning("SP_LSP_type branch missing from ntuple; neutralino-LSP filter "
+                           "skipped (falling back to base filter only)")
+
         X_t = torch.from_numpy(X[mask]).float()
         Y_t = torch.from_numpy(Y[mask]).float().unsqueeze(1)
 
         if len(X_t) == 0:
-            logger.warning("No valid models found after filtering (MO_Omega > 0 & < 1 & SP_m_h != -1)")
+            logger.warning("No valid models found after filtering "
+                           "(MO_Omega > 0 & < 1 & SP_m_h != -1 & SP_LSP_type in {1,2,3})")
             return _none_return()
 
         logger.info(f"Loaded {len(X_t)} valid models from ntuple (filtered from {len(mask)} total)")

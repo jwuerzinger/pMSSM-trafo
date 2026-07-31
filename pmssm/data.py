@@ -60,7 +60,8 @@ def _load_lsp_fracs(trees, mask, logger=None):
 
 
 def load_pmssm_data(n_datasets=-1, logger=None, plot_dir="plots", target="DMRD",
-                    data_dir="data/18387358", return_lsp_fracs=False):
+                    data_dir="data/18387358", return_lsp_fracs=False,
+                    require_neutralino_lsp=False):
     """
     Load pMSSM ROOT data with combined filter.
 
@@ -68,6 +69,10 @@ def load_pmssm_data(n_datasets=-1, logger=None, plot_dir="plots", target="DMRD",
     - ``Y > 0``: valid target value (positive, non-sentinel)
     - ``Y < 1.0``: sub-dominant dark matter candidates
     - ``SP_m_h != -1``: valid Higgs mass computation (SPheno did not fail)
+
+    When ``require_neutralino_lsp=True``, additionally requires
+    ``SP_LSP_type in {1, 2, 3}`` (bino/wino/higgsino neutralino LSP),
+    vetoing sneutrino and other non-neutralino LSPs.
 
     Args:
         n_datasets: Number of ROOT files to load (-1 for all)
@@ -77,6 +82,8 @@ def load_pmssm_data(n_datasets=-1, logger=None, plot_dir="plots", target="DMRD",
         data_dir: Directory containing ROOT files (default: "data/18387358")
         return_lsp_fracs: If True, also return (N, 3) tensor of neutralino
             [bino, wino, higgsino] fractions from the mixing matrix.
+        require_neutralino_lsp: If True, drop rows whose LSP is not a
+            neutralino (default False for backward compatibility).
 
     Returns:
         X: Input tensor (N, 19) in physical units
@@ -117,6 +124,21 @@ def load_pmssm_data(n_datasets=-1, logger=None, plot_dir="plots", target="DMRD",
             f"{mask.sum()} / {len(Y_raw)} samples kept"
         )
 
+    if require_neutralino_lsp:
+        try:
+            lsp_type = np.concatenate([t["SP_LSP_type"].array(library="np") for t in trees])
+        except Exception as e:
+            if logger:
+                logger.warning(f"Cannot load SP_LSP_type branch ({e}); "
+                               f"neutralino-LSP filter skipped.")
+        else:
+            n_before = int(mask.sum())
+            mask = mask & ((lsp_type == 1) | (lsp_type == 2) | (lsp_type == 3))
+            if logger:
+                n_dropped = n_before - int(mask.sum())
+                logger.info(f"Neutralino-LSP filter dropped {n_dropped} "
+                            f"non-neutralino points ({n_before} → {int(mask.sum())})")
+
     # Plot target distribution
     plt.hist(Y_raw[mask], bins=20, range=[0.0, 1.0])
     if not running_in_notebook():
@@ -134,7 +156,7 @@ def load_pmssm_data(n_datasets=-1, logger=None, plot_dir="plots", target="DMRD",
 
 
 def load_mcmc_data(data_dir="data/19250082", target="DMRD", logger=None,
-                   return_lsp_fracs=False):
+                   return_lsp_fracs=False, require_neutralino_lsp=False):
     """
     Load MCMC ROOT data with the same filters as load_pmssm_data.
 
@@ -144,6 +166,9 @@ def load_mcmc_data(data_dir="data/19250082", target="DMRD", logger=None,
         logger: Logger instance for output
         return_lsp_fracs: If True, also return (N, 3) tensor of neutralino
             [bino, wino, higgsino] fractions from the mixing matrix.
+        require_neutralino_lsp: If True, additionally require
+            ``SP_LSP_type in {1, 2, 3}`` (default False for backward
+            compatibility with earlier analyses).
 
     Returns:
         X: Input tensor (N, 19) in physical units
@@ -197,6 +222,21 @@ def load_mcmc_data(data_dir="data/19250082", target="DMRD", logger=None,
             f"MCMC filter ({target_branch} > 0 & < 1 & SP_m_h != -1): "
             f"{mask.sum()} / {len(Y_raw)} samples kept"
         )
+
+    if require_neutralino_lsp:
+        try:
+            lsp_type = np.concatenate([t["SP_LSP_type"].array(library="np") for t in trees])
+        except Exception as e:
+            if logger:
+                logger.warning(f"Cannot load SP_LSP_type branch ({e}); "
+                               f"neutralino-LSP filter skipped.")
+        else:
+            n_before = int(mask.sum())
+            mask = mask & ((lsp_type == 1) | (lsp_type == 2) | (lsp_type == 3))
+            if logger:
+                n_dropped = n_before - int(mask.sum())
+                logger.info(f"MCMC neutralino-LSP filter dropped {n_dropped} "
+                            f"non-neutralino points ({n_before} → {int(mask.sum())})")
 
     X = torch.from_numpy(X_raw[mask]).float()
     Y = torch.from_numpy(Y_raw[mask]).float().unsqueeze(1)
