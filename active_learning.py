@@ -226,6 +226,10 @@ def load_config_with_sweep(config_file, sweep_index=None):
               help="Y transformation: 'log' (default, recommended) or 'zscore' (legacy).")
 @click.option('--mcmc-data-dir', default=None, type=str,
               help="Directory containing MCMC ROOT files for static evaluation (e.g., data/neutralino_v4).")
+@click.option('--mcmc-max-samples', default=500_000, type=int,
+              help="Seeded uniform subsample cap on the MCMC set (emcee chains "
+                   "are ~96% repeated rows; the subsample preserves multiplicity "
+                   "weighting). 0 disables.")
 @click.option('--static-eval-size', default=100_000, type=int,
               help="Number of models to reserve from the random pool as a static evaluation set (default: 100000).")
 @click.option('--data-dir', default='data/18387358', type=str,
@@ -242,7 +246,7 @@ def load_config_with_sweep(config_file, sweep_index=None):
               help="Comma-separated GPU IDs for AL and baseline models (default: 2,3).")
 @click.option('--seed', default=42, type=int,
               help="Master random seed propagated to torch / numpy / candidate pool (default: 42).")
-def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, dropout, n_datasets, n_samples, val_fraction, output_dir, generate_data, min_gen_fraction, max_gen_attempts, gen_workers, selection_strategy, entropy_blur, entropy_beta, entropy_pool_size, candidate_generation, candidate_source, proximity_sampling, tolerance_sampling, target_value, config_file, sweep_index, early_stopping, patience, warm_starting, eval_data_path, compute_full_metrics, y_transform, mcmc_data_dir, static_eval_size, data_dir, use_mcmc_loader, train_baseline, resume_from, n_additional_iterations, gpu_ids, seed):
+def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, dropout, n_datasets, n_samples, val_fraction, output_dir, generate_data, min_gen_fraction, max_gen_attempts, gen_workers, selection_strategy, entropy_blur, entropy_beta, entropy_pool_size, candidate_generation, candidate_source, proximity_sampling, tolerance_sampling, target_value, config_file, sweep_index, early_stopping, patience, warm_starting, eval_data_path, compute_full_metrics, y_transform, mcmc_data_dir, mcmc_max_samples, static_eval_size, data_dir, use_mcmc_loader, train_baseline, resume_from, n_additional_iterations, gpu_ids, seed):
     """
     Active learning pipeline for pMSSM relic density prediction.
 
@@ -422,7 +426,8 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
     X_mcmc, Y_mcmc, F_mcmc = None, None, None
     if mcmc_data_dir is not None:
         X_mcmc, Y_mcmc, F_mcmc = load_mcmc_data(data_dir=mcmc_data_dir, logger=logger,
-                                                return_lsp_fracs=True)
+                                                return_lsp_fracs=True,
+                                                max_samples=mcmc_max_samples or None)
         logger.info(f"MCMC evaluation dataset: {len(X_mcmc)} samples from {mcmc_data_dir}")
 
     # ---- Theoretical-limit / oracle mode ---------------------------------

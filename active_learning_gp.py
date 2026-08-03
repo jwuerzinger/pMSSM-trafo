@@ -399,6 +399,10 @@ def load_config_with_sweep(config_file, sweep_index=None):
 @click.option('--eval-data-path', default=None, type=str, help="Path to true eval dataset (ROOT/CSV).")
 @click.option('--mcmc-data-dir', default=None, type=str,
               help="Directory containing MCMC ROOT files for static evaluation (e.g. data/neutralino_v4).")
+@click.option('--mcmc-max-samples', default=500_000, type=int,
+              help="Seeded uniform subsample cap on the MCMC set (emcee chains "
+                   "are ~96% repeated rows; the subsample preserves multiplicity "
+                   "weighting). 0 disables.")
 @click.option('--static-eval-size', default=100_000, type=int,
               help="Number of models to reserve from the random pool as a static evaluation set (default: 100000).")
 @click.option('--track-lengthscales/--no-track-lengthscales', default=True,
@@ -429,7 +433,7 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, v
          selection_strategy, entropy_blur, entropy_beta,
          tolerance_sampling, proximity_sampling, entropy_pool_size,
          candidate_source,
-         compute_full_metrics, eval_data_path, mcmc_data_dir, static_eval_size,
+         compute_full_metrics, eval_data_path, mcmc_data_dir, mcmc_max_samples, static_eval_size,
          track_lengthscales, advanced_plots,
          config_file, sweep_index, data_dir, resume_from, n_additional_iterations, gpu_ids, seed):
     """
@@ -654,7 +658,8 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, v
     X_mcmc, Y_mcmc, F_mcmc = None, None, None
     if mcmc_data_dir is not None:
         X_mcmc, Y_mcmc, F_mcmc = load_mcmc_data(data_dir=mcmc_data_dir, logger=logger,
-                                                return_lsp_fracs=True)
+                                                return_lsp_fracs=True,
+                                                max_samples=mcmc_max_samples or None)
         logger.info(f"Loaded MCMC evaluation data: {len(X_mcmc)} samples")
 
     # ---- Theoretical-limit / oracle mode ---------------------------------
