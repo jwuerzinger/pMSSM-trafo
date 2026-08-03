@@ -22,17 +22,25 @@
 # updated runs. Run after every sweep completes:
 #
 #   bash scripts/archive_runs.sh
+#
+# Optional args: SRC dir, DEST dir, and a glob PATTERN over run-dir names
+# (default "*"). The bundle jobs pass their own name prefix as PATTERN so
+# concurrently finishing bundles each archive only their own runs:
+#
+#   bash scripts/archive_runs.sh /ptmp/jwuerzin/output \
+#        /viper/u2/jwuerzin/pmssm-archive/runs "active_learning_dnn_top_k_cold_seed*"
 # ==============================================================================
 set -uo pipefail
 
 SRC="${1:-/ptmp/jwuerzin/output}"
 DEST="${2:-/viper/u2/jwuerzin/pmssm-archive/runs}"
+PATTERN="${3:-*}"
 
 mkdir -p "$DEST"
 cd "$SRC" || exit 1
 
 n_new=0 n_skip=0 n_empty=0
-for d in */; do
+for d in ${PATTERN%/}/; do
     name=${d%/}
     [[ -d "$name" ]] || continue
     out="$DEST/$name.tar"
@@ -54,11 +62,11 @@ for d in */; do
         n_empty=$((n_empty + 1))
         continue
     fi
-    if tar -cf "$out.tmp" "${members[@]}" 2>/dev/null; then
-        mv "$out.tmp" "$out"
+    if tar -cf "$out.tmp.$$" "${members[@]}" 2>/dev/null; then
+        mv "$out.tmp.$$" "$out"
         n_new=$((n_new + 1))
     else
-        rm -f "$out.tmp"
+        rm -f "$out.tmp.$$"
         echo "[archive] WARN: tar failed for $name" >&2
     fi
 done

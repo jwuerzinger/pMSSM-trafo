@@ -147,4 +147,14 @@ RC=$?
 echo "=========================================="
 echo "[bundle] all sruns completed: $(date)  rc=${RC}"
 echo "=========================================="
+
+# Archive this bundle's runs to non-purged storage (ptmp deletes files
+# unaccessed for ~12 weeks). Pattern-scoped to this bundle's own run dirs so
+# concurrently finishing bundles never race on each other's tarballs.
+bash "${REPO_ROOT}/scripts/archive_runs.sh" \
+    "$(dirname "${AL_OUTPUT_BASE}")" \
+    /viper/u2/jwuerzin/pmssm-archive/runs \
+    "$(basename "${AL_OUTPUT_BASE}")_seed*" \
+    || echo "[bundle] WARN: run archiving failed"
+
 exit ${RC}
