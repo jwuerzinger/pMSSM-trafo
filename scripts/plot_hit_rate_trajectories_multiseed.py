@@ -766,7 +766,7 @@ def _accuracy_for_iter(model_type: str, role: str, iter_dir: Path,
     target = run_kwargs.get("target", "DMRD") or "DMRD"
     from pmssm.data import transform_y  # noqa: PLC0415
 
-    if model_type in ("transformer", "dnn"):
+    if model_type in ("transformer", "dnn", "dnn_match_trafo"):
         from pmssm.data import compute_stats  # noqa: PLC0415
         # Match active_learning(_dnn).py: stats from the train set with idx_train = arange(n_train)
         idx_tr = torch.arange(len(X_tr))
