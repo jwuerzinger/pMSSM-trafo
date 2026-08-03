@@ -9,12 +9,14 @@ as a chain, letting you compare the AL model datasets against the MCMC
 reference.
 
 Usage:
-    # MCMC diagnostics on the reference set:
-    python mcmc_diagnostics.py --data-dir /ptmp/jwuerzin/data/19250082
+    # MCMC diagnostics on the emcee reference set (each ROOT file is one
+    # 256-walker ensemble; split into walker-chains):
+    python mcmc_diagnostics.py --data-dir /ptmp/jwuerzin/data/neutralino_v4 \\
+        --mcmc-nwalkers 256
 
     # AL vs MCMC comparison plot (best-per-model picks from a manifest):
     python mcmc_diagnostics.py \\
-        --data-dir /ptmp/jwuerzin/data/19250082 \\
+        --data-dir /ptmp/jwuerzin/data/neutralino_v4 --mcmc-nwalkers 256 \\
         --al-manifest /ptmp/jwuerzin/analysis/all_runs/sweep_manifest.csv \\
         --output-dir /ptmp/jwuerzin/analysis/all_runs/
 
@@ -93,7 +95,13 @@ MODEL_DISPLAY = {
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _load_chains(data_dir: Path, params: list[str], skip_file_cut: bool,
-                 require_neutralino_lsp: bool = False):
+                 require_neutralino_lsp: bool = False, nwalkers: int = 0):
+    """One chain per ROOT file by default. With ``nwalkers > 0`` (emcee-era
+    ntuples, e.g. neutralino_v4), each file is an ensemble stored
+    iteration-major / walker-minor (``walker = row % nwalkers``) and is split
+    into ``nwalkers`` walker-chains. The walker id is derived from the raw row
+    index BEFORE any per-sample mask, so filtering cannot scramble chains.
+    """
     import uproot
     files = sorted(glob.glob(str(data_dir / "*.root")))
     if not files:
@@ -111,13 +119,20 @@ def _load_chains(data_dir: Path, params: list[str], skip_file_cut: bool,
                 continue
         sp_mh = t["SP_m_h"].array(library="np")
         mask = (y > 0) & (y < 1.0) & (sp_mh != -1)
-        if require_neutralino_lsp and "SP_LSP_type" in t.keys():
-            lsp = t["SP_LSP_type"].array(library="np")
-            mask = mask & ((lsp == 1) | (lsp == 2) | (lsp == 3))
+        if require_neutralino_lsp:
+            if "SP_LSP_type" in t.keys():
+                lsp = t["SP_LSP_type"].array(library="np")
+                mask = mask & ((lsp == 1) | (lsp == 2) | (lsp == 3))
+            elif "MO_cdm_is_neutralino" in t.keys():
+                mask = mask & (t["MO_cdm_is_neutralino"].array(library="np") == 1)
         if not mask.any():
             continue
-        cols = [t[p].array(library="np")[mask] for p in params]
-        chains.append(np.column_stack(cols))
+        data = np.column_stack([t[p].array(library="np")[mask] for p in params])
+        if nwalkers > 0:
+            walker = (np.arange(len(y)) % nwalkers)[mask]
+            chains.extend(data[walker == w] for w in range(nwalkers))
+        else:
+            chains.append(data)
     return chains, len(files), dropped_no_straddle, dropped_below_min
 
 
@@ -153,11 +168,12 @@ def ess_bulk(chains_arr: np.ndarray) -> np.ndarray:
     """
     try:
         import arviz as az
-    except ImportError:
+        M, N, P = chains_arr.shape
+        return np.array([float(az.ess(chains_arr[:, :, p], method="bulk"))
+                         for p in range(P)])
+    except Exception:
+        # arviz missing, or an API-incompatible major version (e.g. 1.x).
         return _ess_bulk_fallback(chains_arr)
-    M, N, P = chains_arr.shape
-    return np.array([float(az.ess(chains_arr[:, :, p], method="bulk"))
-                     for p in range(P)])
 
 
 def _ess_bulk_fallback(chains_arr: np.ndarray) -> np.ndarray:
@@ -241,16 +257,20 @@ def compute_diagnostics(
     skip_file_cut: bool = False,
     print_table: bool = True,
     require_neutralino_lsp: bool = False,
+    nwalkers: int = 0,
 ) -> dict:
     """Returns {param: {"rhat": float, "ess_bulk": float}} plus context.
 
-    When ``require_neutralino_lsp`` is True, additionally requires
-    ``SP_LSP_type in {1, 2, 3}`` on every ROOT sample.
+    When ``require_neutralino_lsp`` is True, additionally requires a
+    neutralino LSP (``SP_LSP_type in {1, 2, 3}``, falling back to
+    ``MO_cdm_is_neutralino == 1`` on emcee-era ntuples). ``nwalkers > 0``
+    splits each file into that many walker-chains (see _load_chains).
     """
     data_dir = Path(data_dir)
     chains, n_files, dropped_ns, dropped_bm = _load_chains(
         data_dir, params, skip_file_cut,
         require_neutralino_lsp=require_neutralino_lsp,
+        nwalkers=nwalkers,
     )
     if not chains:
         raise RuntimeError(f"no usable chains under {data_dir}")
@@ -262,6 +282,7 @@ def compute_diagnostics(
     out["context"].update({
         "data_dir": str(data_dir),
         "n_files": n_files,
+        "nwalkers": nwalkers,
         "dropped_no_straddle": dropped_ns,
         "dropped_below_omega_min": dropped_bm,
         "skip_file_cut": skip_file_cut,
@@ -270,7 +291,10 @@ def compute_diagnostics(
     if print_table:
         ctx = out["context"]
         print(f"\n[mcmc-diag] data_dir={ctx['data_dir']}")
-        print(f"[mcmc-diag] using {ctx['n_chains_used']} of {ctx['n_files']} files "
+        chain_desc = (f"{ctx['n_chains_used']} walker-chains from {ctx['n_files']} "
+                      f"ensemble files (nwalkers={nwalkers})" if nwalkers > 0
+                      else f"{ctx['n_chains_used']} of {ctx['n_files']} files")
+        print(f"[mcmc-diag] using {chain_desc} "
               f"(skip_file_cut={ctx['skip_file_cut']})")
         if not ctx["skip_file_cut"]:
             print(f"[mcmc-diag] file-cut dropped {ctx['dropped_no_straddle']} "
@@ -371,17 +395,20 @@ def compare_and_plot(mcmc_dir: str | Path,
                      out_dir: str | Path,
                      params: list[str] = DEFAULT_FREE_PARAMS,
                      print_summary: bool = True,
-                     require_neutralino_lsp: bool = False) -> Path:
+                     require_neutralino_lsp: bool = False,
+                     mcmc_nwalkers: int = 0) -> Path:
     """Compute diagnostics for MCMC + each AL pick, render comparison plot.
 
     Returns the path to the written PNG. When ``require_neutralino_lsp`` is
     True, both the MCMC reference set and every AL training set have their
     non-neutralino rows (sneutrinos etc.) vetoed before chain statistics
-    are computed.
+    are computed. ``mcmc_nwalkers`` splits each MCMC file into walker-chains
+    (emcee-era ntuples).
     """
     # 1) MCMC diagnostics
     mcmc = compute_diagnostics(mcmc_dir, params=params, print_table=False,
-                               require_neutralino_lsp=require_neutralino_lsp)
+                               require_neutralino_lsp=require_neutralino_lsp,
+                               nwalkers=mcmc_nwalkers)
 
     # 2) AL diagnostics per model
     idx_map = {p: PARAM_ORDER.index(p) for p in params}
@@ -561,8 +588,14 @@ def _parse_args():
                         "--al-manifest.")
     p.add_argument("--require-neutralino-lsp", action="store_true",
                    help="Post-hoc veto of non-neutralino LSPs: require "
-                        "SP_LSP_type in {1,2,3} on MCMC samples and drop "
+                        "SP_LSP_type in {1,2,3} (or MO_cdm_is_neutralino==1 "
+                        "on emcee-era ntuples) on MCMC samples and drop "
                         "state.pt rows whose F is NaN on the AL side.")
+    p.add_argument("--mcmc-nwalkers", type=int, default=0,
+                   help="emcee-era ntuples: split each ROOT file (one ensemble, "
+                        "stored iteration-major/walker-minor) into this many "
+                        "walker-chains. 0 (default) = one chain per file. "
+                        "Use 256 for neutralino_v4.")
     return p.parse_args()
 
 
@@ -575,6 +608,7 @@ def main():
         skip_file_cut=args.no_file_cut,
         print_table=True,
         require_neutralino_lsp=args.require_neutralino_lsp,
+        nwalkers=args.mcmc_nwalkers,
     )
     if args.al_manifest is not None:
         if args.output_dir is None:
@@ -588,6 +622,7 @@ def main():
             out_dir=args.output_dir,
             params=params,
             require_neutralino_lsp=args.require_neutralino_lsp,
+            mcmc_nwalkers=args.mcmc_nwalkers,
         )
 
 

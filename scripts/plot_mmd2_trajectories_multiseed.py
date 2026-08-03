@@ -357,9 +357,12 @@ def plot_best_per_model(traj, uncertainty, out_dir, y_min, y_max):
 @click.command()
 @click.option("--manifest", default="/ptmp/jwuerzin/analysis/all_runs/sweep_manifest.csv",
               show_default=True)
-@click.option("--mcmc-data-dir", default="/ptmp/jwuerzin/data/19250082",
+@click.option("--mcmc-data-dir", default="/ptmp/jwuerzin/data/neutralino_v4",
               show_default=True,
               help="Directory of MCMC ROOT files used as the reference distribution.")
+@click.option("--mcmc-max-samples", default=500_000, type=int, show_default=True,
+              help="Seeded uniform subsample cap on the MCMC reference "
+                   "(preserves chain multiplicity weighting). 0 disables.")
 @click.option("--sweep-id", default=None,
               help="Filter to one sweep_id (default: all).")
 @click.option("--output-dir", default="/ptmp/jwuerzin/analysis/all_runs/",
@@ -375,8 +378,8 @@ def plot_best_per_model(traj, uncertainty, out_dir, y_min, y_max):
                    "n_subsample × n_subsample; cost ~ N²).")
 @click.option("--y-min", default=None, type=float)
 @click.option("--y-max", default=None, type=float)
-def main(manifest, mcmc_data_dir, sweep_id, output_dir, uncertainty,
-         min_seeds, include_status, n_subsample, y_min, y_max):
+def main(manifest, mcmc_data_dir, mcmc_max_samples, sweep_id, output_dir,
+         uncertainty, min_seeds, include_status, n_subsample, y_min, y_max):
     df = pd.read_csv(manifest)
     if sweep_id:
         df = df[df["sweep_id"].astype(str) == str(sweep_id)]
@@ -390,7 +393,7 @@ def main(manifest, mcmc_data_dir, sweep_id, output_dir, uncertainty,
     bandwidth_sentinel = out_dir / "mmd2_bandwidth.json"
 
     click.echo(f"[mmd2] loading MCMC reference from {mcmc_data_dir} ...")
-    mcmc_X, _ = load_mcmc_numpy(mcmc_data_dir)
+    mcmc_X, _ = load_mcmc_numpy(mcmc_data_dir, max_samples=mcmc_max_samples or None)
     mcmc_X_free_norm = normalise_free_params(mcmc_X)
     click.echo(f"[mmd2] MCMC: {len(mcmc_X_free_norm)} samples, "
                f"{mcmc_X_free_norm.shape[1]} free params")

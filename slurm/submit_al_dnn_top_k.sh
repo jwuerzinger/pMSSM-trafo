@@ -20,7 +20,7 @@
 #   AL_PATIENCE           Early stopping patience        (default: 200)
 #   AL_ENTROPY_POOL_SIZE  Focused pool for entropy sel.  (default: 5000)
 #   AL_TOLERANCE_SAMPLING Hard candidate cut width       (default: 1.0)
-#   AL_MCMC_DATA_DIR      MCMC evaluation dataset dir    (default: ${CLUSTER_DATA_DIR}/19250082)
+#   AL_MCMC_DATA_DIR      MCMC evaluation dataset dir    (default: ${CLUSTER_DATA_DIR}/neutralino_v4)
 #   AL_STATIC_EVAL_SIZE   Static eval set size           (default: 100000)
 #   AL_OUTPUT_DIR         Output directory               (default: active_learning_dnn_output_top_k_slurm)
 #   AL_GENERATE_DATA      Set empty to disable physics simulation (default: --generate-data)
@@ -135,7 +135,7 @@ source "${REPO_ROOT}/slurm/resume_args.sh"
     --epochs "${AL_EPOCHS:-10000}" \
     --entropy-pool-size "${AL_ENTROPY_POOL_SIZE:-5000}" \
     --tolerance-sampling "${AL_TOLERANCE_SAMPLING:-1.0}" \
-    --mcmc-data-dir "${AL_MCMC_DATA_DIR:-${CLUSTER_DATA_DIR}/19250082}" \
+    --mcmc-data-dir "${AL_MCMC_DATA_DIR:-${CLUSTER_DATA_DIR}/neutralino_v4}" \
     --data-dir "${AL_DATA_DIR:-${CLUSTER_DATA_DIR}/18387358}" \
     --static-eval-size "${AL_STATIC_EVAL_SIZE:-100000}" \
     --gen-workers "${AL_GEN_WORKERS:-20}" \

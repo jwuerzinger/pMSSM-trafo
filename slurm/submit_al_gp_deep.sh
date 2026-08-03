@@ -96,7 +96,7 @@ source "${REPO_ROOT}/slurm/resume_args.sh"
     --entropy-pool-size 5000 \
     --tolerance-sampling 1.0 \
     --gen-workers 20 \
-    --mcmc-data-dir ${CLUSTER_DATA_DIR}/19250082 \
+    --mcmc-data-dir ${CLUSTER_DATA_DIR}/neutralino_v4 \
     --data-dir ${CLUSTER_DATA_DIR}/18387358 \
     --static-eval-size 100000 \
     --kernel RBF \

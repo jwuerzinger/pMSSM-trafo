@@ -48,7 +48,7 @@ Usage
     python analyse_runs.py \\
         --run-dirs  /ptmp/jwuerzin/output/run_A  /ptmp/jwuerzin/output/run_B \\
         --labels    transformer_entropy  transformer_top_k \\
-        --mcmc-data-dir /ptmp/jwuerzin/data/19250082 \\
+        --mcmc-data-dir /ptmp/jwuerzin/data/neutralino_v4 \\
         --output-dir analysis_output
 
     # Include baseline model metrics alongside AL metrics
@@ -343,13 +343,16 @@ def filter_run_neutralino_lsp(run: "RunData") -> "RunData":
     )
 
 
-def load_mcmc_numpy(mcmc_data_dir: str | Path) -> tuple[np.ndarray, np.ndarray]:
+def load_mcmc_numpy(mcmc_data_dir: str | Path,
+                    max_samples: int | None = None) -> tuple[np.ndarray, np.ndarray]:
     """Load MCMC evaluation data, using the project's ``load_mcmc_data`` helper.
 
     Parameters
     ----------
     mcmc_data_dir : str or Path
-        Directory containing MCMC ROOT files (e.g. ``/ptmp/.../19250082``).
+        Directory containing MCMC ROOT files (e.g. ``/ptmp/.../neutralino_v4``).
+    max_samples : int, optional
+        Seeded uniform subsample cap (see ``load_mcmc_data``).
 
     Returns
     -------
@@ -359,7 +362,7 @@ def load_mcmc_numpy(mcmc_data_dir: str | Path) -> tuple[np.ndarray, np.ndarray]:
         MCMC relic density values in physical units.
     """
     from pmssm.data import load_mcmc_data  # noqa: PLC0415 (lazy import — uproot is optional)
-    X_t, Y_t = load_mcmc_data(data_dir=str(mcmc_data_dir))
+    X_t, Y_t = load_mcmc_data(data_dir=str(mcmc_data_dir), max_samples=max_samples)
     X = X_t.numpy().astype(np.float64) if isinstance(X_t, torch.Tensor) else np.asarray(X_t, dtype=np.float64)
     Y = Y_t.numpy().ravel().astype(np.float64) if isinstance(Y_t, torch.Tensor) else np.asarray(Y_t, dtype=np.float64).ravel()
     return X, Y

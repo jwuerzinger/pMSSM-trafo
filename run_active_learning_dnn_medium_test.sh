@@ -17,6 +17,6 @@
     --entropy-pool-size 1500 \
     --n-select 10 \
     --gen-workers 2 \
-    --mcmc-data-dir data/19250082 \
+    --mcmc-data-dir data/neutralino_v4 \
     --static-eval-size 1000 \
     --output-dir active_learning_dnn_output_medium_test

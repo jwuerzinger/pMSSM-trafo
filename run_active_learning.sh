@@ -24,7 +24,7 @@
     --n-candidates 1_000_000 \
     --entropy-pool-size 5_000 \
     --gen-workers 20 \
-    --mcmc-data-dir data/19250082 \
+    --mcmc-data-dir data/neutralino_v4 \
     --static-eval-size 100_000 \
     --tolerance-sampling 1.0 \
     --warm-starting \

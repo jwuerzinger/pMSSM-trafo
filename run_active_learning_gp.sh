@@ -13,7 +13,7 @@
     --entropy-pool-size 5_000 \
     --tolerance-sampling 1.0 \
     --gen-workers 20 \
-    --mcmc-data-dir data/19250082 \
+    --mcmc-data-dir data/neutralino_v4 \
     --data-dir data/18387358 \
     --static-eval-size 100_000 \
     --kernel RBF \

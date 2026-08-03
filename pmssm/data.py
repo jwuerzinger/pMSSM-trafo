@@ -155,8 +155,9 @@ def load_pmssm_data(n_datasets=-1, logger=None, plot_dir="plots", target="DMRD",
     return X, Y
 
 
-def load_mcmc_data(data_dir="data/19250082", target="DMRD", logger=None,
-                   return_lsp_fracs=False, require_neutralino_lsp=False):
+def load_mcmc_data(data_dir="data/neutralino_v4", target="DMRD", logger=None,
+                   return_lsp_fracs=False, require_neutralino_lsp=False,
+                   max_samples=None, subsample_seed=42):
     """
     Load MCMC ROOT data with the same filters as load_pmssm_data.
 
@@ -166,9 +167,15 @@ def load_mcmc_data(data_dir="data/19250082", target="DMRD", logger=None,
         logger: Logger instance for output
         return_lsp_fracs: If True, also return (N, 3) tensor of neutralino
             [bino, wino, higgsino] fractions from the mixing matrix.
-        require_neutralino_lsp: If True, additionally require
-            ``SP_LSP_type in {1, 2, 3}`` (default False for backward
-            compatibility with earlier analyses).
+        require_neutralino_lsp: If True, additionally require a neutralino
+            LSP: ``SP_LSP_type in {1, 2, 3}`` where that branch exists,
+            falling back to ``MO_cdm_is_neutralino == 1`` (emcee-era ntuples,
+            e.g. neutralino_v4). Default False for backward compatibility.
+        max_samples: If set, keep at most this many samples via a seeded
+            uniform row subsample AFTER all filters. Preserves the chain's
+            multiplicity weighting (do not deduplicate emcee repeats — the
+            repeat counts ARE the posterior weights).
+        subsample_seed: RNG seed for the subsample (default 42).
 
     Returns:
         X: Input tensor (N, 19) in physical units
@@ -224,19 +231,42 @@ def load_mcmc_data(data_dir="data/19250082", target="DMRD", logger=None,
         )
 
     if require_neutralino_lsp:
+        neut_mask = None
         try:
             lsp_type = np.concatenate([t["SP_LSP_type"].array(library="np") for t in trees])
-        except Exception as e:
-            if logger:
-                logger.warning(f"Cannot load SP_LSP_type branch ({e}); "
-                               f"neutralino-LSP filter skipped.")
-        else:
+            neut_mask = (lsp_type == 1) | (lsp_type == 2) | (lsp_type == 3)
+        except Exception:
+            # emcee-era ntuples (e.g. neutralino_v4) drop SP_LSP_type in
+            # favour of micrOMEGAs' own LSP verdict.
+            try:
+                cdm = np.concatenate([t["MO_cdm_is_neutralino"].array(library="np") for t in trees])
+                neut_mask = cdm == 1
+                if logger:
+                    logger.info("Neutralino-LSP filter using MO_cdm_is_neutralino "
+                                "(SP_LSP_type branch absent)")
+            except Exception as e:
+                if logger:
+                    logger.warning(f"Cannot load SP_LSP_type or MO_cdm_is_neutralino "
+                                   f"({e}); neutralino-LSP filter skipped.")
+        if neut_mask is not None:
             n_before = int(mask.sum())
-            mask = mask & ((lsp_type == 1) | (lsp_type == 2) | (lsp_type == 3))
+            mask = mask & neut_mask
             if logger:
                 n_dropped = n_before - int(mask.sum())
                 logger.info(f"MCMC neutralino-LSP filter dropped {n_dropped} "
                             f"non-neutralino points ({n_before} → {int(mask.sum())})")
+
+    if max_samples is not None and int(mask.sum()) > max_samples:
+        # Fold the subsample into the boolean mask so lsp_fracs stay aligned.
+        n_before = int(mask.sum())
+        idx = np.flatnonzero(mask)
+        rng = np.random.default_rng(subsample_seed)
+        keep = rng.choice(idx, size=max_samples, replace=False)
+        mask = np.zeros_like(mask)
+        mask[keep] = True
+        if logger:
+            logger.info(f"MCMC subsample: {n_before} → {max_samples} rows "
+                        f"(seed {subsample_seed})")
 
     X = torch.from_numpy(X_raw[mask]).float()
     Y = torch.from_numpy(Y_raw[mask]).float().unsqueeze(1)

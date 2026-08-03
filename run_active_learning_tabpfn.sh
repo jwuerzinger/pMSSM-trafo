@@ -16,7 +16,7 @@
     --n-ensemble-samples 16 \
     --generate-data \
     --gen-workers 20 \
-    --mcmc-data-dir data/19250082 \
+    --mcmc-data-dir data/neutralino_v4 \
     --static-eval-size 100_000 \
     --proximity-sampling 0.1 \
     --tolerance-sampling 1.0 \

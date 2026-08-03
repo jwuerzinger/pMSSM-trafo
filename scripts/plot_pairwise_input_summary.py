@@ -296,10 +296,13 @@ def _plot_one_cell(
 @click.command()
 @click.option("--manifest", default="/ptmp/jwuerzin/analysis/all_runs/sweep_manifest.csv",
               show_default=True)
-@click.option("--mcmc-data-dir", default="/ptmp/jwuerzin/data/19250082",
+@click.option("--mcmc-data-dir", default="/ptmp/jwuerzin/data/neutralino_v4",
               show_default=True,
               help="MCMC ROOT dir for the reference contour overlay. Set "
                    "--no-overlay-mcmc to skip and run without loading MCMC.")
+@click.option("--mcmc-max-samples", default=500_000, type=int, show_default=True,
+              help="Seeded uniform subsample cap on the MCMC reference "
+                   "(preserves chain multiplicity weighting). 0 disables.")
 @click.option("--sweep-id", default=None,
               help="Filter to one sweep_id (default: all).")
 @click.option("--output-dir", default="/ptmp/jwuerzin/analysis/all_runs/",
@@ -324,8 +327,8 @@ def _plot_one_cell(
               help="Post-hoc veto of non-neutralino LSPs (sneutrinos): drop "
                    "training rows whose F is NaN before computing the "
                    "pairwise densities. Independent of MCMC contour handling.")
-def main(manifest, mcmc_data_dir, sweep_id, output_dir, min_seeds,
-         include_status, n_bins, overlay_mcmc, mcmc_skip_file_cut,
+def main(manifest, mcmc_data_dir, mcmc_max_samples, sweep_id, output_dir,
+         min_seeds, include_status, n_bins, overlay_mcmc, mcmc_skip_file_cut,
          require_neutralino_lsp):
     df = pd.read_csv(manifest)
     if sweep_id:
@@ -341,12 +344,18 @@ def main(manifest, mcmc_data_dir, sweep_id, output_dir, min_seeds,
             click.echo(f"[pairwise] loading MCMC (no file-level cut) from "
                        f"{mcmc_data_dir} ...")
             mcmc_X, n_kept, n_total, n_files = _load_mcmc_no_file_cut(mcmc_data_dir)
+            if mcmc_max_samples and len(mcmc_X) > mcmc_max_samples:
+                rng = np.random.default_rng(42)
+                mcmc_X = mcmc_X[rng.choice(len(mcmc_X), mcmc_max_samples,
+                                           replace=False)]
             mcmc_X_free_norm = normalise_free_params(mcmc_X)
             click.echo(f"[pairwise] MCMC raw: {n_kept}/{n_total} samples "
-                       f"after per-sample filter, from all {n_files} files")
+                       f"after per-sample filter, from all {n_files} files "
+                       f"(plotting {len(mcmc_X_free_norm)})")
         else:
             click.echo(f"[pairwise] loading MCMC reference from {mcmc_data_dir} ...")
-            mcmc_X, _ = load_mcmc_numpy(mcmc_data_dir)
+            mcmc_X, _ = load_mcmc_numpy(mcmc_data_dir,
+                                        max_samples=mcmc_max_samples or None)
             mcmc_X_free_norm = normalise_free_params(mcmc_X)
             click.echo(f"[pairwise] MCMC: {len(mcmc_X_free_norm)} samples")
 

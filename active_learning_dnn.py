@@ -219,7 +219,7 @@ def load_config_with_sweep(config_file, sweep_index=None):
 @click.option('--y-transform', default='log', type=click.Choice(['zscore', 'log']),
               help="Y transformation: 'log' (default, recommended) or 'zscore' (legacy).")
 @click.option('--mcmc-data-dir', default=None, type=str,
-              help="Directory containing MCMC ROOT files for static evaluation (e.g., data/19250082).")
+              help="Directory containing MCMC ROOT files for static evaluation (e.g., data/neutralino_v4).")
 @click.option('--static-eval-size', default=100_000, type=int,
               help="Number of models to reserve from the random pool as a static evaluation set (default: 100000).")
 @click.option('--data-dir', default='data/18387358', type=str,

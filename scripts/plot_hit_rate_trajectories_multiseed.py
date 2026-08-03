@@ -2044,11 +2044,14 @@ def plot_best_per_model(traj, tols, uncertainty, true_val, out_dir,
                    "MCMC, per-model train, per-model val). Recomputes from "
                    "saved per-iteration checkpoints; per-run JSON cache makes "
                    "re-renders cheap.")
-@click.option("--mcmc-data-dir", default="/ptmp/jwuerzin/data/19250082",
+@click.option("--mcmc-data-dir", default="/ptmp/jwuerzin/data/neutralino_v4",
               show_default=True,
               help="ROOT directory holding the MCMC eval set used by "
-                   "--compute-accuracy. Same dir AL training pointed "
-                   "--mcmc-data-dir at.")
+                   "--compute-accuracy.")
+@click.option("--mcmc-max-samples", default=500_000, type=int, show_default=True,
+              help="Seeded uniform subsample cap on the MCMC eval set (emcee "
+                   "chains store ~96% repeated rows; the subsample preserves "
+                   "multiplicity weighting). 0 disables.")
 @click.option("--accuracy-device", default=None,
               help="Torch device for accuracy recompute (e.g. cuda:0). "
                    "Default: cuda if available, else cpu.")
@@ -2071,7 +2074,7 @@ def plot_best_per_model(traj, tols, uncertainty, true_val, out_dir,
                    "is rebased so per-iteration slicing stays consistent.")
 def main(manifest, sweep_id, output_dir, uncertainty, target, tolerances,
          min_seeds, include_status, baseline_data_dir,
-         compute_accuracy, mcmc_data_dir, accuracy_device,
+         compute_accuracy, mcmc_data_dir, mcmc_max_samples, accuracy_device,
          accuracy_cache_refresh,
          accuracy_static_eval_size, accuracy_dropout,
          require_neutralino_lsp):
@@ -2296,7 +2299,10 @@ def main(manifest, sweep_id, output_dir, uncertainty, target, tolerances,
                 if mcmc_data_dir:
                     try:
                         from pmssm.data import load_mcmc_data  # noqa: PLC0415
-                        Xm, Ym = load_mcmc_data(data_dir=mcmc_data_dir)
+                        Xm, Ym = load_mcmc_data(
+                            data_dir=mcmc_data_dir,
+                            max_samples=mcmc_max_samples or None,
+                        )
                         X_mcmc = Xm.float() if hasattr(Xm, "float") else torch.from_numpy(np.asarray(Xm, dtype=np.float32))
                         Y_mcmc = Ym.float().view(-1) if hasattr(Ym, "float") else torch.from_numpy(np.asarray(Ym, dtype=np.float32)).view(-1)
                         click.echo(f"[accuracy] MCMC eval set: n={len(X_mcmc)}")

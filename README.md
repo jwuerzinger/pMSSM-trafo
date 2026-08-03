@@ -543,11 +543,22 @@ Every PNG under `analysis/all_runs/` (and equivalent output dirs) comes from one
 ### MCMC convergence diagnostics
 
 ```bash
-python scripts/mcmc_diagnostics.py --data-dir /ptmp/jwuerzin/data/19250082
+# emcee-era ntuples (one 256-walker ensemble per ROOT file):
+python scripts/mcmc_diagnostics.py --data-dir /ptmp/jwuerzin/data/neutralino_v4 --mcmc-nwalkers 256
 python scripts/mcmc_diagnostics.py --data-dir /path/to/output --params M_1,M_2,mu,tanb
 ```
 
-Standalone helper that computes split-R̂ (Gelman-Rubin with Vehtari et al. 2021 splitting) and bulk-ESS for each free parameter, treating each ROOT file in the input directory as a separate chain. Pass/fail thresholds: R̂ < 1.01 (well-converged), R̂ < 1.05 (acceptable). Self-contained — only needs `numpy`, `uproot`, and (optional) `arviz`.
+Standalone helper that computes split-R̂ (Gelman-Rubin with Vehtari et al. 2021 splitting) and bulk-ESS for each free parameter. By default each ROOT file in the input directory is one chain; with `--mcmc-nwalkers N` each file is treated as an emcee ensemble stored iteration-major/walker-minor and split into N walker-chains (use 256 for `neutralino_v4`). Pass/fail thresholds: R̂ < 1.01 (well-converged), R̂ < 1.05 (acceptable). Self-contained — only needs `numpy`, `uproot`, and (optional) `arviz`.
+
+### Corner plots and input-vs-target diagnostics
+
+```bash
+python scripts/plot_al_input_target_diagnostics.py \
+    --output-dir /ptmp/jwuerzin/analysis/all_runs/al_diag/ \
+    --require-neutralino-lsp
+```
+
+Ports the array-based plotting helpers from Run3ModelGen's emcee diagnostics to AL runs: for each best-per-model cell of the sweep it pools the seeds' cumulative training sets and writes `corner_<model>.png` (9 free-parameter corner plot with the Ω marginal inset) plus `<param>_vs_Omega_<model>.png` scatter/histogram panels, and renders `corner_mcmc.png` for the MCMC reference in identical styling. `--models deep_gp,transformer` restricts the cells; `--skip-joint-plots` renders corners only.
 
 ## Slurm Submission
 
@@ -698,7 +709,7 @@ The script recomputes accuracy on demand by walking each picked seed run, loadin
     --compute-accuracy \
     --accuracy-device cuda:0
 
-# Skip TabPFN (its per-iter refit on the 410k MCMC set is the slowest cell):
+# Skip TabPFN (its per-iter refit on the 500k-subsampled MCMC set is the slowest cell):
 ... --compute-accuracy --accuracy-skip-tabpfn
 
 # Force re-evaluation of cached iters (e.g. after a code change):

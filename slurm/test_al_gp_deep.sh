@@ -79,7 +79,7 @@ source "${REPO_ROOT}/slurm/resume_args.sh"
     --generate-data \
     --gen-workers 8 \
     --data-dir ${CLUSTER_DATA_DIR}/18387358 \
-    --mcmc-data-dir ${CLUSTER_DATA_DIR}/19250082 \
+    --mcmc-data-dir ${CLUSTER_DATA_DIR}/neutralino_v4 \
     --static-eval-size 10000 \
     --warm-starting \
     --output-dir "${AL_OUTPUT_DIR:-/ptmp/jwuerzin/output/test_al_gp_deep_output}" ${RESUME_ARGS} \

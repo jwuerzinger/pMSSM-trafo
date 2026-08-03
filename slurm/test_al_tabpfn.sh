@@ -82,7 +82,7 @@ source "${REPO_ROOT}/slurm/resume_args.sh"
     --tolerance-sampling 1.0 \
     --generate-data \
     --gen-workers 8 \
-    --mcmc-data-dir ${CLUSTER_DATA_DIR}/19250082 \
+    --mcmc-data-dir ${CLUSTER_DATA_DIR}/neutralino_v4 \
     --data-dir ${CLUSTER_DATA_DIR}/18387358 \
     --static-eval-size 10000 \
     --output-dir "${AL_OUTPUT_DIR:-/ptmp/jwuerzin/output/test_al_tabpfn_output}" ${RESUME_ARGS} \

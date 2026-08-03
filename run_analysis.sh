@@ -51,7 +51,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
 PYTHON="${REPO_ROOT}/.pixi/envs/rocm/bin/python"
 SCRIPT="${REPO_ROOT}/analyse_runs.py"
-MCMC_DIR="/ptmp/jwuerzin/data/19250082"
+MCMC_DIR="/ptmp/jwuerzin/data/neutralino_v4"
 OUT_BASE="/ptmp/jwuerzin/analysis"
 
 # =============================================================================

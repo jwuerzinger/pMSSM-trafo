@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)-8s] %(message)s")
 
-    output_dir = Path("plots/mcmc_histograms_19250082")
+    output_dir = Path("plots/mcmc_histograms_neutralino_v4")
     output_dir.mkdir(parents=True, exist_ok=True)
 
     logger.info("Loading MCMC data...")

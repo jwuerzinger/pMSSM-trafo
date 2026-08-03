@@ -398,7 +398,7 @@ def load_config_with_sweep(config_file, sweep_index=None):
               help="Compute comprehensive GoF metrics (accuracy, chi2, pulls, etc.).")
 @click.option('--eval-data-path', default=None, type=str, help="Path to true eval dataset (ROOT/CSV).")
 @click.option('--mcmc-data-dir', default=None, type=str,
-              help="Directory containing MCMC ROOT files for static evaluation (e.g. data/19250082).")
+              help="Directory containing MCMC ROOT files for static evaluation (e.g. data/neutralino_v4).")
 @click.option('--static-eval-size', default=100_000, type=int,
               help="Number of models to reserve from the random pool as a static evaluation set (default: 100000).")
 @click.option('--track-lengthscales/--no-track-lengthscales', default=True,

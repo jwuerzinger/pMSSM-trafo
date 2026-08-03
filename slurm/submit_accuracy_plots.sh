@@ -89,6 +89,14 @@ if [[ -n "${SWEEP_ID:-}" ]]; then
     EXTRA_FLAGS+=(--sweep-id "${SWEEP_ID}")
     echo "[opt] sweep-id: ${SWEEP_ID}"
 fi
+if [[ "${VETO:-0}" == "1" ]]; then
+    EXTRA_FLAGS+=(--require-neutralino-lsp)
+    echo "[opt] neutralino-LSP veto: ON"
+fi
+if [[ -n "${OUTPUT_DIR:-}" ]]; then
+    EXTRA_FLAGS+=(--output-dir "${OUTPUT_DIR}")
+    echo "[opt] output dir: ${OUTPUT_DIR}"
+fi
 
 DATA_DIR="${CLUSTER_DATA_DIR:-/ptmp/jwuerzin/data}"
 
@@ -96,7 +104,7 @@ DATA_DIR="${CLUSTER_DATA_DIR:-/ptmp/jwuerzin/data}"
     --compute-accuracy \
     --accuracy-device "${ACC_DEVICE}" \
     --baseline-data-dir "${DATA_DIR}/18387358" \
-    --mcmc-data-dir "${DATA_DIR}/19250082" \
+    --mcmc-data-dir "${DATA_DIR}/neutralino_v4" \
     "${EXTRA_FLAGS[@]}"
 
 echo "=========================================="
