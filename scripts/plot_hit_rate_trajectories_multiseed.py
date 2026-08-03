@@ -1584,7 +1584,9 @@ def _finalize_split_legend(fig, axes, *, color_handles, style_handles,
 def plot_models_per_strategy(traj, tols, uncertainty, true_val, out_dir,
                              file_prefix, title_word, ylabel,
                              baseline_traj=None, prevalence=None,
-                             prevalence_label="random scan (full pool)"):
+                             prevalence_label="random scan (full pool)",
+                             mcmc_yield=None,
+                             mcmc_yield_label="emcee MCMC (distinct in-band / call)"):
     """One figure per strategy; lines are (model, warm) combos for that strategy.
 
     Each figure has 1 row × len(tols) cols (default 3 panels: 10/20/50%).
@@ -1631,6 +1633,12 @@ def plot_models_per_strategy(traj, tols, uncertainty, true_val, out_dir,
                 ax.text(0.99, prevalence[tol], f" {prevalence[tol]:.4f}",
                         transform=ax.get_yaxis_transform(), ha="right", va="bottom",
                         fontsize=10, color="black")
+            if mcmc_yield is not None and tol in mcmc_yield:
+                ax.axhline(mcmc_yield[tol], color="firebrick", linestyle="-.",
+                           linewidth=1.4, label=None)
+                ax.text(0.99, mcmc_yield[tol], f" {mcmc_yield[tol]:.4f}",
+                        transform=ax.get_yaxis_transform(), ha="right", va="top",
+                        fontsize=10, color="firebrick")
 
         # Model legend (colour key) + Warm-start legend (linestyle/marker key).
         models_present = list(dict.fromkeys(m for (m, _, _) in sorted(cfgs)))
@@ -1652,6 +1660,11 @@ def plot_models_per_strategy(traj, tols, uncertainty, true_val, out_dir,
                 [0], [0], color="black", linestyle=":", lw=1.4,
                 label=prevalence_label,
             ))
+        if mcmc_yield:
+            style_handles.append(Line2D(
+                [0], [0], color="firebrick", linestyle="-.", lw=1.4,
+                label=mcmc_yield_label,
+            ))
 
         out_path = out_dir / f"{file_prefix}_strategy_{strat}.png"
         _finalize_split_legend(
@@ -1667,7 +1680,9 @@ def plot_models_per_strategy(traj, tols, uncertainty, true_val, out_dir,
 def plot_strategies_per_model(traj, tols, uncertainty, true_val, out_dir,
                               file_prefix, title_word, ylabel,
                               baseline_traj=None, prevalence=None,
-                              prevalence_label="random scan (full pool)"):
+                              prevalence_label="random scan (full pool)",
+                              mcmc_yield=None,
+                              mcmc_yield_label="emcee MCMC (distinct in-band / call)"):
     """One figure per model; lines are (strategy, warm) combos for that model.
 
     Mirror of `plot_models_per_strategy` with model and strategy roles swapped.
@@ -1715,6 +1730,12 @@ def plot_strategies_per_model(traj, tols, uncertainty, true_val, out_dir,
                 ax.text(0.99, prevalence[tol], f" {prevalence[tol]:.4f}",
                         transform=ax.get_yaxis_transform(), ha="right", va="bottom",
                         fontsize=10, color="black")
+            if mcmc_yield is not None and tol in mcmc_yield:
+                ax.axhline(mcmc_yield[tol], color="firebrick", linestyle="-.",
+                           linewidth=1.4, label=None)
+                ax.text(0.99, mcmc_yield[tol], f" {mcmc_yield[tol]:.4f}",
+                        transform=ax.get_yaxis_transform(), ha="right", va="top",
+                        fontsize=10, color="firebrick")
 
         # Strategy legend (colour key) + Warm-start legend (linestyle key).
         strategies_present = list(dict.fromkeys(s for (_, s, _) in sorted(cfgs)))
@@ -1734,6 +1755,11 @@ def plot_strategies_per_model(traj, tols, uncertainty, true_val, out_dir,
             style_handles.append(Line2D(
                 [0], [0], color="black", linestyle=":", lw=1.4,
                 label=prevalence_label,
+            ))
+        if mcmc_yield:
+            style_handles.append(Line2D(
+                [0], [0], color="firebrick", linestyle="-.", lw=1.4,
+                label=mcmc_yield_label,
             ))
 
         out_path = out_dir / f"{file_prefix}_model_{model}.png"
@@ -1798,7 +1824,9 @@ def _best_setting_for_model(traj, model, tols, iter_completeness=0.9):
 def plot_oracle_comparison(traj, tols, uncertainty, true_val, out_dir,
                            file_prefix, title_word, ylabel,
                            prevalence=None,
-                           prevalence_label="random scan (full pool)"):
+                           prevalence_label="random scan (full pool)",
+                           mcmc_yield=None,
+                           mcmc_yield_label="emcee MCMC (distinct in-band / call)"):
     """Render the theoretical-limit oracle comparison plot.
 
     Shows, side by side on the same axes per tolerance panel:
@@ -1873,6 +1901,12 @@ def plot_oracle_comparison(traj, tols, uncertainty, true_val, out_dir,
             ax.text(0.99, prevalence[tol], f" {prevalence[tol]:.4f}",
                     transform=ax.get_yaxis_transform(), ha="right", va="bottom",
                     fontsize=8, color="black")
+        if mcmc_yield is not None and tol in mcmc_yield:
+            ax.axhline(mcmc_yield[tol], color="firebrick", linestyle="-.",
+                       linewidth=1.4, label=None)
+            ax.text(0.99, mcmc_yield[tol], f" {mcmc_yield[tol]:.4f}",
+                    transform=ax.get_yaxis_transform(), ha="right", va="top",
+                    fontsize=8, color="firebrick")
 
     # Model legend (colour key) + Curve legend (regular vs oracle).
     color_handles = []
@@ -1903,6 +1937,11 @@ def plot_oracle_comparison(traj, tols, uncertainty, true_val, out_dir,
             [0], [0], color="black", linestyle=":", lw=1.4,
             label=prevalence_label,
         ))
+    if mcmc_yield:
+        style_handles.append(Line2D(
+            [0], [0], color="firebrick", linestyle="-.", lw=1.4,
+            label=mcmc_yield_label,
+        ))
 
     out_path = out_dir / f"{file_prefix}_oracle_comparison.png"
     _finalize_split_legend(
@@ -1918,7 +1957,9 @@ def plot_oracle_comparison(traj, tols, uncertainty, true_val, out_dir,
 def plot_best_per_model(traj, tols, uncertainty, true_val, out_dir,
                         file_prefix, title_word, ylabel,
                         baseline_traj=None, prevalence=None,
-                        prevalence_label="random scan (full pool)"):
+                        prevalence_label="random scan (full pool)",
+                        mcmc_yield=None,
+                        mcmc_yield_label="emcee MCMC (distinct in-band / call)"):
     """Single figure: one curve per model using its best (strategy, warm) setting.
 
     If `baseline_traj` is provided (same {(model, strat, warm): {tol: ...}}
@@ -1970,6 +2011,12 @@ def plot_best_per_model(traj, tols, uncertainty, true_val, out_dir,
         if prevalence is not None and tol in prevalence:
             ax.axhline(prevalence[tol], color="black", linestyle=":", linewidth=1.4,
                        label=None)
+        if mcmc_yield is not None and tol in mcmc_yield:
+            ax.axhline(mcmc_yield[tol], color="firebrick", linestyle="-.",
+                       linewidth=1.4, label=None)
+            ax.text(0.99, mcmc_yield[tol], f" {mcmc_yield[tol]:.4f}",
+                    transform=ax.get_yaxis_transform(), ha="right", va="top",
+                    fontsize=8, color="firebrick")
 
     # Build split legends: Model (colour key) + Curve (linestyle key).
     color_handles = []
@@ -1989,6 +2036,11 @@ def plot_best_per_model(traj, tols, uncertainty, true_val, out_dir,
         style_handles.append(Line2D(
             [0], [0], color="black", linestyle=":", lw=1.4,
             label=prevalence_label,
+        ))
+    if mcmc_yield:
+        style_handles.append(Line2D(
+            [0], [0], color="firebrick", linestyle="-.", lw=1.4,
+            label=mcmc_yield_label,
         ))
 
     out_path = out_dir / f"{file_prefix}_best_per_model.png"
@@ -2052,6 +2104,14 @@ def plot_best_per_model(traj, tols, uncertainty, true_val, out_dir,
               help="Seeded uniform subsample cap on the MCMC eval set (emcee "
                    "chains store ~96% repeated rows; the subsample preserves "
                    "multiplicity weighting). 0 disables.")
+@click.option("--mcmc-yield-json",
+              default="/ptmp/jwuerzin/analysis/all_runs/yield_comparison.json",
+              show_default=True,
+              help="yield_comparison.json from scripts/compute_yield_comparison.py. "
+                   "When present, the MCMC distinct-in-band yield is drawn as a "
+                   "horizontal reference line on the hit-rate and hits/desired "
+                   "plots (per-attempt on hits/desired; divided by p_valid on "
+                   "the per-valid-sample hit-rate axis). Missing file = no line.")
 @click.option("--accuracy-device", default=None,
               help="Torch device for accuracy recompute (e.g. cuda:0). "
                    "Default: cuda if available, else cpu.")
@@ -2074,8 +2134,8 @@ def plot_best_per_model(traj, tols, uncertainty, true_val, out_dir,
                    "is rebased so per-iteration slicing stays consistent.")
 def main(manifest, sweep_id, output_dir, uncertainty, target, tolerances,
          min_seeds, include_status, baseline_data_dir,
-         compute_accuracy, mcmc_data_dir, mcmc_max_samples, accuracy_device,
-         accuracy_cache_refresh,
+         compute_accuracy, mcmc_data_dir, mcmc_max_samples, mcmc_yield_json,
+         accuracy_device, accuracy_cache_refresh,
          accuracy_static_eval_size, accuracy_dropout,
          require_neutralino_lsp):
     global _REQUIRE_NEUTRALINO_LSP
@@ -2148,6 +2208,29 @@ def main(manifest, sweep_id, output_dir, uncertainty, target, tolerances,
             prevalence = None
             prevalence_per_attempt = None
 
+    # ── MCMC distinct-in-band yield (horizontal reference lines) ─────────────
+    # Produced by scripts/compute_yield_comparison.py; per-attempt units.
+    mcmc_yield_by_tol: dict[float, float] = {}
+    if mcmc_yield_json:
+        try:
+            with open(mcmc_yield_json) as fh:
+                _ydata = json.load(fh)
+            per_tol = (_ydata.get("mcmc") or {}).get("per_tolerance") or {}
+            for t_str, vals in per_tol.items():
+                y = vals.get("yield_whole_run")
+                if y:
+                    mcmc_yield_by_tol[float(t_str)] = float(y)
+            if mcmc_yield_by_tol:
+                click.echo("[mcmc-yield] reference lines (per attempt): "
+                           + ", ".join(f"tol={int(t*100)}%→{y:.4f}"
+                                       for t, y in sorted(mcmc_yield_by_tol.items())))
+        except FileNotFoundError:
+            click.echo(f"[mcmc-yield] {mcmc_yield_json} not found — "
+                       "no MCMC reference lines drawn")
+        except Exception as exc:
+            click.echo(f"[warn] mcmc-yield json unreadable ({exc}); "
+                       "skipping MCMC reference lines", err=True)
+
     written = []
     picks_by_metric: dict[str, list] = {}
     traj_by_metric: dict[str, dict] = {}
@@ -2178,23 +2261,40 @@ def main(manifest, sweep_id, output_dir, uncertainty, target, tolerances,
         else:
             prev_for_metric = prevalence
             prev_label = "random scan (full pool)"
+        # MCMC distinct-in-band yield reference line, unit-matched per metric:
+        # native per-attempt units on hits/desired; divided by p_valid on the
+        # per-valid-sample hit_rate axis (the same conversion the random
+        # baseline undergoes between the two plot families).
+        mcmc_for_metric = None
+        mcmc_label = None
+        if mcmc_yield_by_tol:
+            if metric_name == "hits_per_desired":
+                mcmc_for_metric = dict(mcmc_yield_by_tol)
+                mcmc_label = "emcee MCMC (distinct in-band / attempt)"
+            elif p_valid is not None:
+                mcmc_for_metric = {t: y / p_valid
+                                   for t, y in mcmc_yield_by_tol.items()}
+                mcmc_label = "emcee MCMC (per valid-sample equiv.)"
         written += plot_models_per_strategy(
             traj, tols, uncertainty, true_val, out_dir,
             file_prefix=file_prefix, title_word=title_word, ylabel=ylabel,
             baseline_traj=baseline_traj, prevalence=prev_for_metric,
             prevalence_label=prev_label,
+            mcmc_yield=mcmc_for_metric, mcmc_yield_label=mcmc_label,
         )
         written += plot_strategies_per_model(
             traj, tols, uncertainty, true_val, out_dir,
             file_prefix=file_prefix, title_word=title_word, ylabel=ylabel,
             baseline_traj=baseline_traj, prevalence=prev_for_metric,
             prevalence_label=prev_label,
+            mcmc_yield=mcmc_for_metric, mcmc_yield_label=mcmc_label,
         )
         paths, picks = plot_best_per_model(
             traj, tols, uncertainty, true_val, out_dir,
             file_prefix=file_prefix, title_word=title_word, ylabel=ylabel,
             baseline_traj=baseline_traj, prevalence=prev_for_metric,
             prevalence_label=prev_label,
+            mcmc_yield=mcmc_for_metric, mcmc_yield_label=mcmc_label,
         )
         written += paths
         picks_by_metric[metric_name] = picks
@@ -2205,6 +2305,7 @@ def main(manifest, sweep_id, output_dir, uncertainty, target, tolerances,
             file_prefix=file_prefix, title_word=title_word, ylabel=ylabel,
             prevalence=prev_for_metric,
             prevalence_label=prev_label,
+            mcmc_yield=mcmc_for_metric, mcmc_yield_label=mcmc_label,
         )
 
     # ── Scan-efficiency improvement: AL → random ratio (per-attempt basis) ───

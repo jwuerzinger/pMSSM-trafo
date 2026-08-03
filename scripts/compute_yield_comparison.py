@@ -49,27 +49,29 @@ import plot_hit_rate_trajectories_multiseed as phr  # noqa: E402
 _DIAG_ITER_RE = re.compile(r"iterations=(\d+)\s+nwalkers=(\d+)")
 
 
-def mcmc_yield(mcmc_data_dir: str, tol: float) -> dict:
+def mcmc_yield(mcmc_data_dir: str, tols: list[float]) -> dict:
     """Distinct in-band states per proposal for an emcee-era dataset.
 
     Distinctness is keyed on (IN_M_1, IN_M_2, IN_mu) — continuous parameters,
     so collisions between genuinely different models are negligible while
-    walker-repeat rows collapse exactly.
+    walker-repeat rows collapse exactly. Computed at every tolerance in
+    `tols`; the first entry is the primary one echoed in the table.
     """
     import uproot
 
     true_value = 0.12
     tot_rows = 0
-    distinct_inband = 0
+    distinct_inband = {t: 0 for t in tols}
     for fn in sorted(glob.glob(f"{mcmc_data_dir}/*.root")):
         t = uproot.open(fn)["susy"]
         om = t["MO_Omega"].array(library="np")
         key = np.stack([t["IN_M_1"].array(library="np"),
                         t["IN_M_2"].array(library="np"),
                         t["IN_mu"].array(library="np")], axis=1)
-        inband = np.abs(om - true_value) / true_value < tol
         tot_rows += len(om)
-        distinct_inband += len(np.unique(key[inband], axis=0))
+        for tol in tols:
+            inband = np.abs(om - true_value) / true_value < tol
+            distinct_inband[tol] += len(np.unique(key[inband], axis=0))
 
     diag_txt = Path(mcmc_data_dir) / "diag" / "diagnostics.txt"
     proposals = None
@@ -81,12 +83,21 @@ def mcmc_yield(mcmc_data_dir: str, tol: float) -> dict:
         click.echo(f"[yield] WARNING: {diag_txt} missing or unparseable — "
                    "cannot count burn-in proposals; whole-run yield "
                    "unavailable, reporting post-burn-in only", err=True)
+    tol0 = tols[0]
     return {
         "stored_rows": tot_rows,
-        "distinct_inband": distinct_inband,
+        "distinct_inband": distinct_inband[tol0],
         "total_proposals": proposals,
-        "yield_whole_run": (distinct_inband / proposals) if proposals else None,
-        "yield_post_burnin": distinct_inband / tot_rows,
+        "yield_whole_run": (distinct_inband[tol0] / proposals) if proposals else None,
+        "yield_post_burnin": distinct_inband[tol0] / tot_rows,
+        "per_tolerance": {
+            str(tol): {
+                "distinct_inband": distinct_inband[tol],
+                "yield_whole_run": (distinct_inband[tol] / proposals) if proposals else None,
+                "yield_post_burnin": distinct_inband[tol] / tot_rows,
+            }
+            for tol in tols
+        },
     }
 
 
@@ -133,14 +144,22 @@ def al_yields(manifest: str, tol: float, require_neutralino_lsp: bool,
               show_default=True,
               help="Where yield_comparison.json is written (also used as the "
                    "Y-pool .npy cache dir).")
-@click.option("--tolerance", default=0.10, type=float, show_default=True)
+@click.option("--tolerance", default=0.10, type=float, show_default=True,
+              help="Primary tolerance for the printed table and the AL side.")
+@click.option("--mcmc-tolerances", default="0.1,0.2,0.5", show_default=True,
+              help="Comma-separated tolerances at which the MCMC yield is "
+                   "additionally computed (consumed by the hit-rate plots' "
+                   "reference lines). The primary --tolerance is always "
+                   "included first.")
 @click.option("--require-neutralino-lsp/--no-require-neutralino-lsp",
               default=False, show_default=True)
 def main(manifest, mcmc_data_dir, baseline_data_dir, output_dir, tolerance,
-         require_neutralino_lsp):
+         mcmc_tolerances, require_neutralino_lsp):
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     true_value = 0.12
+    tols = [tolerance] + [float(s) for s in mcmc_tolerances.split(",")
+                          if s.strip() and abs(float(s) - tolerance) > 1e-12]
 
     # ── random-scan baseline ────────────────────────────────────────────────
     Y_full = phr._load_y_full(baseline_data_dir, "DMRD", out_dir)
@@ -156,7 +175,7 @@ def main(manifest, mcmc_data_dir, baseline_data_dir, output_dir, tolerance,
                f"-> random per-attempt yield {random_yield:.4f}")
 
     # ── MCMC ────────────────────────────────────────────────────────────────
-    m = mcmc_yield(mcmc_data_dir, tolerance)
+    m = mcmc_yield(mcmc_data_dir, tols)
     click.echo(f"[yield] MCMC: {m['distinct_inband']:,} distinct in-band states, "
                f"{m['stored_rows']:,} stored rows, "
                f"{m['total_proposals'] and format(m['total_proposals'], ',')} proposals")
