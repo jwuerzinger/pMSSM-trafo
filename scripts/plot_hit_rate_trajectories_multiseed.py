@@ -782,9 +782,11 @@ def _accuracy_for_iter(model_type: str, role: str, iter_dir: Path,
         Y_true_t = transform_y(Y_d.float(), target=target).numpy().ravel().astype(np.float64)
 
         ds_t0 = time.time()
-        if model_type in ("transformer", "dnn"):
+        if model_type in ("transformer", "dnn", "dnn_match_trafo"):
             # PMSSMFeedForward shares the (B,19)->(B,1) interface so the same
-            # mean/std-normalised forward path works for both architectures.
+            # mean/std-normalised forward path works for all three
+            # architectures (the matched DNN is a width-scaled PMSSMFeedForward,
+            # reloaded by the dnn_match_trafo branch of the checkpoint loader).
             y_pred_t = _predict_transformer_t(model, X_d.float(), stats, device)
         elif model_type in ("exact_gp", "deep_gp", "sparse_gp"):
             jitter = float(run_kwargs.get("jitter", 1e-3) or 1e-3)
