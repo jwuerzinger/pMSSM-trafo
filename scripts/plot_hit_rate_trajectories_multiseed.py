@@ -820,13 +820,28 @@ def _classification_accuracy_trajectory(run, run_dir: str, seed: int,
                                         X_mcmc: torch.Tensor, Y_mcmc: torch.Tensor,
                                         threshold_t: float, device: str,
                                         refresh: bool = False,
-                                        dropout: float = 0.1) -> dict:
+                                        dropout: float = 0.1,
+                                        cache_only: bool = False) -> dict:
     """Build {role: {dataset: [(iter, acc), ...]}} for one seed run.
 
     Cache hits short-circuit per iteration; misses load the iter's checkpoints
     and run inference. The result is also written back to
-    `<run_dir>/accuracy_trajectory.json`.
+    `<run_dir>/accuracy_trajectory.json`. With ``cache_only`` (TabPFN: no
+    reloadable weights) the cache is harvested verbatim and nothing is
+    computed; ``refresh`` is ignored since recompute is impossible.
     """
+    if cache_only:
+        cache = _load_accuracy_cache(Path(run_dir))
+        out = {role: {ds: [] for ds in ACC_DATASETS} for role in ACC_ROLES}
+        for key in sorted(cache, key=lambda k: int(k) if str(k).isdigit() else 0):
+            cache_iter = cache[key]
+            if not isinstance(cache_iter, dict) or not str(key).isdigit():
+                continue
+            for role in ACC_ROLES:
+                for ds, v in (cache_iter.get(role) or {}).items():
+                    if ds in ACC_DATASETS and v is not None and v == v:
+                        out[role][ds].append((int(key), float(v)))
+        return out
     # Oracle / theoretical-limit runs are tagged "<model>_oracle" in the
     # manifest so they appear as separate plot entries, but their on-disk
     # checkpoints are saved by the same per-model AL pipeline, so the
@@ -984,12 +999,18 @@ def _collect_accuracy_trajectories(df, picks, target: str, X_full: np.ndarray,
 
     out: dict = {}
     for pick_idx, (model, strat, warm, _tu, _sc) in enumerate(picks, start=1):
-        if model == "tabpfn":
-            click.echo(f"[accuracy] [{pick_idx}/{len(picks)}] skipping {model}-{strat}-{warm}: "
-                       "TabPFN saves no per-iter checkpoint, would require re-running AL.",
-                       err=True)
+        # TabPFN saves no per-iteration checkpoint, so post-hoc recompute is
+        # impossible — but the AL driver writes accuracy_trajectory.json at
+        # run time (pmssm.accuracy.write_iter_accuracies), so harvest that
+        # cache as-is. Note: cached values reflect the eval sets the RUN
+        # loaded, so they only match the other picks for runs launched
+        # against the same --mcmc-data-dir.
+        cache_only = model.startswith("tabpfn")
+        if cache_only:
+            click.echo(f"[accuracy] [{pick_idx}/{len(picks)}] {model}-{strat}-{warm}: "
+                       "cache-only (run-time accuracy_trajectory.json; no "
+                       "checkpoint recompute possible)")
             sys.stdout.flush()
-            continue
         sub = df[(df["model"] == model) & (df["strategy"] == strat)
                  & (df["warm_start"] == warm)]
         click.echo(f"[accuracy] [{pick_idx}/{len(picks)}] pick {model}-{strat}-{warm}: "
@@ -1018,6 +1039,7 @@ def _collect_accuracy_trajectories(df, picks, target: str, X_full: np.ndarray,
                     run, run_dir, seed, model, X_full, Y_full,
                     X_static, Y_static, X_mcmc, Y_mcmc, threshold_t,
                     device=device, refresh=refresh, dropout=dropout,
+                    cache_only=cache_only,
                 )
             except Exception as exc:
                 click.echo(f"[warn] accuracy: failed for {run_dir}: {exc}", err=True)
