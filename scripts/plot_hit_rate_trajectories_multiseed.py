@@ -1630,15 +1630,9 @@ def plot_models_per_strategy(traj, tols, uncertainty, true_val, out_dir,
             if prevalence is not None and tol in prevalence:
                 ax.axhline(prevalence[tol], color="black", linestyle=":", linewidth=1.4,
                            label=None)
-                ax.text(0.99, prevalence[tol], f" {prevalence[tol]:.4f}",
-                        transform=ax.get_yaxis_transform(), ha="right", va="bottom",
-                        fontsize=10, color="black")
             if mcmc_yield is not None and tol in mcmc_yield:
-                ax.axhline(mcmc_yield[tol], color="firebrick", linestyle="-.",
+                ax.axhline(mcmc_yield[tol], color="black", linestyle="-.",
                            linewidth=1.4, label=None)
-                ax.text(0.99, mcmc_yield[tol], f" {mcmc_yield[tol]:.4f}",
-                        transform=ax.get_yaxis_transform(), ha="right", va="top",
-                        fontsize=10, color="firebrick")
 
         # Model legend (colour key) + Warm-start legend (linestyle/marker key).
         models_present = list(dict.fromkeys(m for (m, _, _) in sorted(cfgs)))
@@ -1662,7 +1656,7 @@ def plot_models_per_strategy(traj, tols, uncertainty, true_val, out_dir,
             ))
         if mcmc_yield:
             style_handles.append(Line2D(
-                [0], [0], color="firebrick", linestyle="-.", lw=1.4,
+                [0], [0], color="black", linestyle="-.", lw=1.4,
                 label=mcmc_yield_label,
             ))
 
@@ -1727,15 +1721,9 @@ def plot_strategies_per_model(traj, tols, uncertainty, true_val, out_dir,
             if prevalence is not None and tol in prevalence:
                 ax.axhline(prevalence[tol], color="black", linestyle=":", linewidth=1.4,
                            label=None)
-                ax.text(0.99, prevalence[tol], f" {prevalence[tol]:.4f}",
-                        transform=ax.get_yaxis_transform(), ha="right", va="bottom",
-                        fontsize=10, color="black")
             if mcmc_yield is not None and tol in mcmc_yield:
-                ax.axhline(mcmc_yield[tol], color="firebrick", linestyle="-.",
+                ax.axhline(mcmc_yield[tol], color="black", linestyle="-.",
                            linewidth=1.4, label=None)
-                ax.text(0.99, mcmc_yield[tol], f" {mcmc_yield[tol]:.4f}",
-                        transform=ax.get_yaxis_transform(), ha="right", va="top",
-                        fontsize=10, color="firebrick")
 
         # Strategy legend (colour key) + Warm-start legend (linestyle key).
         strategies_present = list(dict.fromkeys(s for (_, s, _) in sorted(cfgs)))
@@ -1758,7 +1746,7 @@ def plot_strategies_per_model(traj, tols, uncertainty, true_val, out_dir,
             ))
         if mcmc_yield:
             style_handles.append(Line2D(
-                [0], [0], color="firebrick", linestyle="-.", lw=1.4,
+                [0], [0], color="black", linestyle="-.", lw=1.4,
                 label=mcmc_yield_label,
             ))
 
@@ -1898,15 +1886,9 @@ def plot_oracle_comparison(traj, tols, uncertainty, true_val, out_dir,
         if prevalence is not None and tol in prevalence:
             ax.axhline(prevalence[tol], color="black", linestyle=":", linewidth=1.4,
                        label=None)
-            ax.text(0.99, prevalence[tol], f" {prevalence[tol]:.4f}",
-                    transform=ax.get_yaxis_transform(), ha="right", va="bottom",
-                    fontsize=8, color="black")
         if mcmc_yield is not None and tol in mcmc_yield:
-            ax.axhline(mcmc_yield[tol], color="firebrick", linestyle="-.",
+            ax.axhline(mcmc_yield[tol], color="black", linestyle="-.",
                        linewidth=1.4, label=None)
-            ax.text(0.99, mcmc_yield[tol], f" {mcmc_yield[tol]:.4f}",
-                    transform=ax.get_yaxis_transform(), ha="right", va="top",
-                    fontsize=8, color="firebrick")
 
     # Model legend (colour key) + Curve legend (regular vs oracle).
     color_handles = []
@@ -1939,7 +1921,7 @@ def plot_oracle_comparison(traj, tols, uncertainty, true_val, out_dir,
         ))
     if mcmc_yield:
         style_handles.append(Line2D(
-            [0], [0], color="firebrick", linestyle="-.", lw=1.4,
+            [0], [0], color="black", linestyle="-.", lw=1.4,
             label=mcmc_yield_label,
         ))
 
@@ -2012,11 +1994,8 @@ def plot_best_per_model(traj, tols, uncertainty, true_val, out_dir,
             ax.axhline(prevalence[tol], color="black", linestyle=":", linewidth=1.4,
                        label=None)
         if mcmc_yield is not None and tol in mcmc_yield:
-            ax.axhline(mcmc_yield[tol], color="firebrick", linestyle="-.",
+            ax.axhline(mcmc_yield[tol], color="black", linestyle="-.",
                        linewidth=1.4, label=None)
-            ax.text(0.99, mcmc_yield[tol], f" {mcmc_yield[tol]:.4f}",
-                    transform=ax.get_yaxis_transform(), ha="right", va="top",
-                    fontsize=8, color="firebrick")
 
     # Build split legends: Model (colour key) + Curve (linestyle key).
     color_handles = []
@@ -2039,7 +2018,7 @@ def plot_best_per_model(traj, tols, uncertainty, true_val, out_dir,
         ))
     if mcmc_yield:
         style_handles.append(Line2D(
-            [0], [0], color="firebrick", linestyle="-.", lw=1.4,
+            [0], [0], color="black", linestyle="-.", lw=1.4,
             label=mcmc_yield_label,
         ))
 

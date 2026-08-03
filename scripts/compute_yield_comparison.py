@@ -42,7 +42,11 @@ for _p in (str(_REPO_ROOT), str(_REPO_ROOT / "scripts")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from analyse_runs import filter_run_neutralino_lsp, load_run  # noqa: E402
+from analyse_runs import (  # noqa: E402
+    compute_hit_rate_trajectory,
+    filter_run_neutralino_lsp,
+    load_run,
+)
 from mcmc_diagnostics import DEFAULT_AL_PICKS  # noqa: E402
 import plot_hit_rate_trajectories_multiseed as phr  # noqa: E402
 
@@ -103,13 +107,15 @@ def mcmc_yield(mcmc_data_dir: str, tols: list[float]) -> dict:
 
 def al_yields(manifest: str, tol: float, require_neutralino_lsp: bool,
               p_valid: float) -> dict:
-    """Final cumulative hits/desired (attempt units) per best-per-model cell."""
+    """Per best-per-model cell: final cumulative hits/desired (attempt units)
+    AND final hit rate (per valid retained training point) — the two unit
+    systems of the paper's yield table."""
     phr._DESIRED_P_VALID = p_valid
     rows = [r for r in csv.DictReader(open(manifest))
             if r["status"] == "completed"]
     out = {}
     for model, (strat, warm) in DEFAULT_AL_PICKS.items():
-        finals = []
+        finals, finals_valid = [], []
         for r in rows:
             if (r["model"], r["strategy"], r["warm_start"]) != (model, strat, warm):
                 continue
@@ -123,11 +129,16 @@ def al_yields(manifest: str, tol: float, require_neutralino_lsp: bool,
             _, rates = phr._hits_per_desired_trajectory(run, 0.12, tol)
             if rates:
                 finals.append(rates[-1])
+            _, hr = compute_hit_rate_trajectory(run, 0.12, tol)
+            if hr:
+                finals_valid.append(hr[-1])
         if finals:
             f = np.asarray(finals, dtype=float)
+            fv = np.asarray(finals_valid, dtype=float)
             sem = f.std(ddof=1) / np.sqrt(len(f)) if len(f) > 1 else 0.0
             out[model] = {"strategy": strat, "warm": warm, "n_seeds": len(f),
-                          "yield": float(f.mean()), "sem": float(sem)}
+                          "yield": float(f.mean()), "sem": float(sem),
+                          "yield_per_valid": float(fv.mean()) if len(fv) else None}
     return out
 
 
@@ -184,15 +195,26 @@ def main(manifest, mcmc_data_dir, baseline_data_dir, output_dir, tolerance,
     al = al_yields(manifest, tolerance, require_neutralino_lsp, p_valid)
 
     # ── table ───────────────────────────────────────────────────────────────
-    rows = [("Random scan", random_yield)]
+    # Two unit systems: "per attempt" (one simulator call — the common
+    # currency) and "per valid sample" (the hit-rate plots' axis). The AL and
+    # random rows are natively measured in both; MCMC has no native
+    # valid-sample denominator, so its valid column is the per-attempt yield
+    # divided by the random-scan p_valid (marked *) — the same conversion that
+    # relates the random baseline between the two unit systems.
+    rows = [("Random scan", random_yield, prevalence)]
     if m["yield_whole_run"]:
-        rows.append(("emcee reference (incl. burn-in)", m["yield_whole_run"]))
-    rows.append(("emcee reference (excl. burn-in)", m["yield_post_burnin"]))
-    rows += [(f"{k} ({v['strategy']}/{v['warm']}, n={v['n_seeds']})", v["yield"])
+        rows.append(("emcee reference (incl. burn-in) *",
+                     m["yield_whole_run"], m["yield_whole_run"] / p_valid))
+    rows.append(("emcee reference (excl. burn-in) *",
+                 m["yield_post_burnin"], m["yield_post_burnin"] / p_valid))
+    rows += [(f"{k} ({v['strategy']}/{v['warm']}, n={v['n_seeds']})",
+              v["yield"], v["yield_per_valid"])
              for k, v in sorted(al.items(), key=lambda kv: kv[1]["yield"])]
-    click.echo(f"\n  {'method':<45s} {'yield/call':>10s} {'vs random':>10s}")
-    for name, y in rows:
-        click.echo(f"  {name:<45s} {y:10.4f} {y/random_yield:9.1f}x")
+    click.echo(f"\n  {'method':<45s} {'per attempt':>11s} {'per valid':>10s} {'vs random':>10s}")
+    for name, y, yv in rows:
+        yv_s = f"{yv:10.4f}" if yv is not None else " " * 10
+        click.echo(f"  {name:<45s} {y:11.4f} {yv_s} {y/random_yield:9.1f}x")
+    click.echo("  (* valid column converted with the random-scan p_valid)")
 
     result = {"tolerance": tolerance, "true_value": true_value,
               "require_neutralino_lsp": require_neutralino_lsp,
