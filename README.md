@@ -560,6 +560,15 @@ python scripts/plot_al_input_target_diagnostics.py \
 
 Ports the array-based plotting helpers from Run3ModelGen's emcee diagnostics to AL runs: for each best-per-model cell of the sweep it pools the seeds' cumulative training sets and writes `corner_<model>.png` (9 free-parameter corner plot with the Ω marginal inset) plus `<param>_vs_Omega_<model>.png` scatter/histogram panels, and renders `corner_mcmc.png` for the MCMC reference in identical styling. `--models deep_gp,transformer` restricts the cells; `--skip-joint-plots` renders corners only.
 
+### Yield comparison: AL vs MCMC vs random (paper Table `tab:yield`)
+
+```bash
+python scripts/compute_yield_comparison.py --require-neutralino-lsp \
+    --output-dir /ptmp/jwuerzin/analysis/all_runs/
+```
+
+Computes the number of **distinct** models inside the ±10 % tolerance band per simulator evaluation for the random scan (band prevalence × p_valid), the emcee MCMC reference (distinct in-band `(M_1, M_2, mu)` states ÷ total proposals, burn-in included; proposal counts parsed from `diag/diagnostics.txt`), and each best-per-model AL cell (final cumulative hits/desired in attempt units). Prints the table and writes `yield_comparison.json`.
+
 ## Slurm Submission
 
 Slurm job scripts live in `slurm/` and read cluster-specific settings (partition, GPU gres) from `slurm/cluster.conf`:
