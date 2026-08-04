@@ -228,6 +228,42 @@ def plot_omega_overlay(samples: dict, outpath: str, true_value: float = 0.12,
     plt.close(fig)
 
 
+def plot_input_overlays(x_samples: dict, param_names, outpath: str):
+    """3x3 grid: density-normalised 1-D marginals of every free input
+    parameter, one overlaid curve per sample, shared x-range per panel.
+
+    x_samples: {label: (N, n_free) array in physical units}.
+    """
+    n = len(param_names)
+    ncols = 3
+    nrows = int(np.ceil(n / ncols))
+    fig, axes = plt.subplots(nrows, ncols, figsize=(4.2 * ncols, 3.1 * nrows))
+    axes = np.atleast_2d(axes)
+    handles, labels = None, None
+    for j, name in enumerate(param_names):
+        ax = axes[j // ncols, j % ncols]
+        lo = min(float(np.nanmin(X[:, j])) for X in x_samples.values())
+        hi = max(float(np.nanmax(X[:, j])) for X in x_samples.values())
+        bins = np.linspace(lo, hi, 51)
+        for label, X in x_samples.items():
+            x = np.asarray(X[:, j], dtype=float)
+            x = x[np.isfinite(x)]
+            ax.hist(x, bins=bins, density=True, histtype="step", lw=1.6,
+                    color=OVERLAY_COLORS.get(label), label=label)
+        ax.set_xlabel(name)
+        ax.set_yticks([])
+        ax.grid(alpha=0.3)
+        if handles is None:
+            handles, labels = ax.get_legend_handles_labels()
+    for k in range(n, nrows * ncols):
+        axes[k // ncols, k % ncols].axis("off")
+    fig.legend(handles, labels, loc="upper center", ncol=min(len(labels), 4),
+               fontsize=10, frameon=True, bbox_to_anchor=(0.5, 1.0))
+    fig.tight_layout(rect=(0, 0, 1, 0.93))
+    fig.savefig(outpath, dpi=150)
+    plt.close(fig)
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Driver
 # ──────────────────────────────────────────────────────────────────────────────
@@ -300,6 +336,7 @@ def main(manifest, output_dir, models, mcmc_data_dir, baseline_data_dir,
         picks = {m: sw for m, sw in picks.items() if m in keep}
 
     omega_samples: dict = {}
+    x_samples: dict = {}
 
     # ── AL cells ─────────────────────────────────────────────────────────────
     run_dirs_per_model = _picks_from_manifest(manifest, picks)
@@ -315,6 +352,7 @@ def main(manifest, output_dir, models, mcmc_data_dir, baseline_data_dir,
         click.echo(f"[al-diag] {model} ({strat}/{warm}): {n_seeds} seeds, "
                    f"{len(X_free)} pooled training points")
         omega_samples[model] = np.asarray(omega).ravel()
+        x_samples[model] = np.asarray(X_free)
         corner_X, corner_y = X_free, omega
         if len(corner_X) > MAX_CORNER:
             idx = rng.choice(len(corner_X), MAX_CORNER, replace=False)
@@ -334,6 +372,7 @@ def main(manifest, output_dir, models, mcmc_data_dir, baseline_data_dir,
         Xb, Yb = phr._load_xy_full(baseline_data_dir, "DMRD", Path(cache_dir))
         Xb_free = np.asarray(Xb)[:, FREE_PARAM_INDICES]
         omega_samples["random pool"] = np.asarray(Yb).ravel()
+        x_samples["random pool"] = Xb_free
         Yb = np.asarray(Yb).ravel()
         if len(Xb_free) > MAX_CORNER:
             idx = rng.choice(len(Xb_free), MAX_CORNER, replace=False)
@@ -354,6 +393,7 @@ def main(manifest, output_dir, models, mcmc_data_dir, baseline_data_dir,
         Ym = (Ym.numpy() if hasattr(Ym, "numpy") else np.asarray(Ym)).ravel()
         Xm_free = Xm[:, FREE_PARAM_INDICES]
         omega_samples["emcee MCMC"] = np.asarray(Ym).ravel()
+        x_samples["emcee MCMC"] = Xm_free
         if len(Xm_free) > MAX_CORNER:
             idx = rng.choice(len(Xm_free), MAX_CORNER, replace=False)
             Xm_free, Ym = Xm_free[idx], Ym[idx]
@@ -367,6 +407,11 @@ def main(manifest, output_dir, models, mcmc_data_dir, baseline_data_dir,
         plot_omega_overlay(omega_samples, str(out_dir / "omega_overlay.png"))
         click.echo(f"[al-diag] wrote omega_overlay.png "
                    f"({', '.join(omega_samples)})")
+    if len(x_samples) >= 2:
+        plot_input_overlays(x_samples, FREE_PARAM_NAMES,
+                            str(out_dir / "input_overlay.png"))
+        click.echo(f"[al-diag] wrote input_overlay.png "
+                   f"({', '.join(x_samples)})")
 
 
 if __name__ == "__main__":
