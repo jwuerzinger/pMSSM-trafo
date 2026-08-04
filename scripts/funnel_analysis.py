@@ -155,6 +155,33 @@ def main(manifest, baseline_data_dir, mcmc_data_dir, cache_dir, output_dir,
                    f"hits-from-funnel {out['al'][model]['hit_share_from_funnel']:.2f}, "
                    f"trajectory {['%.2f' % b for b in blocks]}")
 
+    # ── Omega ladder: composition of the pool by relic-density band ──────────
+    # Explains the low-Omega structure of the overlay figure: light winos
+    # (SU(2) coannihilation) fill the deepest-underabundant bands, and the
+    # median lightest electroweakino-mass parameter climbs decade by decade
+    # (thermal Omega ~ m^2), pushing the in-band population to the heavy
+    # higgsino/bino corner.
+    M1a, M2a, MUa = (np.asarray(X[:, PARAM_ORDER.index(b)])
+                     for b in ("IN_M_1", "IN_M_2", "IN_mu"))
+    Ya = np.asarray(Y).ravel()
+    bands = [("lt_1e-4", Ya < 1e-4),
+             ("1e-4_to_1e-3", (Ya >= 1e-4) & (Ya < 1e-3)),
+             ("1e-3_to_1e-2", (Ya >= 1e-3) & (Ya < 1e-2)),
+             ("1e-2_to_5e-2", (Ya >= 1e-2) & (Ya < 5e-2)),
+             ("inband", np.abs(Ya - true_value) / true_value < tolerance)]
+    out["omega_ladder"] = {}
+    click.echo(f"\n[ladder] {'band':<14s} {'share':>7s} {'bino/wino/higgsino':>20s} {'med min-mass':>13s}")
+    for name, m in bands:
+        stacked = np.stack([np.abs(M1a[m]), np.abs(M2a[m]), np.abs(MUa[m])])
+        key = np.argmin(stacked, axis=0)
+        comp = [float((key == k).mean()) for k in range(3)]
+        med = float(np.median(np.min(stacked, axis=0)))
+        out["omega_ladder"][name] = {"share": float(m.mean()),
+                                     "bino_wino_higgsino": comp,
+                                     "median_min_mass_GeV": med}
+        click.echo(f"[ladder] {name:<14s} {m.mean():7.3f} "
+                   f"{comp[0]:.2f}/{comp[1]:.2f}/{comp[2]:.2f}{'':>8s} {med:10.0f}")
+
     p = Path(output_dir) / "funnel_analysis.json"
     p.write_text(json.dumps(out, indent=2))
     click.echo(f"[funnel] wrote {p}")
