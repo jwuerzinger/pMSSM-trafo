@@ -210,19 +210,28 @@ def plot_omega_overlay(samples: dict, outpath: str, true_value: float = 0.12,
     ax.axvspan(true_value * (1 - tol), true_value * (1 + tol),
                color="gold", alpha=0.25, lw=0,
                label=f"target ±{int(tol*100)}%")
+    vmin, vmax = np.inf, 0.0
     for label, y in samples.items():
         y = np.asarray(y, dtype=float).ravel()
         y = y[np.isfinite(y) & (y > 0)]
-        ax.hist(np.clip(y, bins[0], bins[-1]), bins=bins, density=True,
-                histtype="step", lw=1.8,
-                color=OVERLAY_COLORS.get(label), label=f"{label} (N={len(y):,})")
+        dens, _ = np.histogram(np.clip(y, bins[0], bins[-1]), bins=bins,
+                               density=True)
+        ax.stairs(dens, bins, lw=1.8, color=OVERLAY_COLORS.get(label),
+                  label=f"{label} (N={len(y):,})")
+        pos = dens[dens > 0]
+        if len(pos):
+            vmin = min(vmin, pos.min())
+            vmax = max(vmax, pos.max())
     ax.axvline(true_value, color="black", ls=":", lw=1.2)
     ax.set_xscale("log")
     ax.set_yscale("log")
+    # Pad so every curve's smallest and largest nonzero bin stays visible.
+    if np.isfinite(vmin) and vmax > 0:
+        ax.set_ylim(vmin * 0.5, vmax * 3.0)
     ax.set_xlabel(r"$\Omega_\chi h^2$")
     ax.set_ylabel("density")
     ax.grid(alpha=0.3, which="both")
-    ax.legend(fontsize=9, loc="upper left")
+    ax.legend(fontsize=9, loc="lower left")
     fig.tight_layout()
     fig.savefig(outpath, dpi=150)
     plt.close(fig)
