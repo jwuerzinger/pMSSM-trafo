@@ -223,6 +223,15 @@ def _pooled_cell_data(run_dirs, require_neutralino_lsp):
               show_default=True,
               help="MCMC reference ntuples for corner_mcmc.png. Pass an empty "
                    "string to skip the MCMC corner.")
+@click.option("--baseline-data-dir", default="",
+              help="Random-scan pool ntuples for corner_random.png (e.g. "
+                   "/ptmp/jwuerzin/data/18387358). Empty (default) skips it. "
+                   "Uses the x_full/y_full .npy caches in --output-dir's "
+                   "cache dir when present.")
+@click.option("--cache-dir", default="/ptmp/jwuerzin/analysis/all_runs",
+              show_default=True,
+              help="Where the baseline pool's x_full/y_full .npy caches live "
+                   "(shared with plot_hit_rate_trajectories_multiseed).")
 @click.option("--mcmc-max-samples", default=500_000, type=int, show_default=True,
               help="Seeded uniform subsample cap on the MCMC reference.")
 @click.option("--require-neutralino-lsp/--no-require-neutralino-lsp",
@@ -232,14 +241,16 @@ def _pooled_cell_data(run_dirs, require_neutralino_lsp):
 @click.option("--skip-joint-plots", is_flag=True, default=False,
               help="Only render the corner plots (skip the 9 per-parameter "
                    "input-vs-Omega figures per cell).")
-def main(manifest, output_dir, models, mcmc_data_dir, mcmc_max_samples,
-         require_neutralino_lsp, skip_joint_plots):
+def main(manifest, output_dir, models, mcmc_data_dir, baseline_data_dir,
+         cache_dir, mcmc_max_samples, require_neutralino_lsp, skip_joint_plots):
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(42)
 
     picks = dict(DEFAULT_AL_PICKS)
-    if models:
+    if models == "none":
+        picks = {}
+    elif models:
         keep = {m.strip() for m in models.split(",") if m.strip()}
         unknown = keep - picks.keys()
         if unknown:
@@ -270,6 +281,21 @@ def main(manifest, output_dir, models, mcmc_data_dir, mcmc_max_samples,
         if not skip_joint_plots:
             plot_inputs_vs_target_data(X_free, omega, None, FREE_PARAM_NAMES,
                                        "Omega", str(out_dir), model)
+
+    # ── Random-scan baseline corner ─────────────────────────────────────────
+    if baseline_data_dir:
+        import plot_hit_rate_trajectories_multiseed as phr  # noqa: PLC0415
+        click.echo(f"[al-diag] loading random pool from {baseline_data_dir} ...")
+        Xb, Yb = phr._load_xy_full(baseline_data_dir, "DMRD", Path(cache_dir))
+        Xb_free = np.asarray(Xb)[:, FREE_PARAM_INDICES]
+        Yb = np.asarray(Yb).ravel()
+        if len(Xb_free) > MAX_CORNER:
+            idx = rng.choice(len(Xb_free), MAX_CORNER, replace=False)
+            Xb_free, Yb = Xb_free[idx], Yb[idx]
+        plot_corner(Xb_free, FREE_PARAM_NAMES,
+                    str(out_dir / "corner_random.png"),
+                    target_vals=Yb, target_name="Omega")
+        click.echo("[al-diag] wrote corner_random.png")
 
     # ── MCMC reference corner ────────────────────────────────────────────────
     if mcmc_data_dir:
