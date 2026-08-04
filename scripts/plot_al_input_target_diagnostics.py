@@ -186,6 +186,48 @@ def plot_corner(flat_chain, params, outpath, target_vals=None, target_name=None)
     plt.close(fig)
 
 
+OVERLAY_COLORS = {
+    "random pool":   "dimgray",
+    "emcee MCMC":    "black",
+    "deep_gp":       "tab:green",
+    "transformer":   "tab:blue",
+    "exact_gp":      "tab:orange",
+    "dnn":           "tab:purple",
+    "dnn_match_trafo": "tab:pink",
+    "tabpfn":        "tab:red",
+}
+
+
+def plot_omega_overlay(samples: dict, outpath: str, true_value: float = 0.12,
+                       tol: float = 0.10):
+    """Overlay the Ω marginals of several samples on shared log-log axes.
+
+    samples: {label: 1-D array of Ω values}. Densities are normalised so
+    sample sizes (500k MCMC vs ~100k AL pools) are directly comparable.
+    """
+    fig, ax = plt.subplots(figsize=(7.2, 4.6))
+    bins = np.logspace(-4, 0, 81)
+    ax.axvspan(true_value * (1 - tol), true_value * (1 + tol),
+               color="gold", alpha=0.25, lw=0,
+               label=f"target ±{int(tol*100)}%")
+    for label, y in samples.items():
+        y = np.asarray(y, dtype=float).ravel()
+        y = y[np.isfinite(y) & (y > 0)]
+        ax.hist(np.clip(y, bins[0], bins[-1]), bins=bins, density=True,
+                histtype="step", lw=1.8,
+                color=OVERLAY_COLORS.get(label), label=f"{label} (N={len(y):,})")
+    ax.axvline(true_value, color="black", ls=":", lw=1.2)
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.set_xlabel(r"$\Omega_\chi h^2$")
+    ax.set_ylabel("density")
+    ax.grid(alpha=0.3, which="both")
+    ax.legend(fontsize=9, loc="upper left")
+    fig.tight_layout()
+    fig.savefig(outpath, dpi=150)
+    plt.close(fig)
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Driver
 # ──────────────────────────────────────────────────────────────────────────────
@@ -257,6 +299,8 @@ def main(manifest, output_dir, models, mcmc_data_dir, baseline_data_dir,
             raise click.ClickException(f"unknown model(s): {sorted(unknown)}")
         picks = {m: sw for m, sw in picks.items() if m in keep}
 
+    omega_samples: dict = {}
+
     # ── AL cells ─────────────────────────────────────────────────────────────
     run_dirs_per_model = _picks_from_manifest(manifest, picks)
     for model, run_dirs in run_dirs_per_model.items():
@@ -270,6 +314,7 @@ def main(manifest, output_dir, models, mcmc_data_dir, baseline_data_dir,
             continue
         click.echo(f"[al-diag] {model} ({strat}/{warm}): {n_seeds} seeds, "
                    f"{len(X_free)} pooled training points")
+        omega_samples[model] = np.asarray(omega).ravel()
         corner_X, corner_y = X_free, omega
         if len(corner_X) > MAX_CORNER:
             idx = rng.choice(len(corner_X), MAX_CORNER, replace=False)
@@ -288,6 +333,7 @@ def main(manifest, output_dir, models, mcmc_data_dir, baseline_data_dir,
         click.echo(f"[al-diag] loading random pool from {baseline_data_dir} ...")
         Xb, Yb = phr._load_xy_full(baseline_data_dir, "DMRD", Path(cache_dir))
         Xb_free = np.asarray(Xb)[:, FREE_PARAM_INDICES]
+        omega_samples["random pool"] = np.asarray(Yb).ravel()
         Yb = np.asarray(Yb).ravel()
         if len(Xb_free) > MAX_CORNER:
             idx = rng.choice(len(Xb_free), MAX_CORNER, replace=False)
@@ -307,6 +353,7 @@ def main(manifest, output_dir, models, mcmc_data_dir, baseline_data_dir,
         Xm = Xm.numpy() if hasattr(Xm, "numpy") else np.asarray(Xm)
         Ym = (Ym.numpy() if hasattr(Ym, "numpy") else np.asarray(Ym)).ravel()
         Xm_free = Xm[:, FREE_PARAM_INDICES]
+        omega_samples["emcee MCMC"] = np.asarray(Ym).ravel()
         if len(Xm_free) > MAX_CORNER:
             idx = rng.choice(len(Xm_free), MAX_CORNER, replace=False)
             Xm_free, Ym = Xm_free[idx], Ym[idx]
@@ -314,6 +361,12 @@ def main(manifest, output_dir, models, mcmc_data_dir, baseline_data_dir,
                     str(out_dir / "corner_mcmc.png"),
                     target_vals=Ym, target_name="Omega")
         click.echo("[al-diag] wrote corner_mcmc.png")
+
+    # ── Ω-marginal overlay (all loaded samples, shared log-log axes) ────────
+    if len(omega_samples) >= 2:
+        plot_omega_overlay(omega_samples, str(out_dir / "omega_overlay.png"))
+        click.echo(f"[al-diag] wrote omega_overlay.png "
+                   f"({', '.join(omega_samples)})")
 
 
 if __name__ == "__main__":
