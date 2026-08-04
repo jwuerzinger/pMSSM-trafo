@@ -112,9 +112,18 @@ def _resolve_status(row) -> str:
                    "status (completed/cancelled/failed/etc.). Use this if you "
                    "suspect a row was marked terminal incorrectly. Mutually "
                    "exclusive with --sweep-id.")
+@click.option("--supersede-before", default=None, metavar="SWEEP_ID_PREFIX",
+              help="After refreshing, mark every row whose sweep_id sorts "
+                   "strictly below this cutoff as 'superseded' (sweep_ids are "
+                   "YYYYMMDD_HHMMSS, so string order = time order; a bare date "
+                   "like 20260803 works as cutoff). Use after a full "
+                   "resubmission so the default include-status filters of the "
+                   "plot scripts pick up only the new generation. Rows already "
+                   "superseded are untouched; the flag prints every change.")
 @click.option("--summary/--no-summary", default=True,
               help="Print a per-status count summary at the end.")
-def main(manifest: str, sweep_id: str, refresh_all: bool, summary: bool) -> None:
+def main(manifest: str, sweep_id: str, refresh_all: bool,
+         supersede_before: str, summary: bool) -> None:
     path = Path(manifest)
     if not path.exists():
         raise click.ClickException(f"Manifest not found: {path}")
@@ -146,6 +155,19 @@ def main(manifest: str, sweep_id: str, refresh_all: bool, summary: bool) -> None
             print(f"[update] job_id={df.at[i, 'job_id']} "
                   f"{df.at[i, 'model']}/{df.at[i, 'strategy']}/{df.at[i, 'warm_start']}/"
                   f"seed{df.at[i, 'seed']}: {old} -> {new}")
+
+    if supersede_before:
+        old_gen = (df["sweep_id"].astype(str) < str(supersede_before)) \
+                  & (df["status"].astype(str).str.lower() != "superseded")
+        for i in df.index[old_gen]:
+            print(f"[supersede] sweep={df.at[i, 'sweep_id']} "
+                  f"{df.at[i, 'model']}/{df.at[i, 'strategy']}/"
+                  f"{df.at[i, 'warm_start']}/seed{df.at[i, 'seed']}: "
+                  f"{df.at[i, 'status']} -> superseded")
+        df.loc[old_gen, "status"] = "superseded"
+        updates += int(old_gen.sum())
+        print(f"[supersede] {int(old_gen.sum())} row(s) below cutoff "
+              f"{supersede_before} marked superseded")
 
     df.to_csv(path, index=False)
     print(f"[manifest] wrote {path} with {updates} status change(s)")
