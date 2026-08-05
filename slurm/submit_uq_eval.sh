@@ -74,6 +74,10 @@ if [[ -n "${MODELS:-}" ]]; then
     EXTRA_FLAGS+=(--models "${MODELS}")
     echo "[opt] models: ${MODELS}"
 fi
+if [[ -n "${INCLUDE_STATUS:-}" ]]; then
+    EXTRA_FLAGS+=(--include-status "${INCLUDE_STATUS}")
+    echo "[opt] include-status: ${INCLUDE_STATUS}"
+fi
 if [[ -n "${MC_SAMPLES:-}" ]]; then
     EXTRA_FLAGS+=(--mc-samples "${MC_SAMPLES}")
     echo "[opt] mc-samples: ${MC_SAMPLES}"
