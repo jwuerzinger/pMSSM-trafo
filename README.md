@@ -570,6 +570,23 @@ python scripts/compute_yield_comparison.py --require-neutralino-lsp \
 
 Computes the number of **distinct** models inside the ±10 % tolerance band per simulator evaluation for the random scan (band prevalence × p_valid), the emcee MCMC reference (distinct in-band `(M_1, M_2, mu)` states ÷ total proposals, burn-in included; proposal counts parsed from `diag/diagnostics.txt`), and each best-per-model AL cell (final cumulative hits/desired in attempt units). Prints the table and writes `yield_comparison.json`.
 
+### Prior-predictive / importance-sampling check of the MCMC reference
+
+```bash
+python scripts/prior_predictive_check.py
+```
+
+The random pool is a prior predictive sample for the emcee reference (same
+flat prior, box, and filters), so reweighting it by the Gaussian relic
+likelihood gives a self-normalised importance-sampling (SNIS) posterior
+estimate with uniform mode coverage — an independent validation of the
+formally unconverged reference that catches what R̂ cannot (missed modes).
+Reports SNIS ESS, prior-predictive band fractions, per-parameter
+prior→posterior contraction and KL (bits), weighted KS / W1 distances
+between SNIS and emcee marginals, Ω moments, and the funnel-share
+cross-check. Writes `prior_predictive_check.json` +
+`prior_predictive_marginals.png`.
+
 ### Uncertainty-quantification evaluation
 
 ```bash
