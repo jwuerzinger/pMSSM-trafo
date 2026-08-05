@@ -537,6 +537,7 @@ Every PNG under `analysis/all_runs/` (and equivalent output dirs) comes from one
 | `r2_mcmc_*.png` | `scripts/plot_r2_mcmc_trajectories_multiseed.py` |
 | `mmd2_*.png` | `scripts/plot_mmd2_trajectories_multiseed.py` |
 | `pairwise_density_<model>_<strat>_<warm>[_rawmcmc].png` | `scripts/plot_pairwise_input_summary.py` |
+| `uq_reliability_<ds>.png` · `uq_sigma_trajectory_<ds>.png` · `uq_sparsification_<ds>.png` · `uq_evaluation.json` | `scripts/evaluate_uq.py` |
 | `pairwise_scatter.png` · `quality_summary.png` · `diversity_summary.png` · `param_variance_heatmap.png` · `param_entropy_heatmap.png` · `relic_density_summary.png` · `hist_dataset.png` | `analyse_runs.py` |
 | GIFs under any `<run>/gifs/` directory (`scatterplots.gif`, `losses.gif`, `true_vs_pred_*.gif`, …) | `make_iteration_gifs.py`, invoked automatically at the end of every AL run |
 
@@ -568,6 +569,30 @@ python scripts/compute_yield_comparison.py --require-neutralino-lsp \
 ```
 
 Computes the number of **distinct** models inside the ±10 % tolerance band per simulator evaluation for the random scan (band prevalence × p_valid), the emcee MCMC reference (distinct in-band `(M_1, M_2, mu)` states ÷ total proposals, burn-in included; proposal counts parsed from `diag/diagnostics.txt`), and each best-per-model AL cell (final cumulative hits/desired in attempt units). Prints the table and writes `yield_comparison.json`.
+
+### Uncertainty-quantification evaluation
+
+```bash
+# Full pass on a GPU node (12 h budget; caches make re-runs near-instant):
+sbatch --partition="${CLUSTER_PARTITION}" --gres=gpu:1 --export=ALL,VETO=1 slurm/submit_uq_eval.sh
+# CPU smoke test:
+python scripts/evaluate_uq.py --models deep_gp --seeds 1 --iter-step 40 \
+    --eval-size 2000 --skip-tabpfn
+```
+
+`scripts/evaluate_uq.py` scores each best-per-model pick's *predictive
+distribution* post hoc from the per-iteration checkpoints (TabPFN: in-context
+re-fit from `state.pt`), on seeded static-random and MCMC eval sets, in
+transformed target space. Per (cell, seed, iteration, eval set) it reports
+calibration (z-statistics, PIT central-interval coverage, miscalibration
+area), proper scores (NLPD, CRPS — closed form for Gaussian/mixture families,
+sample/pinball estimators for dropout/quantile families), ranking quality
+(Spearman ρ(σ, |error|), AUSE sparsification), sharpness (mean σ; its
+iteration trajectory is the epistemic-shrinkage test), and for the Deep GP
+the within/between likelihood-sample variance decomposition.
+`--mc-samples 30,100` ablates the dropout pass count. Outputs:
+`uq_evaluation.json`, `uq_reliability_<ds>.png`, `uq_sigma_trajectory_<ds>.png`,
+`uq_sparsification_<ds>.png`; per-run cache `uq_eval_cache.json`.
 
 ## Slurm Submission
 
