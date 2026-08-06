@@ -125,7 +125,7 @@ def main(manifest, output_dir, sweep_id, include_status, models, min_seeds):
         """(Cm, Lm) seed matrices for one cell, or None if too few seeds."""
         sel = [r for r in rows
                if (r["model"], r["strategy"], r["warm_start"]) == (model, strat, warm)]
-        per_seed_C, per_seed_L = [], []
+        per_seed_C, per_seed_L, per_seed_T, per_seed_S = [], [], [], []
         seen = set()
         for r in sel:
             d = Path(r["expected_run_dir"])
@@ -136,37 +136,45 @@ def main(manifest, output_dir, sweep_id, include_status, models, min_seeds):
             n_tr = list(state.get("al_n_train") or [])
             n_va = list(state.get("al_n_val") or [])
             sel_secs = _selection_seconds(d / "active_learning.log")
-            C, L = [], []
+            C, L, T, S = [], [], [], []
             cum = 0.0
             for i in range(len(n_tr)):
                 tr = _train_seconds(d / f"iteration_{i + 1:03d}")
                 if tr is None:
                     break
-                cum += tr + sel_secs.get(i + 1, 0.0)
+                se = sel_secs.get(i + 1, 0.0)
+                cum += tr + se
                 C.append(cum / 3600.0)
                 L.append(int(n_tr[i]) + int(n_va[i]))
+                T.append(tr)
+                S.append(se)
             if len(C) >= 5:
                 per_seed_C.append(np.asarray(C))
                 per_seed_L.append(np.asarray(L, dtype=float))
+                per_seed_T.append(np.asarray(T))
+                per_seed_S.append(np.asarray(S))
         if len(per_seed_C) < min_seeds:
             return None
         n_it = min(len(c) for c in per_seed_C)
         return (np.stack([c[:n_it] for c in per_seed_C]),
-                np.stack([l[:n_it] for l in per_seed_L]))
+                np.stack([l[:n_it] for l in per_seed_L]),
+                np.stack([t[:n_it] for t in per_seed_T]),
+                np.stack([s[:n_it] for s in per_seed_S]))
 
     STRAT_SHORT = {"top_k": "top-k", "top_k_tol_only": "tol-only",
                    "entropy_batch": "entropy"}
     STRAT_LS = {"top_k": "--", "top_k_tol_only": ":", "entropy_batch": "-"}
 
     fig, ax = plt.subplots(figsize=(7.0, 5.2))
-    fig2, (ax_l, ax_c) = plt.subplots(1, 2, figsize=(11.5, 4.6))
+    fig2, axes2 = plt.subplots(2, 2, figsize=(11.5, 8.6))
+    (ax_l, ax_c), (ax_t, ax_s) = axes2
     summary = {}
     for model, (strat, warm) in picks.items():
         cell = _collect_cell(model, strat, warm)
         if cell is None:
             click.echo(f"[compute] {model}: too few usable seeds — skipped")
             continue
-        Cm, Lm = cell
+        Cm, Lm, Tm, Sm = cell
         n_it = Cm.shape[1]
         pick_label = MODEL_DISPLAY.get(model, model)
         if not model.startswith("tabpfn"):
@@ -185,11 +193,12 @@ def main(manifest, output_dir, sweep_id, include_status, models, min_seeds):
         ax_l.plot(it_ax, l_mu, lw=1.6, color=col,
                   label=pick_label)
         ax_l.fill_between(it_ax, l_mu - l_sem, l_mu + l_sem, color=col, alpha=0.2, lw=0)
-        Dm = np.diff(Cm, axis=1, prepend=0.0) * 3600.0  # seconds per iteration
-        d_mu = Dm.mean(0)
-        d_sem = Dm.std(0, ddof=1) / np.sqrt(len(Dm))
-        ax_c.plot(it_ax, d_mu, lw=1.6, color=col)
-        ax_c.fill_between(it_ax, d_mu - d_sem, d_mu + d_sem, color=col, alpha=0.2, lw=0)
+        for ax_i, M in ((ax_c, Tm + Sm), (ax_t, Tm), (ax_s, Sm)):
+            m_mu = M.mean(0)
+            m_sem = M.std(0, ddof=1) / np.sqrt(len(M))
+            ax_i.plot(it_ax, m_mu, lw=1.6, color=col)
+            ax_i.fill_between(it_ax, m_mu - m_sem, m_mu + m_sem,
+                              color=col, alpha=0.2, lw=0)
         summary[model] = {"n_seeds": len(Cm), "gpu_hours_final": float(c_mu[-1]),
                           "L_final": float(l_mu[-1]),
                           "sec_per_iter_final": float((Cm[:, -1] - Cm[:, -2]).mean() * 3600)}
@@ -211,14 +220,17 @@ def main(manifest, output_dir, sweep_id, include_status, models, min_seeds):
     fig.savefig(p, dpi=200)
     click.echo(f"[compute] wrote {p}")
 
-    ax_l.set_xlabel("AL iteration")
     ax_l.set_ylabel(r"labeled-set size $|L|$")
     ax_l.grid(alpha=0.3)
-    ax_l.legend(fontsize=9)
-    ax_c.set_xlabel("AL iteration")
-    ax_c.set_ylabel("surrogate compute per iteration [s]\n(training + selection)")
-    ax_c.set_yscale("log")
-    ax_c.grid(alpha=0.3, which="both")
+    ax_l.legend(fontsize=8)
+    for ax_i, lab in ((ax_c, "surrogate compute per iteration [s]\n(training + selection)"),
+                      (ax_t, "training time per iteration [s]"),
+                      (ax_s, "selection time per iteration [s]")):
+        ax_i.set_ylabel(lab)
+        ax_i.set_yscale("log")
+        ax_i.grid(alpha=0.3, which="both")
+    for ax_i in (ax_l, ax_c, ax_t, ax_s):
+        ax_i.set_xlabel("AL iteration")
     fig2.tight_layout()
     p2 = out / "compute_per_iteration.png"
     fig2.savefig(p2, dpi=200)
@@ -236,7 +248,7 @@ def main(manifest, output_dir, sweep_id, include_status, models, min_seeds):
                 cell = _collect_cell(model, strat, warm_mode)
                 if cell is None:
                     continue
-                Cm, Lm = cell
+                Cm, Lm, _Tm, _Sm = cell
                 axw.plot(Cm.mean(0), Lm.mean(0), lw=1.5,
                          ls=STRAT_LS[strat],
                          color=phr.MODEL_COLORS.get(model, "gray"))
