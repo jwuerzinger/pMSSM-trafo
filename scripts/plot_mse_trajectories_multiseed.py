@@ -157,8 +157,9 @@ def main(manifest, output_dir, sweep_id, include_status, models, min_seeds, logy
         return x, mu, sem
 
     from matplotlib.lines import Line2D
-    fig = plt.figure(figsize=(11.5, 9.5))
-    outer = fig.add_gridspec(2, 2, hspace=0.24, wspace=0.20)
+    from matplotlib.ticker import NullFormatter
+    fig = plt.figure(figsize=(12.5, 9.5))
+    outer = fig.add_gridspec(2, 2, hspace=0.26, wspace=0.30)
     first_loss_ax = None
     for cell, ds in zip([(i, j) for i in (0, 1) for j in (0, 1)], DATASET_KEYS):
         inner = outer[cell].subgridspec(2, 1, height_ratios=(2.6, 1), hspace=0.06)
@@ -186,9 +187,11 @@ def main(manifest, output_dir, sweep_id, include_status, models, min_seeds, logy
         ax.grid(alpha=0.25)
         ax.set_ylabel("MSE (transformed)", fontsize=9)
         ax.tick_params(labelbottom=False)
-        axr.axhline(1.0, color="black", lw=0.8)
+        axr.axhline(1.0, color="black", lw=0.9, ls="--")
         axr.set_yscale("log")
-        axr.set_ylabel("AL / base", fontsize=8)
+        axr.set_ylabel("AL / base", fontsize=8, labelpad=2)
+        axr.tick_params(axis="y", labelsize=7)
+        axr.yaxis.set_minor_formatter(NullFormatter())
         axr.grid(alpha=0.25)
         axr.set_xlabel("AL iteration", fontsize=9)
     handles, labels = first_loss_ax.get_legend_handles_labels()
