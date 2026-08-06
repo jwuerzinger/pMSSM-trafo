@@ -1,0 +1,187 @@
+"""Labeled-dataset size versus cumulative surrogate compute, per model.
+
+For each best-per-model pick this parses the run logs of every seed:
+
+  * training time  — timestamp span of ``iteration_NNN/al_training.log``
+    (the AL surrogate alone; the baseline model trains on the other GPU
+    and is not part of the method's cost)
+  * selection time — from the first selection marker in
+    ``active_learning.log`` (MC-dropout passes / entropy evaluation /
+    top-k) to the ``Saved selected points`` line
+
+and accumulates their sum over iterations. Plotted: labeled-set size
+|L| = n_train + n_val (from ``state.pt``) versus cumulative GPU-hours,
+seed mean with SEM bands in both coordinates, one curve per model in the
+hit-rate colours. Simulator (Run3ModelGen) time and evaluation/plotting
+instrumentation are excluded by construction.
+
+Usage:
+    python scripts/plot_compute_vs_dataset.py \\
+        --sweep-id 20260803_18 --include-status completed,running,timeout,submitted
+"""
+from __future__ import annotations
+
+import csv
+import re
+import sys
+from datetime import datetime
+from pathlib import Path
+
+import click
+import numpy as np
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+for _p in (str(_REPO_ROOT), str(_REPO_ROOT / "scripts")):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+from mcmc_diagnostics import DEFAULT_AL_PICKS, MODEL_DISPLAY  # noqa: E402
+
+_TS_RE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})")
+_ITER_RE = re.compile(r"Iteration (\d+) ===")
+_SEL_START_RE = re.compile(
+    r"Running \d+ (?:MC Dropout|TabPFN ensemble) forward passes"
+    r"|Using entropy-based batch selection"
+    r"|Entropy selection: evaluating"
+    r"|Running iterative batch selector"
+    r"|Select(?:ing|ed) .*top[_-]?k", re.IGNORECASE)
+_SEL_END_RE = re.compile(r"Saved selected points to")
+
+
+def _ts(line: str) -> datetime | None:
+    m = _TS_RE.match(line)
+    return datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S") if m else None
+
+
+def _train_seconds(iter_dir: Path) -> float | None:
+    log = iter_dir / "al_training.log"
+    if not log.exists():
+        return None
+    first = last = None
+    with open(log, errors="replace") as fh:
+        for line in fh:
+            t = _ts(line)
+            if t is not None:
+                if first is None:
+                    first = t
+                last = t
+    if first is None or last is None:
+        return None
+    return (last - first).total_seconds()
+
+
+def _selection_seconds(main_log: Path) -> dict[int, float]:
+    """{iteration: selection seconds} parsed from active_learning.log."""
+    out: dict[int, float] = {}
+    cur_iter = None
+    sel_start = None
+    with open(main_log, errors="replace") as fh:
+        for line in fh:
+            m = _ITER_RE.search(line)
+            if m:
+                cur_iter = int(m.group(1))
+                sel_start = None
+                continue
+            if cur_iter is None:
+                continue
+            if sel_start is None and _SEL_START_RE.search(line):
+                sel_start = _ts(line)
+                continue
+            if sel_start is not None and _SEL_END_RE.search(line):
+                t = _ts(line)
+                if t is not None:
+                    out[cur_iter] = (t - sel_start).total_seconds()
+                sel_start = None
+    return out
+
+
+@click.command()
+@click.option("--manifest", default="/ptmp/jwuerzin/analysis/all_runs/sweep_manifest.csv",
+              show_default=True)
+@click.option("--output-dir", default="/ptmp/jwuerzin/analysis/all_runs", show_default=True)
+@click.option("--sweep-id", default=None,
+              help="Only manifest rows whose sweep_id starts with this prefix.")
+@click.option("--include-status", default="completed,running,timeout", show_default=True)
+@click.option("--models", default=None,
+              help="Comma list of picks (default: all DEFAULT_AL_PICKS).")
+@click.option("--min-seeds", default=2, show_default=True)
+def main(manifest, output_dir, sweep_id, include_status, models, min_seeds):
+    import torch
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import plot_hit_rate_trajectories_multiseed as phr
+
+    statuses = {s.strip() for s in include_status.split(",")}
+    picks = dict(DEFAULT_AL_PICKS)
+    if models:
+        wanted = {m.strip() for m in models.split(",")}
+        picks = {m: sw for m, sw in picks.items() if m in wanted}
+    rows = [r for r in csv.DictReader(open(manifest))
+            if r["status"] in statuses
+            and (sweep_id is None or r.get("sweep_id", "").startswith(sweep_id))]
+
+    fig, ax = plt.subplots(figsize=(7.0, 5.2))
+    summary = {}
+    for model, (strat, warm) in picks.items():
+        sel = [r for r in rows
+               if (r["model"], r["strategy"], r["warm_start"]) == (model, strat, warm)]
+        per_seed_C, per_seed_L = [], []
+        seen = set()
+        for r in sel:
+            d = Path(r["expected_run_dir"])
+            if str(d) in seen or not (d / "state.pt").exists():
+                continue
+            seen.add(str(d))
+            state = torch.load(d / "state.pt", weights_only=False, map_location="cpu")
+            n_tr = list(state.get("al_n_train") or [])
+            n_va = list(state.get("al_n_val") or [])
+            sel_secs = _selection_seconds(d / "active_learning.log")
+            C, L = [], []
+            cum = 0.0
+            for i in range(len(n_tr)):
+                tr = _train_seconds(d / f"iteration_{i + 1:03d}")
+                if tr is None:
+                    break
+                cum += tr + sel_secs.get(i + 1, 0.0)
+                C.append(cum / 3600.0)
+                L.append(int(n_tr[i]) + int(n_va[i]))
+            if len(C) >= 5:
+                per_seed_C.append(np.asarray(C))
+                per_seed_L.append(np.asarray(L, dtype=float))
+        if len(per_seed_C) < min_seeds:
+            click.echo(f"[compute] {model}: {len(per_seed_C)} usable seeds — skipped")
+            continue
+        n_it = min(len(c) for c in per_seed_C)
+        Cm = np.stack([c[:n_it] for c in per_seed_C])
+        Lm = np.stack([l[:n_it] for l in per_seed_L])
+        c_mu, c_sem = Cm.mean(0), Cm.std(0, ddof=1) / np.sqrt(len(Cm))
+        l_mu, l_sem = Lm.mean(0), Lm.std(0, ddof=1) / np.sqrt(len(Lm))
+        col = phr.MODEL_COLORS.get(model, "gray")
+        ax.plot(c_mu, l_mu, "o-", ms=2.5, lw=1.6, color=col,
+                label=MODEL_DISPLAY.get(model, model))
+        ax.fill_betweenx(l_mu, c_mu - c_sem, c_mu + c_sem, color=col, alpha=0.2, lw=0)
+        summary[model] = {"n_seeds": len(Cm), "gpu_hours_final": float(c_mu[-1]),
+                          "L_final": float(l_mu[-1]),
+                          "sec_per_iter_final": float((Cm[:, -1] - Cm[:, -2]).mean() * 3600)}
+        click.echo(f"[compute] {model}: {len(Cm)} seeds, {n_it} iters, "
+                   f"final |L|={l_mu[-1]:.0f} at {c_mu[-1]:.2f} GPU h "
+                   f"(last iter {summary[model]['sec_per_iter_final']:.0f}s)")
+    if not summary:
+        raise click.ClickException("no usable runs")
+
+    ax.set_xscale("log")
+    ax.set_xlabel("cumulative surrogate compute [GPU h] (training + selection)")
+    ax.set_ylabel(r"labeled-set size $|L|$")
+    ax.grid(alpha=0.3, which="both")
+    ax.legend(fontsize=9)
+    fig.tight_layout()
+    out = Path(output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    p = out / "compute_vs_dataset.png"
+    fig.savefig(p, dpi=200)
+    click.echo(f"[compute] wrote {p}")
+
+
+if __name__ == "__main__":
+    main()
