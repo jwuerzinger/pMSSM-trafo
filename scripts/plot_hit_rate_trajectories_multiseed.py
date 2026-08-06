@@ -2065,7 +2065,9 @@ def plot_best_per_model(traj, tols, uncertainty, true_val, out_dir,
 @click.option("--manifest", default="/ptmp/jwuerzin/analysis/all_runs/sweep_manifest.csv",
               show_default=True)
 @click.option("--sweep-id", default=None,
-              help="Filter to one sweep_id (default: use all completed rows).")
+              help="Filter to sweep_ids starting with this prefix, e.g. "
+                   "'20260803_18' to catch the main grid + dnn_match + oracle "
+                   "launcher invocations of one sweep (default: all rows).")
 @click.option("--output-dir", default="/ptmp/jwuerzin/analysis/all_runs/",
               show_default=True,
               help="Directory for the generated PNGs. For each metric "
@@ -2149,7 +2151,7 @@ def main(manifest, sweep_id, output_dir, uncertainty, target, tolerances,
                    "computation.", err=True)
     df = pd.read_csv(manifest)
     if sweep_id:
-        df = df[df["sweep_id"].astype(str) == str(sweep_id)]
+        df = df[df["sweep_id"].astype(str).str.startswith(str(sweep_id))]
     allowed = {s.strip() for s in include_status.split(",") if s.strip()}
     df = df[df["status"].isin(allowed)]
     if df.empty:
