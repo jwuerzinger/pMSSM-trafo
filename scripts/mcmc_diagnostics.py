@@ -508,9 +508,8 @@ def _render_comparison_plot(sources: list[tuple[str, dict]],
     axes[0].set_yticks(range(n_src)); axes[0].set_yticklabels(row_labels)
     axes[0].set_xticks(range(n_par))
     axes[0].set_xticklabels(params, rotation=30, ha="right")
-    axes[0].set_title(r"split-$\hat{R}$ (Gelman-Rubin)  —  "
-                      r"$<1.01$ converged · $<1.05$ acceptable · $>1.1$ not converged",
-                      fontsize=11)
+    # No panel titles (paper figures carry captions); the colorbars label the
+    # metrics and the caption states the 1.01/1.05/1.1 thresholds.
     for i in range(n_src):
         for j in range(n_par):
             if np.isfinite(rhat[i, j]):
@@ -530,9 +529,6 @@ def _render_comparison_plot(sources: list[tuple[str, dict]],
     axes[1].set_yticks(range(n_src)); axes[1].set_yticklabels(row_labels)
     axes[1].set_xticks(range(n_par))
     axes[1].set_xticklabels(params, rotation=30, ha="right")
-    axes[1].set_title(r"Autocorrelation length  $\tau = M \cdot N / \mathrm{ESS}_\mathrm{bulk}$  "
-                      r"(samples per effective sample; lower = better)",
-                      fontsize=11)
     for i in range(n_src):
         for j in range(n_par):
             v = tau[i, j]

@@ -124,13 +124,13 @@ def plot_losses(train_losses, val_losses, model_name, plot_dir="plots"):
 # (non-neutralino LSP or missing branches) are labelled -1 and skipped in plots.
 LSP_TYPE_NAMES = {0: 'bino', 1: 'wino', 2: 'higgsino', 3: 'mixed'}
 LSP_TYPE_COLORS = {0: 'tab:blue', 1: 'tab:orange', 2: 'tab:green', 3: 'tab:red'}
-LSP_PURITY_MIN = 0.8
+LSP_PURITY_MIN = 0.5
 
 
 def classify_lsp_type(lsp_fracs):
     """Classify LSP type (0=bino, 1=wino, 2=higgsino, 3=mixed, -1=unknown).
 
-    Mixed when the dominant fraction is below LSP_PURITY_MIN (default 0.8).
+    Mixed when the dominant fraction is below LSP_PURITY_MIN (default 0.5).
 
     Args:
         lsp_fracs: (N, 3) tensor/array with columns

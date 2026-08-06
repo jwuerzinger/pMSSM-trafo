@@ -140,7 +140,7 @@ def _plot_one_cell(
         squeeze=False,
     )
 
-    fig.suptitle(f"{title}  (n_seeds={n_seeds})", fontsize=14)
+    # No suptitle: paper figures carry captions instead.
 
     # Row-index lookup so reordering is local to here.
     if show_mcmc_row:

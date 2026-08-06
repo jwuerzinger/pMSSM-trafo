@@ -1141,7 +1141,6 @@ def plot_classification_accuracy_oracle_comparison(traj_acc: dict, picks,
 
     for ds in ACC_DATASETS:
         fig, ax = plt.subplots(1, 1, figsize=(7.5, 5))
-        ax.set_title(f"Classification accuracy (oracle comparison) — {dataset_titles[ds]}")
         ax.set_xlabel("Iteration")
         ax.set_ylabel("Accuracy (Ωh² ≷ 0.12)")
         ax.grid(alpha=0.3)
@@ -1268,7 +1267,6 @@ def plot_classification_accuracy_best_per_model(traj_acc: dict, picks, out_dir: 
     data_efficiency_all: dict[str, dict[str, dict]] = {}
     for ds in ACC_DATASETS:
         fig, ax = plt.subplots(1, 1, figsize=(7.5, 5))
-        ax.set_title(f"Classification accuracy — {dataset_titles[ds]}")
         ax.set_xlabel("Iteration")
         ax.set_ylabel("Accuracy (Ωh² ≷ 0.12)")
         ax.grid(alpha=0.3)
@@ -1539,8 +1537,11 @@ def _draw_curve(ax, iters_ax, Y, *, color, linestyle, marker, label,
 
 def _setup_axes(axes, tols, true_val, title_word, ylabel):
     for ax, tol in zip(axes, tols):
-        ax.set_title(f"{title_word} (|Ω − {true_val}| / {true_val} < {int(tol*100)}%)",
-                     fontsize=15)
+        # Tolerance tag replaces the old per-panel title (paper figures carry
+        # captions; only the panel-identifying tolerance stays, inside the axes).
+        ax.text(0.02, 0.98, f"|Ω − {true_val}| / {true_val} < {int(tol*100)}%",
+                transform=ax.transAxes, ha="left", va="top", fontsize=12,
+                bbox=dict(boxstyle="round,pad=0.25", fc="white", ec="0.8", alpha=0.8))
         ax.set_xlabel("Iteration", fontsize=14)
         ax.set_ylabel(ylabel, fontsize=14)
         ax.tick_params(axis="both", which="major", labelsize=12)

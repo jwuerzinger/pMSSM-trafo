@@ -539,6 +539,7 @@ Every PNG under `analysis/all_runs/` (and equivalent output dirs) comes from one
 | `pairwise_density_<model>_<strat>_<warm>[_rawmcmc].png` | `scripts/plot_pairwise_input_summary.py` |
 | `uq_reliability_<ds>.png` · `uq_sigma_trajectory_<ds>.png` · `uq_sparsification_<ds>.png` · `uq_evaluation.json` | `scripts/evaluate_uq.py` |
 | `mse_best_per_model.png` | `scripts/plot_mse_trajectories_multiseed.py` |
+| `omega_vs_<param>_lsp_type.png` | `scripts/plot_omega_vs_m2_lsp.py` |
 | `pairwise_scatter.png` · `quality_summary.png` · `diversity_summary.png` · `param_variance_heatmap.png` · `param_entropy_heatmap.png` · `relic_density_summary.png` · `hist_dataset.png` | `analyse_runs.py` |
 | GIFs under any `<run>/gifs/` directory (`scatterplots.gif`, `losses.gif`, `true_vs_pred_*.gif`, …) | `make_iteration_gifs.py`, invoked automatically at the end of every AL run |
 
