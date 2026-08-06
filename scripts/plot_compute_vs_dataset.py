@@ -122,6 +122,7 @@ def main(manifest, output_dir, sweep_id, include_status, models, min_seeds):
             and (sweep_id is None or r.get("sweep_id", "").startswith(sweep_id))]
 
     fig, ax = plt.subplots(figsize=(7.0, 5.2))
+    fig2, (ax_l, ax_c) = plt.subplots(1, 2, figsize=(11.5, 4.6))
     summary = {}
     for model, (strat, warm) in picks.items():
         sel = [r for r in rows
@@ -161,6 +162,17 @@ def main(manifest, output_dir, sweep_id, include_status, models, min_seeds):
         ax.plot(c_mu, l_mu, "o-", ms=2.5, lw=1.6, color=col,
                 label=MODEL_DISPLAY.get(model, model))
         ax.fill_betweenx(l_mu, c_mu - c_sem, c_mu + c_sem, color=col, alpha=0.2, lw=0)
+
+        # companion figure: |L| vs iteration, per-iteration compute vs iteration
+        it_ax = np.arange(1, n_it + 1)
+        ax_l.plot(it_ax, l_mu, lw=1.6, color=col,
+                  label=MODEL_DISPLAY.get(model, model))
+        ax_l.fill_between(it_ax, l_mu - l_sem, l_mu + l_sem, color=col, alpha=0.2, lw=0)
+        Dm = np.diff(Cm, axis=1, prepend=0.0) * 3600.0  # seconds per iteration
+        d_mu = Dm.mean(0)
+        d_sem = Dm.std(0, ddof=1) / np.sqrt(len(Dm))
+        ax_c.plot(it_ax, d_mu, lw=1.6, color=col)
+        ax_c.fill_between(it_ax, d_mu - d_sem, d_mu + d_sem, color=col, alpha=0.2, lw=0)
         summary[model] = {"n_seeds": len(Cm), "gpu_hours_final": float(c_mu[-1]),
                           "L_final": float(l_mu[-1]),
                           "sec_per_iter_final": float((Cm[:, -1] - Cm[:, -2]).mean() * 3600)}
@@ -181,6 +193,19 @@ def main(manifest, output_dir, sweep_id, include_status, models, min_seeds):
     p = out / "compute_vs_dataset.png"
     fig.savefig(p, dpi=200)
     click.echo(f"[compute] wrote {p}")
+
+    ax_l.set_xlabel("AL iteration")
+    ax_l.set_ylabel(r"labeled-set size $|L|$")
+    ax_l.grid(alpha=0.3)
+    ax_l.legend(fontsize=9)
+    ax_c.set_xlabel("AL iteration")
+    ax_c.set_ylabel("surrogate compute per iteration [s]\n(training + selection)")
+    ax_c.set_yscale("log")
+    ax_c.grid(alpha=0.3, which="both")
+    fig2.tight_layout()
+    p2 = out / "compute_per_iteration.png"
+    fig2.savefig(p2, dpi=200)
+    click.echo(f"[compute] wrote {p2}")
 
 
 if __name__ == "__main__":
