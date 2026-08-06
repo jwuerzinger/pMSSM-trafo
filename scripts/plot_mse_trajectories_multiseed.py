@@ -157,7 +157,6 @@ def main(manifest, output_dir, sweep_id, include_status, models, min_seeds, logy
         return x, mu, sem
 
     from matplotlib.lines import Line2D
-    from matplotlib.ticker import NullFormatter
     fig = plt.figure(figsize=(12.5, 9.5))
     outer = fig.add_gridspec(2, 2, hspace=0.26, wspace=0.30)
     first_loss_ax = None
@@ -165,6 +164,7 @@ def main(manifest, output_dir, sweep_id, include_status, models, min_seeds, logy
         inner = outer[cell].subgridspec(2, 1, height_ratios=(2.6, 1), hspace=0.06)
         ax = fig.add_subplot(inner[0])
         axr = fig.add_subplot(inner[1], sharex=ax)
+        ratio_tops: list[float] = []
         if first_loss_ax is None:
             first_loss_ax = ax
         for model, per_ds in traj.items():
@@ -181,6 +181,8 @@ def main(manifest, output_dir, sweep_id, include_status, models, min_seeds, logy
                 xr, mur, semr = _band(per_ds[ds]["ratio"])
                 axr.plot(xr, mur, color=c, lw=1.2)
                 axr.fill_between(xr, mur - semr, mur + semr, color=c, alpha=0.15, lw=0)
+                ratio_tops.append(np.nanmax(mur[xr >= 5]) if (xr >= 5).any()
+                                  else np.nanmax(mur))
         if logy:
             ax.set_yscale("log")
         ax.set_title(DATASET_TITLES[ds], fontsize=11)
@@ -188,10 +190,13 @@ def main(manifest, output_dir, sweep_id, include_status, models, min_seeds, logy
         ax.set_ylabel("MSE (transformed)", fontsize=9)
         ax.tick_params(labelbottom=False)
         axr.axhline(1.0, color="black", lw=0.9, ls="--")
-        axr.set_yscale("log")
+        # Linear scale, clipped to the post-burn-in range so the exact-GP
+        # small-n interpolation artifact (ratio ~10^2 at iters 2-4) cannot
+        # flatten the panel.
+        if ratio_tops:
+            axr.set_ylim(0, 1.15 * max(max(ratio_tops), 1.2))
         axr.set_ylabel("AL / base", fontsize=8, labelpad=2)
         axr.tick_params(axis="y", labelsize=7)
-        axr.yaxis.set_minor_formatter(NullFormatter())
         axr.grid(alpha=0.25)
         axr.set_xlabel("AL iteration", fontsize=9)
     handles, labels = first_loss_ax.get_legend_handles_labels()
