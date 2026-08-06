@@ -1636,9 +1636,7 @@ def plot_models_per_strategy(traj, tols, uncertainty, true_val, out_dir,
                                  sharey=False, squeeze=False)
         axes = list(axes.flat)
         _setup_axes(axes, tols, true_val, title_word, ylabel)
-        fig.suptitle(f"Strategy: {strat} — model & warm-start comparison",
-                     fontsize=16)
-
+    
         for ax, tol in zip(axes, tols):
             for (m, s, w) in sorted(cfgs):
                 if tol not in traj[(m, s, w)]:
@@ -1727,9 +1725,7 @@ def plot_strategies_per_model(traj, tols, uncertainty, true_val, out_dir,
                                  sharey=False, squeeze=False)
         axes = list(axes.flat)
         _setup_axes(axes, tols, true_val, title_word, ylabel)
-        fig.suptitle(f"Model: {model} — strategy & warm-start comparison",
-                     fontsize=16)
-
+    
         for ax, tol in zip(axes, tols):
             for (m, s, w) in sorted(cfgs):
                 if tol not in traj[(m, s, w)]:
@@ -1860,11 +1856,6 @@ def plot_oracle_comparison(traj, tols, uncertainty, true_val, out_dir,
                              sharey=False, squeeze=False)
     axes = list(axes.flat)
     _setup_axes(axes, tols, true_val, title_word, ylabel)
-    fig.suptitle(
-        "Oracle comparison: regular AL vs theoretical limit "
-        "(candidates restricted to MCMC pool)",
-        fontsize=16,
-    )
 
     # Capture per-base-model picks + seed counts so we can build the legend
     # once after drawing on every panel.
@@ -1995,11 +1986,6 @@ def plot_best_per_model(traj, tols, uncertainty, true_val, out_dir,
     _setup_axes(axes, tols, true_val, title_word, ylabel)
 
     strict_tol = min(tols)
-    fig.suptitle(
-        f"Best setting per model "
-        f"(picked by mean final {title_word.lower()} @ tol={int(strict_tol*100)}%)",
-        fontsize=16,
-    )
 
     for ax, tol in zip(axes, tols):
         for (m, s, w, _tu, _sc) in picks:
