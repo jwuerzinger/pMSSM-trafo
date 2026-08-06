@@ -230,8 +230,6 @@ def main(baseline_data_dir, mcmc_data_dir, cache_dir, output_dir, true_value,
         ax.set_xlabel(name.replace("IN_", ""))
         ax.set_yticks([])
     axes[0, 0].legend(fontsize=8, loc="upper right")
-    fig.suptitle("Prior predictive check: flat-prior pool reweighted by the "
-                 "relic likelihood vs the emcee posterior", fontsize=11)
     fig.tight_layout()
     fp = out_dir / "prior_predictive_marginals.png"
     fig.savefig(fp, dpi=200)
