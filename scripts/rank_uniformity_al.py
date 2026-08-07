@@ -57,6 +57,7 @@ from mcmc_diagnostics import (  # noqa: E402
     MODEL_DISPLAY,
     PARAM_ORDER,
     _load_al_chains,
+    _load_chains,
     _picks_from_manifest,
     ess_bulk,
 )
@@ -98,6 +99,11 @@ def _rank_shape(counts: np.ndarray) -> tuple[str, float, float]:
     return ("U-shaped" if z_dis > 0 else "inverted-U"), z_loc, z_dis
 
 
+def _fmt_p(v) -> str:
+    """Format a p-value, tolerating the unestimable (None/NaN) case."""
+    return "n/a" if v is None or not np.isfinite(v) else f"{v:.1e}"
+
+
 def _holm(pvals: list[float]) -> np.ndarray:
     """Holm-Bonferroni step-down adjusted p-values, input order preserved."""
     p = np.asarray(pvals, dtype=float)
@@ -130,13 +136,14 @@ def _tau_multichain(chains: list[np.ndarray]) -> float:
 
 
 def _tau_within(chains: list[np.ndarray]) -> float:
-    """Max over parameters of the WITHIN-sequence integrated autocorrelation.
+    """Within-sequence integrated autocorrelation, aggregated as upstream does.
 
     Per replica and parameter: FFT autocorrelation, Geyer initial-positive-
-    sequence truncation, tau = 1 + 2 sum rho_t; averaged over replicas, then
-    the maximum over parameters. This is the quantity that governs how far
-    apart two acquired points must be to count as independent, and it is what
-    the chi-square test needs to be calibrated.
+    sequence truncation, tau = 1 + 2 sum rho_t. The single thinning step is the
+    MAXIMUM over replicas and parameters, matching Run3ModelGen's
+    ``emcee_diagnostics.py`` (``all_tau_max`` per ensemble, then the max over
+    ensembles). Averaging over replicas instead would presuppose that the
+    replicas are interchangeable, which is the hypothesis under test.
     """
     n = min(len(c) for c in chains)
     taus = []
@@ -160,9 +167,32 @@ def _tau_within(chains: list[np.ndarray]) -> float:
                 s += pair
                 k += 2
             per_chain.append(max(1.0, 1.0 + 2.0 * s))
-        if per_chain:
-            taus.append(float(np.mean(per_chain)))
+        taus.append(max(per_chain) if per_chain else 1.0)
     return max(taus) if taus else 1.0
+
+
+def _fold_signs(chains: list[np.ndarray], params: list[str]) -> list[np.ndarray]:
+    """Apply the exact overall-flip symmetry (M_1,M_2,mu) -> (-,-,-).
+
+    The relic density is invariant under simultaneously flipping the three
+    gaugino/higgsino mass parameters, so two replicas occupying mirror sign
+    lobes describe the same physics. Upstream canonicalises to mu >= 0 before
+    ranking (``canon=True``); without it, mirror-lobe occupancy would register
+    as replica disagreement.
+    """
+    idx = {n: i for i, n in enumerate(params)}
+    need = ("IN_M_1", "IN_M_2", "IN_mu")
+    if not all(n in idx for n in need):
+        return chains
+    i1, i2, imu = (idx[n] for n in need)
+    out = []
+    for c in chains:
+        c = np.array(c, dtype=float, copy=True)
+        flip = c[:, imu] < 0
+        for j in (i1, i2, imu):
+            c[flip, j] = -c[flip, j]
+        out.append(c)
+    return out
 
 
 def rank_uniformity(chains: list[np.ndarray], params: list[str],
@@ -286,15 +316,19 @@ def _plot(res: dict, params: list[str], out_path: Path, model_label: str) -> Non
                            f"(need {5 * B} for {B} bins)"), "0.35"
     else:
         wp = res["worst_p_holm"]
-        if wp is not None and np.isfinite(wp) and wp < ALPHA:
+        if wp is None or not np.isfinite(wp):
+            wp = float("nan")
+        if np.isfinite(wp) and wp < ALPHA:
             verdict = (f"FAILS uniformity: p_Holm={wp:.1e} < {ALPHA} "
                        f"({res['worst_param'].replace('IN_', '')}); replicas do not "
                        f"realise a common acquisition distribution")
             colour = "crimson"
         else:
-            verdict = (f"passes: p_Holm={wp:.2f} >= {ALPHA} "
-                       f"(no evidence against replica agreement)")
-            colour = "seagreen"
+            verdict = (f"passes: p_Holm={_fmt_p(wp)} >= {ALPHA} "
+                       f"(no evidence against replica agreement)"
+                       if np.isfinite(wp) else
+                       "no estimable parameter (test not applicable)")
+            colour = "seagreen" if np.isfinite(wp) else "0.35"
     fig.text(0.5, 0.997, verdict, ha="center", va="top", fontsize=10,
              color=colour, fontweight="bold")
     # The histograms show ALL acquired points (the smoother picture); the test
@@ -324,12 +358,22 @@ def _plot(res: dict, params: list[str], out_path: Path, model_label: str) -> Non
               help="Points per acquisition batch (--thin-mode batch).")
 @click.option("--require-neutralino-lsp/--no-require-neutralino-lsp",
               default=False, show_default=True)
+@click.option("--mcmc-data-dir", default=None,
+              help="Also run the reference dataset (its ensembles as chains) "
+                   "for a like-for-like comparison row.")
+@click.option("--mcmc-nwalkers", default=0, show_default=True,
+              help="Split each reference file into walker-chains (256 for "
+                   "neutralino_v4); 0 keeps one chain per file (= per ensemble, "
+                   "the upstream cross-ensemble convention).")
+@click.option("--fold-signs/--no-fold-signs", default=True, show_default=True,
+              help="Canonicalise the exact (M_1,M_2,mu) sign flip to mu >= 0 "
+                   "before ranking, as upstream's canon=True does.")
 @click.option("--equal-power/--no-equal-power", default=False, show_default=True,
               help="Cap every model to the common minimum replica count and "
                    "thinned-draw count, so the p-values are comparable across "
                    "models rather than reflecting differing test resolution.")
 def main(manifest, output_dir, models, thin_mode, batch_size, require_neutralino_lsp,
-         equal_power):
+         mcmc_data_dir, mcmc_nwalkers, fold_signs, equal_power):
     picks = dict(DEFAULT_AL_PICKS)
     if models:
         wanted = {m.strip() for m in models.split(",")}
@@ -341,17 +385,52 @@ def main(manifest, output_dir, models, thin_mode, batch_size, require_neutralino
 
     payload = {"config": {"thin_mode": thin_mode, "batch_size": batch_size,
                           "bins": RANK_BINS, "alpha": ALPHA,
-                          "require_neutralino_lsp": require_neutralino_lsp},
+                          "require_neutralino_lsp": require_neutralino_lsp,
+                          "fold_signs": fold_signs,
+                          "tau_aggregation": "max over replicas and parameters "
+                                             "(emcee_diagnostics convention)"},
                "results": {}}
     # Pass 1: load every cell and measure its thinning step, so an equal-power
     # run can pick the common replica count and draw count before testing.
     loaded: dict[str, dict] = {}
+    if mcmc_data_dir:
+        # Upstream treats the ENSEMBLES as chains but keeps the (iteration,
+        # walker) structure: tau is measured along iterations within a walker,
+        # and thinning strides iterations while keeping every walker. Reading
+        # the file as one flat row list instead would stride across walkers,
+        # where consecutive rows are near-independent by construction and the
+        # measured tau is meaningless (it comes out ~1 instead of ~10^3).
+        nw = mcmc_nwalkers or 256
+        walkers = _load_chains(Path(mcmc_data_dir), FREE_PARAMS, skip_file_cut=False,
+                               require_neutralino_lsp=require_neutralino_lsp,
+                               nwalkers=nw)
+        walkers = walkers[0] if isinstance(walkers, tuple) else walkers
+        if fold_signs:
+            walkers = _fold_signs(walkers, FREE_PARAMS)
+        n_ens = max(1, len(walkers) // nw)
+        ens = [walkers[i * nw:(i + 1) * nw] for i in range(n_ens)]
+        tau_ref = max(_tau_within([w]) for e in ens for w in e[::16])
+        step_ref = max(1, int(np.ceil(tau_ref)))
+        ref_chains = [np.concatenate([w[::step_ref] for w in e], axis=0) for e in ens]
+        if len(ref_chains) >= 2:
+            run_dirs = {"mcmc_reference": None, **run_dirs}
+            loaded["mcmc_reference"] = {
+                "chains": ref_chains, "tau_w": tau_ref, "tau_m": float("nan"),
+                "step": 1, "pre_thinned_by": step_ref,
+                "n_avail": min(len(c) for c in ref_chains)}
+            click.echo(f"[rank] reference: {n_ens} ensembles x {nw} walkers, "
+                       f"tau={tau_ref:.0f} -> {len(ref_chains[0])} thinned draws/ensemble")
     for model, dirs in run_dirs.items():
-        chains = _load_al_chains(dirs, param_idx,
-                                 require_neutralino_lsp=require_neutralino_lsp)
+        if dirs is None:                       # reference row, already loaded
+            continue
+        else:
+            chains = _load_al_chains(dirs, param_idx,
+                                     require_neutralino_lsp=require_neutralino_lsp)
         if len(chains) < 2:
             click.echo(f"[rank] {model}: {len(chains)} replicas — skipped")
             continue
+        if fold_signs:
+            chains = _fold_signs(chains, FREE_PARAMS)
         tau_w = _tau_within(chains)
         tau_m = _tau_multichain(chains)
         if thin_mode == "tau":
@@ -363,6 +442,7 @@ def main(manifest, output_dir, models, thin_mode, batch_size, require_neutralino
         n_all = min(len(c) for c in chains)
         loaded[model] = {"chains": chains, "tau_w": tau_w, "tau_m": tau_m,
                          "step": step, "n_avail": len(range(0, n_all, step))}
+        continue
     if not loaded:
         raise click.ClickException("no usable cells")
 
@@ -382,6 +462,8 @@ def main(manifest, output_dir, models, thin_mode, batch_size, require_neutralino
         res = rank_uniformity(chains, FREE_PARAMS, step, max_draws=cap_n)
         res["tau_within"] = tau_w
         res["tau_multichain"] = tau_m
+        if "pre_thinned_by" in v:
+            res["thin_step"] = int(v["pre_thinned_by"])
         res["verdict"] = ("not_estimable" if not res["estimable"] else
                           "fail" if (res["worst_p_holm"] is not None
                                      and np.isfinite(res["worst_p_holm"])
@@ -399,7 +481,7 @@ def main(manifest, output_dir, models, thin_mode, batch_size, require_neutralino
                    f"C={res['n_chains']} N={res['n_all']:>6} "
                    f"tau_within={tau_w:6.1f} tau_multi={tau_m:7.1f} "
                    f"thin={step:>3} n_test={res['n_thinned']:>5} "
-                   f"p_Holm={res['worst_p_holm']:.1e} ({res['worst_param']}); "
+                   f"p_Holm={_fmt_p(res['worst_p_holm'])} ({res['worst_param']}); "
                    f"non-uniform (tested): "
                    + (", ".join(f"{p.replace('IN_','')}:{'/'.join(sorted(set(x for x in s if x != 'uniform')))}"
                                 for p, s in nonuni.items()) or "none"))
