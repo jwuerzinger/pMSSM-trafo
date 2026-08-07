@@ -255,11 +255,17 @@ def _plot(res: dict, params: list[str], out_path: Path, model_label: str) -> Non
         p_holm = stat.get("p_holm")
         failed = (res["estimable"] and p_holm is not None
                   and np.isfinite(p_holm) and p_holm < ALPHA)
+        # Always show the adjusted p-value: a visually large but statistically
+        # unresolvable wiggle should read as "tested, not significant", not as
+        # an unexamined panel.
+        if p_holm is None or not np.isfinite(p_holm):
+            tag = f"{tag}  (p n/a)"
+        else:
+            tag = f"{tag}  (p={p_holm:.2g})"
         if failed:
             for spine in ax.spines.values():
                 spine.set_edgecolor("crimson")
                 spine.set_linewidth(1.8)
-            tag = f"{tag}  (p={p_holm:.1e})"
         ax.text(0.5, 0.04, tag, transform=ax.transAxes, ha="center", va="bottom",
                 fontsize=8, color="crimson" if failed else "0.35",
                 fontweight="bold" if failed else "normal")
