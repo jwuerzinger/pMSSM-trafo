@@ -540,7 +540,7 @@ Every PNG under `analysis/all_runs/` (and equivalent output dirs) comes from one
 | `uq_reliability_<ds>.png` · `uq_sigma_trajectory_<ds>.png` · `uq_sparsification_<ds>.png` · `uq_evaluation.json` | `scripts/evaluate_uq.py` |
 | `mse_best_per_model.png` | `scripts/plot_mse_trajectories_multiseed.py` |
 | `omega_vs_<param>_lsp_type.png` | `scripts/plot_omega_vs_m2_lsp.py` |
-| `compute_vs_dataset[_warm|_cold].png` · `compute_per_iteration.png` · `coverage_vs_compute.png` | `scripts/plot_compute_vs_dataset.py` |
+| `compute_vs_dataset[_warm|_cold].png` · `compute_per_iteration.png` | `scripts/plot_compute_vs_dataset.py` |
 | `coverage_saturation.png` · `coverage_saturation.json` | `scripts/coverage_saturation.py` |
 | `rank/rank_<model>.png` · `rank/rank_ecdf_<model>.png` · `rank/rank_uniformity_al.json` | `scripts/rank_uniformity_al.py` (thin driver over Run3ModelGen's `emcee_diagnostics`; run `--export-only` with the torch env first, then the Run3ModelGen env) |
 | `pairwise_scatter.png` · `quality_summary.png` · `diversity_summary.png` · `param_variance_heatmap.png` · `param_entropy_heatmap.png` · `relic_density_summary.png` · `hist_dataset.png` | `analyse_runs.py` |

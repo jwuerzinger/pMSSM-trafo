@@ -218,8 +218,7 @@ def main(manifest, output_dir, sweep_id, include_status, models, min_seeds,
                    "entropy_batch": "entropy"}
     STRAT_LS = {"top_k": "--", "top_k_tol_only": ":", "entropy_batch": "-"}
 
-    fig, ax = plt.subplots(figsize=(7.0, 5.2))
-    fig3, ax3 = plt.subplots(figsize=(7.0, 5.2))
+    fig, (ax, ax3) = plt.subplots(1, 2, figsize=(12.5, 5.2))
     fig2, axes2 = plt.subplots(2, 2, figsize=(11.5, 8.6))
     (ax_l, ax_c), (ax_t, ax_s) = axes2
     summary = {}
@@ -273,23 +272,17 @@ def main(manifest, output_dir, sweep_id, include_status, models, min_seeds,
     ax.set_xlabel("cumulative surrogate compute [GPU h] (training + selection)")
     ax.set_ylabel(r"labeled-set size $|L|$")
     ax.grid(alpha=0.3, which="both")
-    ax.legend(fontsize=9)
+    ax.legend(fontsize=8)
+    ax3.set_xscale("log")
+    ax3.set_xlabel("cumulative surrogate compute [GPU h] (training + selection)")
+    ax3.set_ylabel("fraction of reference in-band support covered")
+    ax3.grid(alpha=0.3, which="both")
     fig.tight_layout()
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
     p = out / "compute_vs_dataset.png"
     fig.savefig(p, dpi=200)
     click.echo(f"[compute] wrote {p}")
-
-    ax3.set_xscale("log")
-    ax3.set_xlabel("cumulative surrogate compute [GPU h] (training + selection)")
-    ax3.set_ylabel("fraction of reference in-band support covered")
-    ax3.grid(alpha=0.3, which="both")
-    ax3.legend(fontsize=8, loc="upper left")
-    fig3.tight_layout()
-    p3 = out / "coverage_vs_compute.png"
-    fig3.savefig(p3, dpi=200)
-    click.echo(f"[compute] wrote {p3}")
 
     ax_l.set_ylabel(r"labeled-set size $|L|$")
     ax_l.grid(alpha=0.3)
