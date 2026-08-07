@@ -52,7 +52,6 @@ from mcmc_diagnostics import (  # noqa: E402
     DEFAULT_AL_PICKS,
     MODEL_DISPLAY,
     PARAM_ORDER,
-    _picks_from_manifest,
 )
 
 try:                                    # only needed when building the cache
@@ -67,6 +66,37 @@ _UP_TO_NTUPLE = {"AT": "IN_At", "Ab": "IN_Ab", "Atau": "IN_Atau", "M_1": "IN_M_1
                  "M_2": "IN_M_2", "meL": "IN_meL", "meR": "IN_meR", "mu": "IN_mu",
                  "tanb": "IN_tanb"}
 ALPHA = 0.01
+
+
+def _pick_run_dirs(manifest: str, picks: dict, sweep_id: str | None,
+                   statuses: set[str]) -> dict[str, list[str]]:
+    """Run dirs per pick, restricted to one sweep.
+
+    ``mcmc_diagnostics._picks_from_manifest`` filters on status alone, which
+    pools generations (the Deep GP cell then contributes ten replicas from two
+    sweeps). Diagnosing replica agreement across generations is meaningless,
+    since the generations differ by an ingest-time veto, so the sweep is
+    selected explicitly here.
+    """
+    import csv
+    out: dict[str, list[str]] = {m: [] for m in picks}
+    seen: set[str] = set()
+    for r in csv.DictReader(open(manifest)):
+        if r.get("status") not in statuses:
+            continue
+        if sweep_id and not (r.get("sweep_id") or "").startswith(sweep_id):
+            continue
+        m = r.get("model")
+        if m not in picks:
+            continue
+        s_, w_ = picks[m]
+        if (r.get("strategy"), r.get("warm_start")) != (s_, w_):
+            continue
+        d = r["expected_run_dir"]
+        if d not in seen:
+            seen.add(d)
+            out[m].append(d)
+    return out
 
 
 def _al_ensembles(run_dirs, veto: bool, cache: Path) -> list[np.ndarray]:
@@ -103,17 +133,25 @@ def _al_ensembles(run_dirs, veto: bool, cache: Path) -> list[np.ndarray]:
                    "to mu >= 0 before ranking.")
 @click.option("--require-neutralino-lsp/--no-require-neutralino-lsp",
               default=False, show_default=True)
+@click.option("--sweep-id", default="20260803_18", show_default=True,
+              help="Restrict to manifest rows whose sweep_id starts with this; "
+                   "empty string uses every generation.")
+@click.option("--include-status", default="completed,running,timeout,submitted",
+              show_default=True,
+              help="Manifest statuses to accept (the current sweep's rows still "
+                   "read 'submitted' until the manifest is refreshed).")
 @click.option("--cache-dir", default="/ptmp/jwuerzin/analysis/all_runs/rank/chains",
               show_default=True, help="Where the per-cell chain .npz caches live.")
 @click.option("--export-only", is_flag=True, default=False,
               help="Only build the chain caches (run this with the torch env).")
 def main(manifest, output_dir, models, discard, fold_signs, require_neutralino_lsp,
-         cache_dir, export_only):
+         sweep_id, include_status, cache_dir, export_only):
     picks = dict(DEFAULT_AL_PICKS)
     if models:
         wanted = {m.strip() for m in models.split(",")}
         picks = {m: sw for m, sw in picks.items() if m in wanted}
-    run_dirs = _picks_from_manifest(manifest, picks)
+    statuses = {x.strip() for x in include_status.split(",") if x.strip()}
+    run_dirs = _pick_run_dirs(manifest, picks, sweep_id or None, statuses)
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -122,14 +160,17 @@ def main(manifest, output_dir, models, discard, fold_signs, require_neutralino_l
             "emcee_diagnostics unavailable: run with "
             "Run3ModelGen/.pixi/envs/default/bin/python, or pass --export-only "
             "to build the chain caches with the torch environment first")
-    payload = {"config": {"discard": discard, "fold_signs": fold_signs,
+    payload = {"config": {"sweep_id": sweep_id, "discard": discard,
+                          "fold_signs": fold_signs,
                           "alpha": ALPHA, "bins": None if ed is None else ed.RANK_BINS,
                           "require_neutralino_lsp": require_neutralino_lsp,
                           "source": "Run3ModelGen emcee_diagnostics"},
                "results": {}}
 
     for model, dirs in run_dirs.items():
-        cache = Path(cache_dir) / f"{model}_veto{int(require_neutralino_lsp)}.npz"
+        tag = (sweep_id or "all").replace("/", "_")
+        cache = (Path(cache_dir)
+                 / f"{model}_{tag}_veto{int(require_neutralino_lsp)}.npz")
         chains = _al_ensembles(dirs, require_neutralino_lsp, cache)
         if export_only:
             click.echo(f"[rank] cached {len(chains)} replicas -> {cache}")
