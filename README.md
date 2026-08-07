@@ -541,6 +541,7 @@ Every PNG under `analysis/all_runs/` (and equivalent output dirs) comes from one
 | `mse_best_per_model.png` | `scripts/plot_mse_trajectories_multiseed.py` |
 | `omega_vs_<param>_lsp_type.png` | `scripts/plot_omega_vs_m2_lsp.py` |
 | `compute_vs_dataset[_warm|_cold].png` · `compute_per_iteration.png` | `scripts/plot_compute_vs_dataset.py` |
+| `rank_uniformity_<model>.png` · `rank_uniformity_al.json` | `scripts/rank_uniformity_al.py` |
 | `pairwise_scatter.png` · `quality_summary.png` · `diversity_summary.png` · `param_variance_heatmap.png` · `param_entropy_heatmap.png` · `relic_density_summary.png` · `hist_dataset.png` | `analyse_runs.py` |
 | GIFs under any `<run>/gifs/` directory (`scatterplots.gif`, `losses.gif`, `true_vs_pred_*.gif`, …) | `make_iteration_gifs.py`, invoked automatically at the end of every AL run |
 
