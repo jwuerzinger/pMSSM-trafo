@@ -112,6 +112,26 @@ fi
 # allowed choice.
 PER_SEED_GRES="gpu:2"
 
+# ---- Optional resume mode -----------------------------------------------------
+# With AL_RESUME_TO=<n>, each seed continues its EXISTING per-seed directory
+# until it has n iterations in total: the per-seed n_additional is derived from
+# that directory's state.pt, and seeds already at >= n are skipped. This keeps
+# one bundle job per cell instead of one job per seed (the per-user job limit
+# makes 5 single-seed resumes expensive), and it is idempotent, so a second
+# resume round can reuse the same command.
+if [[ -n "${AL_RESUME_TO:-}" ]]; then
+    RESUME_PYTHON="${REPO_ROOT}/.pixi/envs/${PIXI_ENV:-rocm}/bin/python"
+    echo "[bundle] resume mode: continuing each seed to ${AL_RESUME_TO} iterations"
+fi
+
+_iters_done() {  # $1 = run dir; echoes iteration count, or empty on failure
+    "${RESUME_PYTHON}" - "$1" <<'PY' 2>/dev/null
+import sys, torch
+s = torch.load(f"{sys.argv[1]}/state.pt", weights_only=False, map_location="cpu")
+print(len(list(s.get("al_n_train") or [])))
+PY
+}
+
 # ---- Fork one srun per seed on its own node -----------------------------------
 # Each srun inherits the exported AL_OUTPUT_DIR / AL_EXTRA_ARGS set on its line
 # (bash `VAR=val cmd &` applies VAR only to that command, per-iteration).
@@ -127,10 +147,34 @@ for seed in "${SEEDS_ARR[@]}"; do
         per_seed_extra="${per_seed_extra} ${AL_EXTRA_ARGS_BASE}"
     fi
 
+    # Resume mode: derive this seed's n_additional from its own state.pt.
+    per_seed_resume_from=""
+    per_seed_n_add=""
+    if [[ -n "${AL_RESUME_TO:-}" ]]; then
+        if [[ ! -f "${per_seed_dir}/state.pt" ]]; then
+            echo "[bundle] seed=${seed}: no state.pt in ${per_seed_dir} — skipped" >&2
+            continue
+        fi
+        done_iters="$(_iters_done "${per_seed_dir}")"
+        if [[ -z "${done_iters}" ]]; then
+            echo "[bundle] seed=${seed}: could not read state.pt — skipped" >&2
+            continue
+        fi
+        if (( done_iters >= AL_RESUME_TO )); then
+            echo "[bundle] seed=${seed}: already at ${done_iters} iterations — skipped"
+            continue
+        fi
+        per_seed_resume_from="${per_seed_dir}"
+        per_seed_n_add=$(( AL_RESUME_TO - done_iters ))
+        echo "[bundle] seed=${seed}: at ${done_iters}, resuming +${per_seed_n_add}"
+    fi
+
     echo "[bundle] launching seed=${seed} -> ${per_seed_dir}"
 
     AL_OUTPUT_DIR="${per_seed_dir}" \
     AL_EXTRA_ARGS="${per_seed_extra}" \
+    AL_RESUME_FROM="${per_seed_resume_from}" \
+    AL_N_ADDITIONAL_ITERATIONS="${per_seed_n_add}" \
     srun \
         --nodes=1 \
         --ntasks=1 \
