@@ -227,6 +227,9 @@ def rank_uniformity(chains: list[np.ndarray], params: list[str],
     }
 
 
+ALPHA = 0.01  # family-wise level for the Holm-adjusted uniformity test
+
+
 def _plot(res: dict, params: list[str], out_path: Path, model_label: str) -> None:
     import matplotlib
     matplotlib.use("Agg")
@@ -245,15 +248,44 @@ def _plot(res: dict, params: list[str], out_path: Path, model_label: str) -> Non
         ax.axhline(1.0, color="black", ls="--", lw=0.9)
         ax.set_ylabel(name.replace("IN_", ""), fontsize=9)
         ax.grid(alpha=0.25)
-        sh = res["shapes"][name]
+        sh = res["shapes_thinned"][name]
         tag = "uniform" if all(s == "uniform" for s in sh) else \
             "/".join(sorted(set(s for s in sh if s != "uniform")))
+        stat = res["per_param"].get(name, {})
+        p_holm = stat.get("p_holm")
+        failed = (res["estimable"] and p_holm is not None
+                  and np.isfinite(p_holm) and p_holm < ALPHA)
+        if failed:
+            for spine in ax.spines.values():
+                spine.set_edgecolor("crimson")
+                spine.set_linewidth(1.8)
+            tag = f"{tag}  (p={p_holm:.1e})"
         ax.text(0.98, 0.94, tag, transform=ax.transAxes, ha="right", va="top",
-                fontsize=8, color="0.35")
+                fontsize=8, color="crimson" if failed else "0.35",
+                fontweight="bold" if failed else "normal")
     for ax in axes[-1]:
         ax.set_xlabel("pooled rank (normalised)")
     axes[0, 0].legend(fontsize=7, ncol=2)
-    fig.tight_layout()
+
+    # Figure-level verdict: the test is a family over the nine parameters, so
+    # the Holm-adjusted minimum is the summary statistic.
+    if not res["estimable"]:
+        verdict, colour = (f"NOT ESTIMABLE: {res['n_thinned']} independent draws/replica "
+                           f"(need {5 * B} for {B} bins)"), "0.35"
+    else:
+        wp = res["worst_p_holm"]
+        if wp is not None and np.isfinite(wp) and wp < ALPHA:
+            verdict = (f"FAILS uniformity: p_Holm={wp:.1e} < {ALPHA} "
+                       f"({res['worst_param'].replace('IN_', '')}); replicas do not "
+                       f"realise a common acquisition distribution")
+            colour = "crimson"
+        else:
+            verdict = (f"passes: p_Holm={wp:.2f} >= {ALPHA} "
+                       f"(no evidence against replica agreement)")
+            colour = "seagreen"
+    fig.text(0.5, 0.995, verdict, ha="center", va="top", fontsize=10,
+             color=colour, fontweight="bold")
+    fig.tight_layout(rect=(0, 0, 1, 0.975))
     fig.savefig(out_path, dpi=200)
     plt.close(fig)
 
@@ -282,7 +314,7 @@ def main(manifest, output_dir, models, thin_mode, batch_size, require_neutralino
     out_dir.mkdir(parents=True, exist_ok=True)
 
     payload = {"config": {"thin_mode": thin_mode, "batch_size": batch_size,
-                          "bins": RANK_BINS,
+                          "bins": RANK_BINS, "alpha": ALPHA,
                           "require_neutralino_lsp": require_neutralino_lsp},
                "results": {}}
     for model, dirs in run_dirs.items():
@@ -302,12 +334,21 @@ def main(manifest, output_dir, models, thin_mode, batch_size, require_neutralino
         res = rank_uniformity(chains, FREE_PARAMS, step)
         res["tau_within"] = tau_w
         res["tau_multichain"] = tau_m
+        res["verdict"] = ("not_estimable" if not res["estimable"] else
+                          "fail" if (res["worst_p_holm"] is not None
+                                     and np.isfinite(res["worst_p_holm"])
+                                     and res["worst_p_holm"] < ALPHA) else "pass")
         payload["results"][model] = res
         _plot(res, FREE_PARAMS, out_dir / f"rank_uniformity_{model}.png",
               MODEL_DISPLAY.get(model, model))
         nonuni = {p: s for p, s in res["shapes_thinned"].items()
                   if any(x != "uniform" for x in s)}
-        click.echo(f"[rank] {model:<16} C={res['n_chains']} N={res['n_all']:>6} "
+        verdict = ("NOT-ESTIMABLE" if not res["estimable"] else
+                   "FAIL" if (res["worst_p_holm"] is not None
+                              and np.isfinite(res["worst_p_holm"])
+                              and res["worst_p_holm"] < ALPHA) else "pass")
+        click.echo(f"[rank] {model:<16} [{verdict:>13}] "
+                   f"C={res['n_chains']} N={res['n_all']:>6} "
                    f"tau_within={tau_w:6.1f} tau_multi={tau_m:7.1f} "
                    f"thin={step:>3} n_test={res['n_thinned']:>5} "
                    f"p_Holm={res['worst_p_holm']:.1e} ({res['worst_param']}); "
