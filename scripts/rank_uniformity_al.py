@@ -166,8 +166,12 @@ def _tau_within(chains: list[np.ndarray]) -> float:
 
 
 def rank_uniformity(chains: list[np.ndarray], params: list[str],
-                    step: int) -> dict:
-    """Pooled-rank histograms per replica + a thinned homogeneity chi-square."""
+                    step: int, max_draws: int | None = None) -> dict:
+    """Pooled-rank histograms per replica + a thinned homogeneity chi-square.
+
+    ``max_draws`` truncates the thinned sample to a common size so that the
+    test has the same power for every model (see --equal-power).
+    """
     from scipy.stats import chi2, rankdata
 
     C = len(chains)
@@ -175,6 +179,8 @@ def rank_uniformity(chains: list[np.ndarray], params: list[str],
     flat = [c[:n_all] for c in chains]
     thin = [c[::step] for c in flat]
     n_thin = min(len(t) for t in thin)
+    if max_draws is not None:
+        n_thin = min(n_thin, int(max_draws))
     thin = [t[:n_thin] for t in thin]
 
     B = RANK_BINS
@@ -318,7 +324,12 @@ def _plot(res: dict, params: list[str], out_path: Path, model_label: str) -> Non
               help="Points per acquisition batch (--thin-mode batch).")
 @click.option("--require-neutralino-lsp/--no-require-neutralino-lsp",
               default=False, show_default=True)
-def main(manifest, output_dir, models, thin_mode, batch_size, require_neutralino_lsp):
+@click.option("--equal-power/--no-equal-power", default=False, show_default=True,
+              help="Cap every model to the common minimum replica count and "
+                   "thinned-draw count, so the p-values are comparable across "
+                   "models rather than reflecting differing test resolution.")
+def main(manifest, output_dir, models, thin_mode, batch_size, require_neutralino_lsp,
+         equal_power):
     picks = dict(DEFAULT_AL_PICKS)
     if models:
         wanted = {m.strip() for m in models.split(",")}
@@ -332,6 +343,9 @@ def main(manifest, output_dir, models, thin_mode, batch_size, require_neutralino
                           "bins": RANK_BINS, "alpha": ALPHA,
                           "require_neutralino_lsp": require_neutralino_lsp},
                "results": {}}
+    # Pass 1: load every cell and measure its thinning step, so an equal-power
+    # run can pick the common replica count and draw count before testing.
+    loaded: dict[str, dict] = {}
     for model, dirs in run_dirs.items():
         chains = _load_al_chains(dirs, param_idx,
                                  require_neutralino_lsp=require_neutralino_lsp)
@@ -346,7 +360,26 @@ def main(manifest, output_dir, models, thin_mode, batch_size, require_neutralino
             step = max(1, int(batch_size))
         else:
             step = 1
-        res = rank_uniformity(chains, FREE_PARAMS, step)
+        n_all = min(len(c) for c in chains)
+        loaded[model] = {"chains": chains, "tau_w": tau_w, "tau_m": tau_m,
+                         "step": step, "n_avail": len(range(0, n_all, step))}
+    if not loaded:
+        raise click.ClickException("no usable cells")
+
+    cap_C = min(len(v["chains"]) for v in loaded.values()) if equal_power else None
+    cap_n = min(v["n_avail"] for v in loaded.values()) if equal_power else None
+    if equal_power:
+        click.echo(f"[rank] equal power: {cap_C} replicas x {cap_n} independent "
+                   f"draws for every model")
+        payload["config"]["equal_power"] = {"n_chains": cap_C, "n_draws": cap_n}
+
+    # Pass 2: test every cell (capped to the common resolution if requested).
+    for model, v in loaded.items():
+        chains, step = v["chains"], v["step"]
+        tau_w, tau_m = v["tau_w"], v["tau_m"]
+        if cap_C is not None:
+            chains = chains[:cap_C]
+        res = rank_uniformity(chains, FREE_PARAMS, step, max_draws=cap_n)
         res["tau_within"] = tau_w
         res["tau_multichain"] = tau_m
         res["verdict"] = ("not_estimable" if not res["estimable"] else
