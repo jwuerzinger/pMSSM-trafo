@@ -305,27 +305,38 @@ def main(manifest, output_dir, sweep_id, include_status, models, min_seeds,
     all_models = [m for m in MODEL_DISPLAY if not m.startswith("tabpfn")]
     all_strats = ("entropy_batch", "top_k", "top_k_tol_only")
     for warm_mode in ("warm", "cold"):
-        figw, axw = plt.subplots(figsize=(7.0, 5.2))
+        # Same two-panel layout as the best-per-model figure: what the compute
+        # buys in labels (left) and in covered support (right), for every
+        # (model, strategy) cell of this warm mode.
+        figw, (axw, axw2) = plt.subplots(1, 2, figsize=(12.5, 5.2))
         models_present, strats_present = set(), set()
+        cov_present = False
         for model in all_models:
             for strat in all_strats:
                 cell = _collect_cell(model, strat, warm_mode)
                 if cell is None:
                     continue
-                Cm, Lm, _Tm, _Sm, _Vm = cell
-                axw.plot(Cm.mean(0), Lm.mean(0), lw=1.5,
-                         ls=STRAT_LS[strat],
-                         color=phr.MODEL_COLORS.get(model, "gray"))
+                Cm, Lm, _Tm, _Sm, Vm = cell
+                col = phr.MODEL_COLORS.get(model, "gray")
+                axw.plot(Cm.mean(0), Lm.mean(0), lw=1.5, ls=STRAT_LS[strat],
+                         color=col)
+                if Vm is not None and np.isfinite(Vm).any():
+                    axw2.plot(Cm.mean(0), np.nanmean(Vm, axis=0), lw=1.5,
+                              ls=STRAT_LS[strat], color=col)
+                    cov_present = True
                 models_present.add(model)
                 strats_present.add(strat)
         if not models_present:
             plt.close(figw)
             click.echo(f"[compute] {warm_mode}: no usable cells — skipped")
             continue
-        axw.set_xscale("log")
-        axw.set_xlabel("cumulative surrogate compute [GPU h] (training + selection)")
-        axw.set_ylabel(r"labeled-set size $|L|$")
-        axw.grid(alpha=0.3, which="both")
+        for ax_i, lab in ((axw, r"labeled-set size $|L|$"),
+                          (axw2, "fraction of reference in-band support covered")):
+            ax_i.set_xscale("log")
+            ax_i.set_xlabel("cumulative surrogate compute [GPU h] "
+                            "(training + selection)")
+            ax_i.set_ylabel(lab)
+            ax_i.grid(alpha=0.3, which="both")
         mh = [Line2D([], [], color=phr.MODEL_COLORS.get(m, "gray"), lw=1.6,
                      label=MODEL_DISPLAY.get(m, m))
               for m in all_models if m in models_present]
@@ -335,6 +346,11 @@ def main(manifest, output_dir, sweep_id, include_status, models, min_seeds,
         leg1 = axw.legend(handles=mh, fontsize=8, loc="upper left")
         axw.add_artist(leg1)
         axw.legend(handles=sh, fontsize=8, loc="lower right")
+        if not cov_present:
+            axw2.text(0.5, 0.5, "coverage disabled (--no-coverage)",
+                      transform=axw2.transAxes, ha="center", va="center",
+                      fontsize=9, color="0.45")
+        figw.tight_layout()
         pw = out / f"compute_vs_dataset_{warm_mode}.png"
         figw.savefig(pw, dpi=200)
         plt.close(figw)
