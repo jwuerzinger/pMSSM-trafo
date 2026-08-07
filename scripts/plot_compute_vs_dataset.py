@@ -35,7 +35,13 @@ for _p in (str(_REPO_ROOT), str(_REPO_ROOT / "scripts")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from mcmc_diagnostics import DEFAULT_AL_PICKS, MODEL_DISPLAY  # noqa: E402
+from mcmc_diagnostics import DEFAULT_AL_PICKS, MODEL_DISPLAY, PARAM_ORDER  # noqa: E402
+from coverage_saturation import (  # noqa: E402
+    AXES as COV_AXES,
+    _cells,
+    build_target,
+    coverage_of,
+)
 
 _TS_RE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})")
 _ITER_RE = re.compile(r"Iteration (\d+) ===")
@@ -105,7 +111,19 @@ def _selection_seconds(main_log: Path) -> dict[int, float]:
 @click.option("--models", default=None,
               help="Comma list of picks (default: all DEFAULT_AL_PICKS).")
 @click.option("--min-seeds", default=2, show_default=True)
-def main(manifest, output_dir, sweep_id, include_status, models, min_seeds):
+@click.option("--coverage/--no-coverage", default=True, show_default=True,
+              help="Also plot covered in-band support versus cumulative compute.")
+@click.option("--mcmc-data-dir", default="/ptmp/jwuerzin/data/neutralino_v4",
+              show_default=True, help="Reference defining the target support.")
+@click.option("--tolerance", default=0.10, show_default=True)
+@click.option("--n-bins", default=12, show_default=True)
+@click.option("--min-cell", default=20, show_default=True)
+@click.option("--mcmc-max-samples", default=500_000, show_default=True)
+@click.option("--require-neutralino-lsp/--no-require-neutralino-lsp",
+              default=False, show_default=True)
+def main(manifest, output_dir, sweep_id, include_status, models, min_seeds,
+         coverage, mcmc_data_dir, tolerance, n_bins, min_cell, mcmc_max_samples,
+         require_neutralino_lsp):
     import torch
     import matplotlib
     matplotlib.use("Agg")
@@ -121,11 +139,40 @@ def main(manifest, output_dir, sweep_id, include_status, models, min_seeds):
             if r["status"] in statuses
             and (sweep_id is None or r.get("sweep_id", "").startswith(sweep_id))]
 
+    cov_ctx = None
+    if coverage:
+        from analyse_runs import filter_run_neutralino_lsp, load_run
+        ax_idx = [PARAM_ORDER.index(a) for a in COV_AXES]
+        rng = np.random.default_rng(20260807)
+        edges, tmap, n_target, _held = build_target(
+            mcmc_data_dir, ax_idx, n_bins, min_cell, tolerance,
+            mcmc_max_samples, require_neutralino_lsp, rng)
+        cov_ctx = (ax_idx, edges, tmap, n_target, load_run,
+                   filter_run_neutralino_lsp)
+        click.echo(f"[compute] coverage target: {n_target} cells")
+
+    def _cov_trajectory(run_dir: str) -> list[float] | None:
+        """Covered fraction of the target support after each iteration."""
+        ax_idx, edges, tmap, n_target, load_run, veto_fn = cov_ctx
+        try:
+            run = load_run(run_dir)
+            if require_neutralino_lsp:
+                run = veto_fn(run)
+        except Exception:
+            return None
+        Y = np.asarray(run.Y).ravel()
+        inb = np.abs(Y - 0.12) / 0.12 < tolerance
+        cells = np.where(inb, _cells(np.asarray(run.X)[:, ax_idx], edges), -1)
+        nt = list(run.n_train_per_iter)
+        return [coverage_of(cells[:min(int(n), len(cells))], tmap, n_target)
+                for n in nt]
+
     def _collect_cell(model: str, strat: str, warm: str):
         """(Cm, Lm) seed matrices for one cell, or None if too few seeds."""
         sel = [r for r in rows
                if (r["model"], r["strategy"], r["warm_start"]) == (model, strat, warm)]
         per_seed_C, per_seed_L, per_seed_T, per_seed_S = [], [], [], []
+        per_seed_V: list[np.ndarray] = []
         seen = set()
         for r in sel:
             d = Path(r["expected_run_dir"])
@@ -153,19 +200,26 @@ def main(manifest, output_dir, sweep_id, include_status, models, min_seeds):
                 per_seed_L.append(np.asarray(L, dtype=float))
                 per_seed_T.append(np.asarray(T))
                 per_seed_S.append(np.asarray(S))
+                if cov_ctx is not None:
+                    cv = _cov_trajectory(str(d))
+                    per_seed_V.append(np.asarray(cv, dtype=float)
+                                      if cv else np.full(len(C), np.nan))
         if len(per_seed_C) < min_seeds:
             return None
         n_it = min(len(c) for c in per_seed_C)
+        V = (np.stack([v[:n_it] for v in per_seed_V])
+             if len(per_seed_V) == len(per_seed_C) and per_seed_V else None)
         return (np.stack([c[:n_it] for c in per_seed_C]),
                 np.stack([l[:n_it] for l in per_seed_L]),
                 np.stack([t[:n_it] for t in per_seed_T]),
-                np.stack([s[:n_it] for s in per_seed_S]))
+                np.stack([s[:n_it] for s in per_seed_S]), V)
 
     STRAT_SHORT = {"top_k": "top-k", "top_k_tol_only": "tol-only",
                    "entropy_batch": "entropy"}
     STRAT_LS = {"top_k": "--", "top_k_tol_only": ":", "entropy_batch": "-"}
 
     fig, ax = plt.subplots(figsize=(7.0, 5.2))
+    fig3, ax3 = plt.subplots(figsize=(7.0, 5.2))
     fig2, axes2 = plt.subplots(2, 2, figsize=(11.5, 8.6))
     (ax_l, ax_c), (ax_t, ax_s) = axes2
     summary = {}
@@ -174,7 +228,7 @@ def main(manifest, output_dir, sweep_id, include_status, models, min_seeds):
         if cell is None:
             click.echo(f"[compute] {model}: too few usable seeds — skipped")
             continue
-        Cm, Lm, Tm, Sm = cell
+        Cm, Lm, Tm, Sm, Vm = cell
         n_it = Cm.shape[1]
         pick_label = MODEL_DISPLAY.get(model, model)
         if not model.startswith("tabpfn"):
@@ -187,6 +241,13 @@ def main(manifest, output_dir, sweep_id, include_status, models, min_seeds):
         ax.plot(c_mu, l_mu, "o-", ms=2.5, lw=1.6, color=col,
                 label=pick_label)
         ax.fill_betweenx(l_mu, c_mu - c_sem, c_mu + c_sem, color=col, alpha=0.2, lw=0)
+
+        if Vm is not None and np.isfinite(Vm).any():
+            v_mu = np.nanmean(Vm, axis=0)
+            v_sem = np.nanstd(Vm, axis=0, ddof=1) / np.sqrt(len(Vm))
+            ax3.plot(c_mu, v_mu, "o-", ms=2.5, lw=1.6, color=col, label=pick_label)
+            ax3.fill_between(c_mu, v_mu - v_sem, v_mu + v_sem, color=col,
+                             alpha=0.2, lw=0)
 
         # companion figure: |L| vs iteration, per-iteration compute vs iteration
         it_ax = np.arange(1, n_it + 1)
@@ -220,6 +281,16 @@ def main(manifest, output_dir, sweep_id, include_status, models, min_seeds):
     fig.savefig(p, dpi=200)
     click.echo(f"[compute] wrote {p}")
 
+    ax3.set_xscale("log")
+    ax3.set_xlabel("cumulative surrogate compute [GPU h] (training + selection)")
+    ax3.set_ylabel("fraction of reference in-band support covered")
+    ax3.grid(alpha=0.3, which="both")
+    ax3.legend(fontsize=8, loc="upper left")
+    fig3.tight_layout()
+    p3 = out / "coverage_vs_compute.png"
+    fig3.savefig(p3, dpi=200)
+    click.echo(f"[compute] wrote {p3}")
+
     ax_l.set_ylabel(r"labeled-set size $|L|$")
     ax_l.grid(alpha=0.3)
     ax_l.legend(fontsize=8)
@@ -248,7 +319,7 @@ def main(manifest, output_dir, sweep_id, include_status, models, min_seeds):
                 cell = _collect_cell(model, strat, warm_mode)
                 if cell is None:
                     continue
-                Cm, Lm, _Tm, _Sm = cell
+                Cm, Lm, _Tm, _Sm, _Vm = cell
                 axw.plot(Cm.mean(0), Lm.mean(0), lw=1.5,
                          ls=STRAT_LS[strat],
                          color=phr.MODEL_COLORS.get(model, "gray"))

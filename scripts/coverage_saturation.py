@@ -58,6 +58,43 @@ def _cells(X: np.ndarray, edges: list[np.ndarray]) -> np.ndarray:
     return idx
 
 
+
+def build_target(mcmc_data_dir: str, ax_idx: list[int], n_bins: int, min_cell: int,
+                 tolerance: float, max_samples: int, veto: bool, rng, true_val=0.12):
+    """Target support from half the reference: (edges, tmap, n_target, held_out).
+
+    Shared with ``plot_compute_vs_dataset.py`` so both figures score coverage
+    against the identical support definition.
+    """
+    from pmssm.data import load_mcmc_data
+    Xm, Ym = load_mcmc_data(data_dir=mcmc_data_dir, target="DMRD",
+                            require_neutralino_lsp=veto, max_samples=max_samples)
+    Xm = np.asarray(Xm.numpy() if hasattr(Xm, "numpy") else Xm)[:, ax_idx]
+    Ym = np.asarray(Ym.numpy() if hasattr(Ym, "numpy") else Ym).ravel()
+    perm = rng.permutation(len(Xm))
+    half = len(perm) // 2
+    X_a, Y_a = Xm[perm[:half]], Ym[perm[:half]]
+    X_b, Y_b = Xm[perm[half:]], Ym[perm[half:]]
+    X_def = X_a[np.abs(Y_a - true_val) / true_val < tolerance]
+    edges = [np.quantile(X_def[:, j], np.linspace(0, 1, n_bins + 1))
+             for j in range(len(ax_idx))]
+    for e in edges:
+        e[0], e[-1] = -np.inf, np.inf
+    counts = np.bincount(_cells(X_def, edges), minlength=n_bins ** len(ax_idx))
+    target = np.where(counts >= min_cell)[0]
+    tmap = -np.ones(n_bins ** len(ax_idx), dtype=np.int64)
+    tmap[target] = np.arange(len(target))
+    return edges, tmap, len(target), (X_b, Y_b)
+
+
+def coverage_of(cells: np.ndarray, tmap: np.ndarray, n_target: int) -> float:
+    """Fraction of target cells hit; entries < 0 are treated as out-of-band."""
+    cells = cells[cells >= 0]
+    m = tmap[cells]
+    m = m[m >= 0]
+    return len(np.unique(m)) / n_target if n_target else float("nan")
+
+
 @click.command()
 @click.option("--manifest", default="/ptmp/jwuerzin/analysis/all_runs/sweep_manifest.csv",
               show_default=True)
