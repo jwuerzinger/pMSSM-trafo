@@ -283,9 +283,18 @@ def _plot(res: dict, params: list[str], out_path: Path, model_label: str) -> Non
             verdict = (f"passes: p_Holm={wp:.2f} >= {ALPHA} "
                        f"(no evidence against replica agreement)")
             colour = "seagreen"
-    fig.text(0.5, 0.995, verdict, ha="center", va="top", fontsize=10,
+    fig.text(0.5, 0.997, verdict, ha="center", va="top", fontsize=10,
              color=colour, fontweight="bold")
-    fig.tight_layout(rect=(0, 0, 1, 0.975))
+    # The histograms show ALL acquired points (the smoother picture); the test
+    # and the shape labels use the thinned, approximately independent subsample.
+    # Stating both stops a visually large but unresolvable wiggle from reading
+    # as a missed failure.
+    fig.text(0.5, 0.968,
+             f"histograms: all {res['n_all']} points/replica · "
+             f"test and shape labels: {res['n_thinned']} independent draws/replica "
+             f"(thinned by tau={res['thin_step']})",
+             ha="center", va="top", fontsize=8, color="0.4")
+    fig.tight_layout(rect=(0, 0, 1, 0.955))
     fig.savefig(out_path, dpi=200)
     plt.close(fig)
 
