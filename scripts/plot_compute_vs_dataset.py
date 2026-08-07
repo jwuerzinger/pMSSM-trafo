@@ -284,6 +284,11 @@ def main(manifest, output_dir, sweep_id, include_status, models, min_seeds,
     fig.savefig(p, dpi=200)
     click.echo(f"[compute] wrote {p}")
 
+    import json
+    (out / "compute_vs_dataset.json").write_text(json.dumps(
+        {"best_per_model": summary, "per_cell": cell_summary}, indent=1))
+    click.echo(f"[compute] wrote {out / 'compute_vs_dataset.json'}")
+
     ax_l.set_ylabel(r"labeled-set size $|L|$")
     ax_l.grid(alpha=0.3)
     ax_l.legend(fontsize=8)
@@ -304,6 +309,7 @@ def main(manifest, output_dir, sweep_id, include_status, models, min_seeds,
     from matplotlib.lines import Line2D
     all_models = [m for m in MODEL_DISPLAY if not m.startswith("tabpfn")]
     all_strats = ("entropy_batch", "top_k", "top_k_tol_only")
+    cell_summary: dict = {}
     for warm_mode in ("warm", "cold"):
         # Same two-panel layout as the best-per-model figure: what the compute
         # buys in labels (left) and in covered support (right), for every
@@ -324,6 +330,18 @@ def main(manifest, output_dir, sweep_id, include_status, models, min_seeds,
                     axw2.plot(Cm.mean(0), np.nanmean(Vm, axis=0), lw=1.5,
                               ls=STRAT_LS[strat], color=col)
                     cov_present = True
+                cell_summary.setdefault(warm_mode, {}).setdefault(model, {})[strat] = {
+                    "n_seeds": int(Cm.shape[0]),
+                    "gpu_hours_final": float(Cm.mean(0)[-1]),
+                    "L_final": float(Lm.mean(0)[-1]),
+                    "coverage_final": (float(np.nanmean(Vm, axis=0)[-1])
+                                       if Vm is not None and np.isfinite(Vm).any()
+                                       else None),
+                    "coverage_sem": (float(np.nanstd(Vm, axis=0, ddof=1)[-1]
+                                           / np.sqrt(len(Vm)))
+                                     if Vm is not None and len(Vm) > 1
+                                     and np.isfinite(Vm).any() else None),
+                }
                 models_present.add(model)
                 strats_present.add(strat)
         if not models_present:
