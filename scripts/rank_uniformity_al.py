@@ -260,7 +260,7 @@ def _plot(res: dict, params: list[str], out_path: Path, model_label: str) -> Non
                 spine.set_edgecolor("crimson")
                 spine.set_linewidth(1.8)
             tag = f"{tag}  (p={p_holm:.1e})"
-        ax.text(0.98, 0.94, tag, transform=ax.transAxes, ha="right", va="top",
+        ax.text(0.5, 0.04, tag, transform=ax.transAxes, ha="center", va="bottom",
                 fontsize=8, color="crimson" if failed else "0.35",
                 fontweight="bold" if failed else "normal")
     for ax in axes[-1]:
