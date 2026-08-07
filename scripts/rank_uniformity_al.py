@@ -1,42 +1,32 @@
-"""Rank-statistic uniformity across AL seed replicas (and the MCMC reference).
+"""Rank-statistic uniformity across AL seed replicas, via Run3ModelGen.
 
-Ports the rank-plot / computational-faithfulness check of Run3ModelGen's
-``emcee_diagnostics.py`` (Vehtari et al. 2021 rank plots, the computable
-stand-in for SBC rank statistics) to active-learning acquisition streams.
+This is a thin driver: the statistics and the figures come from
+``Run3ModelGen/source/Run3ModelGen/scripts/emcee_diagnostics.py`` itself
+(``autocorr_time``, ``rank_uniformity``, ``plot_rank_hist``,
+``plot_rank_ecdf``), so the AL cells and the MCMC reference are diagnosed by
+one implementation under one set of conventions. Nothing statistical is
+reimplemented here; this module only reshapes AL runs into the ensemble
+layout upstream expects and loops over the sweep's best-per-model picks.
 
-Every draw of a parameter is ranked POOLED over all replicas, then the ranks
-are histogrammed per replica. If the replicas realise the same acquisition
-distribution each histogram is uniform; departures show HOW they differ:
+Mapping onto the upstream data model:
 
-  * ``inverted-U``  — this replica is concentrated in a sub-region of the
-    pooled range (redundant coverage; the within-sequence deficit)
-  * ``U-shaped``    — over-dispersed relative to the pooled sample
-  * ``skewed-low/high`` — systematically displaced toward one end (the
-    between-replica offset seen on the weakly constrained slepton axes)
+  * one seed replica  -> one "ensemble" holding a single walker, i.e. an array
+    of shape ``(n_acquired, 1, n_params)`` in acquisition order
+  * ``max_tau``       -> ``max`` over replicas and parameters of
+    ``emcee.autocorr.integrated_time`` (upstream's ``all_tau_max`` rule)
+  * ``discard``       -> acquisitions dropped from the head of each replica;
+    the default 0 keeps the shared initial random block, ``--discard 2000``
+    drops it so only genuinely acquired points are compared
 
-Interpretation for AL (NOT the MCMC reading): the seeds are replicas of a
-stochastic acquisition process, not Markov chains targeting a common
-stationary law, so uniformity is a *reproducibility* statement (independently
+Interpretation for AL (NOT the MCMC reading): the replicas are repetitions of
+a stochastic acquisition process, not Markov chains targeting a common
+stationary law, so uniformity is a reproducibility statement (independently
 seeded runs acquire statistically indistinguishable point sets), never a
-statement about posterior calibration. This is the same caveat that applies
-to the R-hat column of the paper's diagnostics table.
+statement about calibration of the underlying distribution.
 
-Thinning: the histogram uses every acquired point, the TEST uses a thinned,
-approximately independent subsample, because a chi-square that assumes
-independence rejects far too often when consecutive draws are correlated.
-Two conventions are offered:
-
-  * ``--thin-mode tau``   (default) thin by the measured integrated
-    autocorrelation length of the acquisition sequence (max over parameters,
-    from ESS_bulk) — a no-op for the neural surrogates (tau ~ 1) and the
-    real correction for the exact GP (tau ~ 25-40)
-  * ``--thin-mode batch`` keep one point per acquisition batch: points inside
-    one iteration are chosen jointly by one frozen surrogate, so the
-    iteration, not the point, is the natural independent unit
-
-Usage:
-    python scripts/rank_uniformity_al.py --require-neutralino-lsp
-    python scripts/rank_uniformity_al.py --thin-mode batch --models deep_gp
+Run with the Run3ModelGen environment, which carries emcee and arviz:
+    Run3ModelGen/.pixi/envs/default/bin/python scripts/rank_uniformity_al.py \\
+        --require-neutralino-lsp --no-fold-signs
 """
 from __future__ import annotations
 
@@ -48,447 +38,150 @@ import click
 import numpy as np
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-for _p in (str(_REPO_ROOT), str(_REPO_ROOT / "scripts")):
+for _p in (str(_REPO_ROOT), str(_REPO_ROOT / "scripts"),
+           str(_REPO_ROOT / "Run3ModelGen" / "source" / "Run3ModelGen" / "scripts")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
+
+try:                       # needs the Run3ModelGen env (emcee, arviz)
+    import emcee_diagnostics as ed  # noqa: E402  (single source of truth)
+except ImportError:        # --export-only runs in the torch env instead
+    ed = None
 
 from mcmc_diagnostics import (  # noqa: E402
     DEFAULT_AL_PICKS,
     MODEL_DISPLAY,
     PARAM_ORDER,
-    _load_al_chains,
-    _load_chains,
     _picks_from_manifest,
-    ess_bulk,
 )
 
-RANK_BINS = 10        # rank-histogram bins (upstream convention)
-RANK_Z_FLAT = 3.0     # |z| below this: no shape called
-FREE_PARAMS = ["IN_M_1", "IN_M_2", "IN_mu", "IN_tanb", "IN_At", "IN_Ab",
-               "IN_Atau", "IN_meL", "IN_meR"]
+try:                                    # only needed when building the cache
+    from mcmc_diagnostics import _load_al_chains  # noqa: E402
+except Exception:                       # pragma: no cover
+    _load_al_chains = None
+
+# Upstream orders parameters as the sampler backend stores them (sorted), and
+# its fold logic keys off these exact names.
+FREE_PARAMS_UP = ["AT", "Ab", "Atau", "M_1", "M_2", "meL", "meR", "mu", "tanb"]
+_UP_TO_NTUPLE = {"AT": "IN_At", "Ab": "IN_Ab", "Atau": "IN_Atau", "M_1": "IN_M_1",
+                 "M_2": "IN_M_2", "meL": "IN_meL", "meR": "IN_meR", "mu": "IN_mu",
+                 "tanb": "IN_tanb"}
+ALPHA = 0.01
 
 
-def _rank_shape(counts: np.ndarray) -> tuple[str, float, float]:
-    """Classify one replica's rank histogram via two orthogonal contrasts.
+def _al_ensembles(run_dirs, veto: bool, cache: Path) -> list[np.ndarray]:
+    """One (n_acquired, 1, n_params) array per seed replica, upstream order.
 
-    location   L = sum_b p_b x_b          (which end of the pooled range)
-    dispersion Q = sum_b p_b (x_b^2 - m2) (extremes vs middle)
-
-    Both standardised by their exact discrete null moments over the B bin
-    midpoints, so no continuous approximation enters.
+    Loading ``state.pt`` needs torch, while the upstream diagnostics need
+    emcee/arviz, and the two live in different environments here. The chains
+    are therefore cached as an .npz on first use (run once with the torch
+    environment), and read back from it afterwards.
     """
-    counts = np.asarray(counts, dtype=float)
-    n, B = counts.sum(), counts.size
-    if n <= 0 or B < 3:
-        return "n/a", float("nan"), float("nan")
-    p = counts / n
-    x = (np.arange(B) + 0.5) / B - 0.5
-    m2 = float((x ** 2).mean())
-    q = x ** 2 - m2
-    var_x, var_q = float((x ** 2).mean()), float((q ** 2).mean())
-    if var_x <= 0 or var_q <= 0:
-        return "n/a", float("nan"), float("nan")
-    z_loc = float((p * x).sum() / np.sqrt(var_x / n))
-    z_dis = float((p * q).sum() / np.sqrt(var_q / n))
-    if max(abs(z_loc), abs(z_dis)) < RANK_Z_FLAT:
-        return "uniform", z_loc, z_dis
-    if abs(z_loc) >= RANK_Z_FLAT and abs(z_dis) >= RANK_Z_FLAT:
-        return "mixed", z_loc, z_dis
-    if abs(z_loc) >= abs(z_dis):
-        return ("skewed-high" if z_loc > 0 else "skewed-low"), z_loc, z_dis
-    return ("U-shaped" if z_dis > 0 else "inverted-U"), z_loc, z_dis
-
-
-def _fmt_p(v) -> str:
-    """Format a p-value, tolerating the unestimable (None/NaN) case."""
-    return "n/a" if v is None or not np.isfinite(v) else f"{v:.1e}"
-
-
-def _holm(pvals: list[float]) -> np.ndarray:
-    """Holm-Bonferroni step-down adjusted p-values, input order preserved."""
-    p = np.asarray(pvals, dtype=float)
-    out = np.full(p.size, np.nan)
-    finite = np.where(np.isfinite(p))[0]
-    if finite.size == 0:
-        return out
-    order = finite[np.argsort(p[finite])]
-    running = 0.0
-    for i, idx in enumerate(order):
-        running = max(running, min(1.0, (order.size - i) * float(p[idx])))
-        out[idx] = running
-    return out
-
-
-def _tau_multichain(chains: list[np.ndarray]) -> float:
-    """Max over parameters of M*N/ESS_bulk (the multichain autocorrelation time).
-
-    Reported for contrast only, NOT used for thinning: the multichain estimator
-    folds between-replica disagreement into an effective correlation at every
-    lag, so a permanent offset on one axis inflates it even when each sequence
-    is internally independent. Thinning by it would discard almost everything.
-    """
-    n = min(len(c) for c in chains)
-    arr = np.stack([c[:n] for c in chains])           # (M, N, P)
-    with np.errstate(divide="ignore", invalid="ignore"):
-        tau = arr.shape[0] * n / np.asarray(ess_bulk(arr), dtype=float)
-    tau = tau[np.isfinite(tau)]
-    return float(tau.max()) if tau.size else 1.0
-
-
-def _tau_within(chains: list[np.ndarray]) -> float:
-    """Within-sequence integrated autocorrelation, aggregated as upstream does.
-
-    Per replica and parameter: FFT autocorrelation, Geyer initial-positive-
-    sequence truncation, tau = 1 + 2 sum rho_t. The single thinning step is the
-    MAXIMUM over replicas and parameters, matching Run3ModelGen's
-    ``emcee_diagnostics.py`` (``all_tau_max`` per ensemble, then the max over
-    ensembles). Averaging over replicas instead would presuppose that the
-    replicas are interchangeable, which is the hypothesis under test.
-    """
-    n = min(len(c) for c in chains)
-    taus = []
-    for pi in range(chains[0].shape[1]):
-        per_chain = []
-        for c in chains:
-            x = np.asarray(c[:n, pi], dtype=float)
-            if not np.all(np.isfinite(x)) or x.std() == 0:
-                continue
-            x = x - x.mean()
-            nfft = 1 << (2 * len(x) - 1).bit_length()
-            f = np.fft.rfft(x, nfft)
-            acf = np.fft.irfft(f * np.conjugate(f), nfft)[:len(x)].real
-            acf /= acf[0]
-            # Geyer: truncate at the first non-positive consecutive pair sum
-            s, k = 0.0, 1
-            while k + 1 < len(acf):
-                pair = acf[k] + acf[k + 1]
-                if pair <= 0:
-                    break
-                s += pair
-                k += 2
-            per_chain.append(max(1.0, 1.0 + 2.0 * s))
-        taus.append(max(per_chain) if per_chain else 1.0)
-    return max(taus) if taus else 1.0
-
-
-def _fold_signs(chains: list[np.ndarray], params: list[str]) -> list[np.ndarray]:
-    """Apply the exact overall-flip symmetry (M_1,M_2,mu) -> (-,-,-).
-
-    The relic density is invariant under simultaneously flipping the three
-    gaugino/higgsino mass parameters, so two replicas occupying mirror sign
-    lobes describe the same physics. Upstream canonicalises to mu >= 0 before
-    ranking (``canon=True``); without it, mirror-lobe occupancy would register
-    as replica disagreement.
-    """
-    idx = {n: i for i, n in enumerate(params)}
-    need = ("IN_M_1", "IN_M_2", "IN_mu")
-    if not all(n in idx for n in need):
-        return chains
-    i1, i2, imu = (idx[n] for n in need)
-    out = []
-    for c in chains:
-        c = np.array(c, dtype=float, copy=True)
-        flip = c[:, imu] < 0
-        for j in (i1, i2, imu):
-            c[flip, j] = -c[flip, j]
-        out.append(c)
-    return out
-
-
-def rank_uniformity(chains: list[np.ndarray], params: list[str],
-                    step: int, max_draws: int | None = None) -> dict:
-    """Pooled-rank histograms per replica + a thinned homogeneity chi-square.
-
-    ``max_draws`` truncates the thinned sample to a common size so that the
-    test has the same power for every model (see --equal-power).
-    """
-    from scipy.stats import chi2, rankdata
-
-    C = len(chains)
-    n_all = min(len(c) for c in chains)
-    flat = [c[:n_all] for c in chains]
-    thin = [c[::step] for c in flat]
-    n_thin = min(len(t) for t in thin)
-    if max_draws is not None:
-        n_thin = min(n_thin, int(max_draws))
-    thin = [t[:n_thin] for t in thin]
-
-    B = RANK_BINS
-    estimable = n_thin >= 5 * B
-    hist_all, hist_thin, raw_p, shapes, shapes_thin, stats = {}, {}, [], {}, {}, {}
-    for pi, name in enumerate(params):
-        pooled = np.concatenate([f[:, pi] for f in flat])
-        if not np.all(np.isfinite(pooled)):
-            hist_all[name] = np.zeros((C, B))
-            raw_p.append(float("nan"))
-            shapes[name] = ["n/a"] * C
-            shapes_thin[name] = ["n/a"] * C
-            continue
-        # histogram over ALL draws (the picture)
-        r = rankdata(pooled, method="average").reshape(C, n_all)
-        edges = np.linspace(0.5, C * n_all + 0.5, B + 1)
-        h = np.stack([np.histogram(r[c], bins=edges)[0] for c in range(C)]).astype(float)
-        hist_all[name] = h
-        shapes[name] = [_rank_shape(h[c])[0] for c in range(C)]
-
-        # chi-square on the thinned, approximately independent subsample
-        pooled_t = np.concatenate([t[:, pi] for t in thin])
-        rt = rankdata(pooled_t, method="average").reshape(C, n_thin)
-        edges_t = np.linspace(0.5, C * n_thin + 0.5, B + 1)
-        ht = np.stack([np.histogram(rt[c], bins=edges_t)[0] for c in range(C)]).astype(float)
-        hist_thin[name] = ht
-        shapes_thin[name] = [_rank_shape(ht[c])[0] for c in range(C)]
-        exp = ht.sum(axis=0, keepdims=True) * ht.sum(axis=1, keepdims=True) / ht.sum()
-        with np.errstate(divide="ignore", invalid="ignore"):
-            stat = float(np.nansum((ht - exp) ** 2 / np.where(exp > 0, exp, np.nan)))
-        dof = (C - 1) * (B - 1)
-        p = float(chi2.sf(stat, dof)) if estimable and dof > 0 else float("nan")
-        raw_p.append(p)
-        stats[name] = {"chi2": stat, "dof": dof, "p_raw": p}
-
-    adj = _holm(raw_p)
-    for name, a in zip(params, adj):
-        if name in stats:
-            stats[name]["p_holm"] = float(a) if np.isfinite(a) else None
-    worst = int(np.nanargmax([-(a if np.isfinite(a) else np.inf) for a in adj])) \
-        if np.any(np.isfinite(adj)) else None
-    return {
-        "n_chains": C, "n_all": n_all, "n_thinned": n_thin, "thin_step": int(step),
-        "estimable": bool(estimable), "bins": B,
-        "hist_all": {k: v.tolist() for k, v in hist_all.items()},
-        "shapes": shapes, "shapes_thinned": shapes_thin,
-        "per_param": stats,
-        "worst_param": params[int(np.nanargmin(adj))] if np.any(np.isfinite(adj)) else None,
-        "worst_p_holm": float(np.nanmin(adj)) if np.any(np.isfinite(adj)) else None,
-    }
-
-
-ALPHA = 0.01  # family-wise level for the Holm-adjusted uniformity test
-
-
-def _plot(res: dict, params: list[str], out_path: Path, model_label: str) -> None:
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    C, B = res["n_chains"], res["bins"]
-    fig, axes = plt.subplots(3, 3, figsize=(11, 8), sharex=True)
-    cmap = plt.get_cmap("tab10")
-    for ax, name in zip(axes.ravel(), params):
-        h = np.asarray(res["hist_all"][name], dtype=float)
-        edges = np.linspace(0, 1, B + 1)
-        for c in range(C):
-            frac = h[c] / max(h[c].sum(), 1) * B      # 1.0 = uniform
-            ax.stairs(frac, edges, color=cmap(c % 10), lw=1.3,
-                      label=f"seed {c + 1}" if name == params[0] else None)
-        ax.axhline(1.0, color="black", ls="--", lw=0.9)
-        ax.set_ylabel(name.replace("IN_", ""), fontsize=9)
-        ax.grid(alpha=0.25)
-        sh = res["shapes_thinned"][name]
-        tag = "uniform" if all(s == "uniform" for s in sh) else \
-            "/".join(sorted(set(s for s in sh if s != "uniform")))
-        stat = res["per_param"].get(name, {})
-        p_holm = stat.get("p_holm")
-        failed = (res["estimable"] and p_holm is not None
-                  and np.isfinite(p_holm) and p_holm < ALPHA)
-        # Always show the adjusted p-value: a visually large but statistically
-        # unresolvable wiggle should read as "tested, not significant", not as
-        # an unexamined panel.
-        if p_holm is None or not np.isfinite(p_holm):
-            tag = f"{tag}  (p n/a)"
-        else:
-            tag = f"{tag}  (p={p_holm:.2g})"
-        if failed:
-            for spine in ax.spines.values():
-                spine.set_edgecolor("crimson")
-                spine.set_linewidth(1.8)
-        ax.text(0.5, 0.04, tag, transform=ax.transAxes, ha="center", va="bottom",
-                fontsize=8, color="crimson" if failed else "0.35",
-                fontweight="bold" if failed else "normal")
-    for ax in axes[-1]:
-        ax.set_xlabel("pooled rank (normalised)")
-    axes[0, 0].legend(fontsize=7, ncol=2)
-
-    # Figure-level verdict: the test is a family over the nine parameters, so
-    # the Holm-adjusted minimum is the summary statistic.
-    if not res["estimable"]:
-        verdict, colour = (f"NOT ESTIMABLE: {res['n_thinned']} independent draws/replica "
-                           f"(need {5 * B} for {B} bins)"), "0.35"
-    else:
-        wp = res["worst_p_holm"]
-        if wp is None or not np.isfinite(wp):
-            wp = float("nan")
-        if np.isfinite(wp) and wp < ALPHA:
-            verdict = (f"FAILS uniformity: p_Holm={wp:.1e} < {ALPHA} "
-                       f"({res['worst_param'].replace('IN_', '')}); replicas do not "
-                       f"realise a common acquisition distribution")
-            colour = "crimson"
-        else:
-            verdict = (f"passes: p_Holm={_fmt_p(wp)} >= {ALPHA} "
-                       f"(no evidence against replica agreement)"
-                       if np.isfinite(wp) else
-                       "no estimable parameter (test not applicable)")
-            colour = "seagreen" if np.isfinite(wp) else "0.35"
-    fig.text(0.5, 0.997, verdict, ha="center", va="top", fontsize=10,
-             color=colour, fontweight="bold")
-    # The histograms show ALL acquired points (the smoother picture); the test
-    # and the shape labels use the thinned, approximately independent subsample.
-    # Stating both stops a visually large but unresolvable wiggle from reading
-    # as a missed failure.
-    fig.text(0.5, 0.968,
-             f"histograms: all {res['n_all']} points/replica · "
-             f"test and shape labels: {res['n_thinned']} independent draws/replica "
-             f"(thinned by tau={res['thin_step']})",
-             ha="center", va="top", fontsize=8, color="0.4")
-    fig.tight_layout(rect=(0, 0, 1, 0.955))
-    fig.savefig(out_path, dpi=200)
-    plt.close(fig)
+    if cache.exists():
+        with np.load(cache) as z:
+            return [z[k][:, None, :] for k in sorted(z.files, key=lambda x: int(x[1:]))]
+    idx = [PARAM_ORDER.index(_UP_TO_NTUPLE[p]) for p in FREE_PARAMS_UP]
+    chains = _load_al_chains(run_dirs, idx, require_neutralino_lsp=veto)
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    np.savez(cache, **{f"c{i}": np.asarray(c, dtype=float)
+                       for i, c in enumerate(chains)})
+    return [np.asarray(c, dtype=float)[:, None, :] for c in chains]
 
 
 @click.command()
 @click.option("--manifest", default="/ptmp/jwuerzin/analysis/all_runs/sweep_manifest.csv",
               show_default=True)
-@click.option("--output-dir", default="/ptmp/jwuerzin/analysis/all_runs", show_default=True)
+@click.option("--output-dir", default="/ptmp/jwuerzin/analysis/all_runs/rank",
+              show_default=True)
 @click.option("--models", default=None,
               help="Comma list of picks (default: all DEFAULT_AL_PICKS).")
-@click.option("--thin-mode", type=click.Choice(["tau", "batch", "none"]),
-              default="tau", show_default=True,
-              help="Independence convention for the chi-square test.")
-@click.option("--batch-size", default=500, show_default=True,
-              help="Points per acquisition batch (--thin-mode batch).")
+@click.option("--discard", default=0, show_default=True,
+              help="Acquisitions dropped from each replica's head "
+                   "(2000 drops the shared initial random block).")
+@click.option("--fold-signs/--no-fold-signs", default=False, show_default=True,
+              help="Upstream canon: fold the exact (M_1,M_2,mu) sign symmetry "
+                   "to mu >= 0 before ranking.")
 @click.option("--require-neutralino-lsp/--no-require-neutralino-lsp",
               default=False, show_default=True)
-@click.option("--mcmc-data-dir", default=None,
-              help="Also run the reference dataset (its ensembles as chains) "
-                   "for a like-for-like comparison row.")
-@click.option("--mcmc-nwalkers", default=0, show_default=True,
-              help="Split each reference file into walker-chains (256 for "
-                   "neutralino_v4); 0 keeps one chain per file (= per ensemble, "
-                   "the upstream cross-ensemble convention).")
-@click.option("--fold-signs/--no-fold-signs", default=True, show_default=True,
-              help="Canonicalise the exact (M_1,M_2,mu) sign flip to mu >= 0 "
-                   "before ranking, as upstream's canon=True does.")
-@click.option("--equal-power/--no-equal-power", default=False, show_default=True,
-              help="Cap every model to the common minimum replica count and "
-                   "thinned-draw count, so the p-values are comparable across "
-                   "models rather than reflecting differing test resolution.")
-def main(manifest, output_dir, models, thin_mode, batch_size, require_neutralino_lsp,
-         mcmc_data_dir, mcmc_nwalkers, fold_signs, equal_power):
+@click.option("--cache-dir", default="/ptmp/jwuerzin/analysis/all_runs/rank/chains",
+              show_default=True, help="Where the per-cell chain .npz caches live.")
+@click.option("--export-only", is_flag=True, default=False,
+              help="Only build the chain caches (run this with the torch env).")
+def main(manifest, output_dir, models, discard, fold_signs, require_neutralino_lsp,
+         cache_dir, export_only):
     picks = dict(DEFAULT_AL_PICKS)
     if models:
         wanted = {m.strip() for m in models.split(",")}
         picks = {m: sw for m, sw in picks.items() if m in wanted}
     run_dirs = _picks_from_manifest(manifest, picks)
-    param_idx = [PARAM_ORDER.index(p) for p in FREE_PARAMS]
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    payload = {"config": {"thin_mode": thin_mode, "batch_size": batch_size,
-                          "bins": RANK_BINS, "alpha": ALPHA,
+    if ed is None and not export_only:
+        raise click.ClickException(
+            "emcee_diagnostics unavailable: run with "
+            "Run3ModelGen/.pixi/envs/default/bin/python, or pass --export-only "
+            "to build the chain caches with the torch environment first")
+    payload = {"config": {"discard": discard, "fold_signs": fold_signs,
+                          "alpha": ALPHA, "bins": None if ed is None else ed.RANK_BINS,
                           "require_neutralino_lsp": require_neutralino_lsp,
-                          "fold_signs": fold_signs,
-                          "tau_aggregation": "max over replicas and parameters "
-                                             "(emcee_diagnostics convention)"},
+                          "source": "Run3ModelGen emcee_diagnostics"},
                "results": {}}
-    # Pass 1: load every cell and measure its thinning step, so an equal-power
-    # run can pick the common replica count and draw count before testing.
-    loaded: dict[str, dict] = {}
-    if mcmc_data_dir:
-        # Upstream treats the ENSEMBLES as chains but keeps the (iteration,
-        # walker) structure: tau is measured along iterations within a walker,
-        # and thinning strides iterations while keeping every walker. Reading
-        # the file as one flat row list instead would stride across walkers,
-        # where consecutive rows are near-independent by construction and the
-        # measured tau is meaningless (it comes out ~1 instead of ~10^3).
-        nw = mcmc_nwalkers or 256
-        walkers = _load_chains(Path(mcmc_data_dir), FREE_PARAMS, skip_file_cut=False,
-                               require_neutralino_lsp=require_neutralino_lsp,
-                               nwalkers=nw)
-        walkers = walkers[0] if isinstance(walkers, tuple) else walkers
-        if fold_signs:
-            walkers = _fold_signs(walkers, FREE_PARAMS)
-        n_ens = max(1, len(walkers) // nw)
-        ens = [walkers[i * nw:(i + 1) * nw] for i in range(n_ens)]
-        tau_ref = max(_tau_within([w]) for e in ens for w in e[::16])
-        step_ref = max(1, int(np.ceil(tau_ref)))
-        ref_chains = [np.concatenate([w[::step_ref] for w in e], axis=0) for e in ens]
-        if len(ref_chains) >= 2:
-            run_dirs = {"mcmc_reference": None, **run_dirs}
-            loaded["mcmc_reference"] = {
-                "chains": ref_chains, "tau_w": tau_ref, "tau_m": float("nan"),
-                "step": 1, "pre_thinned_by": step_ref,
-                "n_avail": min(len(c) for c in ref_chains)}
-            click.echo(f"[rank] reference: {n_ens} ensembles x {nw} walkers, "
-                       f"tau={tau_ref:.0f} -> {len(ref_chains[0])} thinned draws/ensemble")
+
     for model, dirs in run_dirs.items():
-        if dirs is None:                       # reference row, already loaded
+        cache = Path(cache_dir) / f"{model}_veto{int(require_neutralino_lsp)}.npz"
+        chains = _al_ensembles(dirs, require_neutralino_lsp, cache)
+        if export_only:
+            click.echo(f"[rank] cached {len(chains)} replicas -> {cache}")
             continue
-        else:
-            chains = _load_al_chains(dirs, param_idx,
-                                     require_neutralino_lsp=require_neutralino_lsp)
         if len(chains) < 2:
             click.echo(f"[rank] {model}: {len(chains)} replicas — skipped")
             continue
-        if fold_signs:
-            chains = _fold_signs(chains, FREE_PARAMS)
-        tau_w = _tau_within(chains)
-        tau_m = _tau_multichain(chains)
-        if thin_mode == "tau":
-            step = max(1, int(np.ceil(tau_w)))
-        elif thin_mode == "batch":
-            step = max(1, int(batch_size))
-        else:
-            step = 1
-        n_all = min(len(c) for c in chains)
-        loaded[model] = {"chains": chains, "tau_w": tau_w, "tau_m": tau_m,
-                         "step": step, "n_avail": len(range(0, n_all, step))}
-        continue
-    if not loaded:
-        raise click.ClickException("no usable cells")
+        taus = []
+        for ch in chains:
+            tau, _ok = ed.autocorr_time(ch[discard:], tol=ed.TAU_FACTOR)
+            taus.append(np.nanmax(tau))
+        max_tau = float(np.nanmax(taus))
 
-    cap_C = min(len(v["chains"]) for v in loaded.values()) if equal_power else None
-    cap_n = min(v["n_avail"] for v in loaded.values()) if equal_power else None
-    if equal_power:
-        click.echo(f"[rank] equal power: {cap_C} replicas x {cap_n} independent "
-                   f"draws for every model")
-        payload["config"]["equal_power"] = {"n_chains": cap_C, "n_draws": cap_n}
+        label = (f"{MODEL_DISPLAY.get(model, model)}, {len(chains)} seed replicas"
+                 + (", mu>=0 canonical" if fold_signs else ", RAW signs (no fold)"))
+        try:
+            res = ed.rank_uniformity(chains, FREE_PARAMS_UP, discard, max_tau,
+                                     label=label, canon=fold_signs)
+        except Exception as exc:
+            click.echo(f"[rank] {model}: rank_uniformity failed: {exc}", err=True)
+            continue
 
-    # Pass 2: test every cell (capped to the common resolution if requested).
-    for model, v in loaded.items():
-        chains, step = v["chains"], v["step"]
-        tau_w, tau_m = v["tau_w"], v["tau_m"]
-        if cap_C is not None:
-            chains = chains[:cap_C]
-        res = rank_uniformity(chains, FREE_PARAMS, step, max_draws=cap_n)
-        res["tau_within"] = tau_w
-        res["tau_multichain"] = tau_m
-        if "pre_thinned_by" in v:
-            res["thin_step"] = int(v["pre_thinned_by"])
-        res["verdict"] = ("not_estimable" if not res["estimable"] else
-                          "fail" if (res["worst_p_holm"] is not None
-                                     and np.isfinite(res["worst_p_holm"])
-                                     and res["worst_p_holm"] < ALPHA) else "pass")
-        payload["results"][model] = res
-        _plot(res, FREE_PARAMS, out_dir / f"rank_uniformity_{model}.png",
-              MODEL_DISPLAY.get(model, model))
-        nonuni = {p: s for p, s in res["shapes_thinned"].items()
-                  if any(x != "uniform" for x in s)}
-        verdict = ("NOT-ESTIMABLE" if not res["estimable"] else
-                   "FAIL" if (res["worst_p_holm"] is not None
-                              and np.isfinite(res["worst_p_holm"])
-                              and res["worst_p_holm"] < ALPHA) else "pass")
-        click.echo(f"[rank] {model:<16} [{verdict:>13}] "
-                   f"C={res['n_chains']} N={res['n_all']:>6} "
-                   f"tau_within={tau_w:6.1f} tau_multi={tau_m:7.1f} "
-                   f"thin={step:>3} n_test={res['n_thinned']:>5} "
-                   f"p_Holm={_fmt_p(res['worst_p_holm'])} ({res['worst_param']}); "
-                   f"non-uniform (tested): "
-                   + (", ".join(f"{p.replace('IN_','')}:{'/'.join(sorted(set(x for x in s if x != 'uniform')))}"
-                                for p, s in nonuni.items()) or "none"))
+        for fn, base in ((ed.plot_rank_hist, f"rank_{model}.png"),
+                         (ed.plot_rank_ecdf, f"rank_ecdf_{model}.png")):
+            try:
+                fn(res, FREE_PARAMS_UP, str(out_dir / base))
+            except Exception as exc:
+                click.echo(f"[rank] {model}: {base} skipped: {exc}", err=True)
+
+        worst = res.get("worst_p", res.get("worst_p_holm"))
+        estimable = bool(res.get("estimable", True))
+        verdict = ("not_estimable" if not estimable else
+                   "fail" if (worst is not None and np.isfinite(worst) and worst < ALPHA)
+                   else "pass")
+        payload["results"][model] = {
+            "n_chains": res["n_chains"], "n_thinned": res["n_thinned"],
+            "max_tau": max_tau, "estimable": estimable,
+            "worst_param": res.get("worst_param"), "worst_p_holm": worst,
+            "verdict": verdict,
+            "per_param": {p: {k: v for k, v in (res["per_param"].get(p) or {}).items()
+                              if k in ("chi2", "dof", "p_raw", "p_holm")}
+                          for p in FREE_PARAMS_UP},
+            "shapes": {p: (res.get("shapes") or {}).get(p) for p in FREE_PARAMS_UP},
+        }
+        wp = "n/a" if worst is None or not np.isfinite(worst) else f"{worst:.2e}"
+        click.echo(f"[rank] {model:<16} [{verdict:>13}] C={res['n_chains']} "
+                   f"max_tau={max_tau:8.1f} n_thinned={res['n_thinned']:>6} "
+                   f"worst p_Holm={wp} ({res.get('worst_param')})")
 
     p = out_dir / "rank_uniformity_al.json"
     p.write_text(json.dumps(payload, indent=1))
-    click.echo(f"[rank] wrote {p} and rank_uniformity_<model>.png")
+    click.echo(f"[rank] wrote {p}")
 
 
 if __name__ == "__main__":
