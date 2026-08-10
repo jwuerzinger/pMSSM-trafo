@@ -50,6 +50,7 @@ _SEL_START_RE = re.compile(
     r"|Using entropy-based batch selection"
     r"|Entropy selection: evaluating"
     r"|Running iterative batch selector"
+    r"|Generating \d+ candidate points"
     r"|Select(?:ing|ed) .*top[_-]?k", re.IGNORECASE)
 _SEL_END_RE = re.compile(r"Saved selected points to")
 
@@ -74,6 +75,35 @@ def _train_seconds(iter_dir: Path) -> float | None:
     if first is None or last is None:
         return None
     return (last - first).total_seconds()
+
+
+_TABPFN_FITEVAL_RE = re.compile(
+    r"TabPFN fit\+eval wall-clock:\s*([0-9.]+)s")
+
+
+def _tabpfn_fit_eval_seconds(main_log: Path) -> dict[int, float]:
+    """{iteration: seconds} for TabPFN's fit+eval phase.
+
+    TabPFN takes no gradient step, so it writes no ``al_training.log``; the
+    work equivalent to another model's training is the in-context fit (0.7 s,
+    it only memorises the context) plus the forward passes that ingest that
+    context to score the train/val/eval sets. The driver times that phase on
+    one line, and because the AL and baseline threads run concurrently on two
+    GPUs the reported wall-clock is comparable to the span an
+    ``al_training.log`` covers for the other models.
+    """
+    out: dict[int, float] = {}
+    cur = None
+    with open(main_log, errors="replace") as fh:
+        for line in fh:
+            m = _ITER_RE.search(line)
+            if m:
+                cur = int(m.group(1))
+                continue
+            m = _TABPFN_FITEVAL_RE.search(line)
+            if m and cur is not None:
+                out[cur] = float(m.group(1))
+    return out
 
 
 def _selection_seconds(main_log: Path) -> dict[int, float]:
@@ -183,12 +213,20 @@ def main(manifest, output_dir, sweep_id, include_status, models, min_seeds,
             n_tr = list(state.get("al_n_train") or [])
             n_va = list(state.get("al_n_val") or [])
             sel_secs = _selection_seconds(d / "active_learning.log")
+            fit_secs = _tabpfn_fit_eval_seconds(d / "active_learning.log")
             C, L, T, S = [], [], [], []
             cum = 0.0
             for i in range(len(n_tr)):
-                tr = _train_seconds(d / f"iteration_{i + 1:03d}")
-                if tr is None:
+                iter_dir = d / f"iteration_{i + 1:03d}"
+                if not iter_dir.exists():
                     break
+                tr = _train_seconds(iter_dir)
+                if tr is None:
+                    # No al_training.log: TabPFN. Substitute its fit+eval
+                    # phase, which is the training-equivalent work.
+                    tr = fit_secs.get(i + 1)
+                    if tr is None:
+                        break
                 se = sel_secs.get(i + 1, 0.0)
                 cum += tr + se
                 C.append(cum / 3600.0)

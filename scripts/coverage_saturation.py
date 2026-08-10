@@ -102,7 +102,12 @@ def coverage_of(cells: np.ndarray, tmap: np.ndarray, n_target: int) -> float:
 @click.option("--mcmc-data-dir", default="/ptmp/jwuerzin/data/neutralino_v4", show_default=True)
 @click.option("--cache-dir", default="/ptmp/jwuerzin/analysis/all_runs", show_default=True)
 @click.option("--output-dir", default="/ptmp/jwuerzin/analysis/all_runs", show_default=True)
-@click.option("--sweep-id", default="20260803_18", show_default=True)
+@click.option("--sweep-id", default="", show_default=True,
+              help="Optional sweep_id prefix filter. Empty by default: the "
+                   "manifest marks superseded generations, which the "
+                   "include-status filter already drops, and a prefix filter "
+                   "would exclude cells resubmitted under a later sweep_id "
+                   "(the TabPFN cells carry 20260806).")
 @click.option("--include-status", default="completed,running,timeout,submitted",
               show_default=True)
 @click.option("--models", default=None, help="Comma list of picks (default: all).")

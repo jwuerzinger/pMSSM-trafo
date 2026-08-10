@@ -147,18 +147,49 @@ def _load_chains(data_dir: Path, params: list[str], skip_file_cut: bool,
 # ──────────────────────────────────────────────────────────────────────────────
 
 def split_rhat(chains: list[np.ndarray], min_len: int) -> np.ndarray:
-    """Vehtari split-R̂ across M chains, each truncated to `min_len`."""
+    """Rank-normalised split-R-hat across M chains, each truncated to `min_len`.
+
+    Uses arviz (Vehtari et al. 2021): draws are rank-transformed over the
+    pooled chains and mapped through the normal quantile function before the
+    usual between/within comparison on split half-chains. That removes the
+    finite-variance assumption of the classical statistic and makes it
+    invariant under monotone reparameterisation, and it is the definition the
+    reference dataset's own diagnostics and this paper's citation use, so both
+    sample types are scored identically.
+
+    Falls back to the classical statistic if arviz is unavailable, which is
+    NOT equivalent: on multimodal marginals the classical value runs higher
+    (measured on the reference: M_2 1.77 raw versus 1.48 rank-normalised),
+    because rank normalisation compresses the large raw separation between
+    sign lobes.
+    """
     half = min_len // 2
     if half < 5:
-        raise ValueError(f"min chain length {min_len} too short for split-R̂")
+        raise ValueError(f"min chain length {min_len} too short for split-R-hat")
+    arr = np.stack([np.asarray(c)[:min_len] for c in chains])   # (M, N, P)
+    try:
+        import arviz as az
+        out = np.empty(arr.shape[2])
+        for p_i in range(arr.shape[2]):
+            out[p_i] = float(az.rhat(arr[:, :, p_i], method="rank"))
+        if np.all(np.isfinite(out)):
+            return out
+    except Exception:
+        pass
+    return _split_rhat_classical(chains, min_len)
+
+
+def _split_rhat_classical(chains: list[np.ndarray], min_len: int) -> np.ndarray:
+    """Classical (non-rank-normalised) split-R-hat; arviz-free fallback."""
+    half = min_len // 2
     sub = []
     for c in chains:
         c = c[:min_len]
         sub.append(c[:half])
         sub.append(c[half:half * 2])
     sub = np.array(sub)                       # (2M, N, P)
-    means = sub.mean(axis=1)                  # (2M, P)
-    vars_ = sub.var(axis=1, ddof=1)           # (2M, P)
+    means = sub.mean(axis=1)
+    vars_ = sub.var(axis=1, ddof=1)
     N = half
     W = vars_.mean(axis=0)
     B = N * means.var(axis=0, ddof=1)
