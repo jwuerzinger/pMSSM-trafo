@@ -218,6 +218,7 @@ def main(manifest, output_dir, sweep_id, include_status, models, min_seeds,
                    "entropy_batch": "entropy"}
     STRAT_LS = {"top_k": "--", "top_k_tol_only": ":", "entropy_batch": "-"}
 
+    cell_summary: dict = {}
     fig, (ax, ax3) = plt.subplots(1, 2, figsize=(12.5, 5.2))
     fig2, axes2 = plt.subplots(2, 2, figsize=(11.5, 8.6))
     (ax_l, ax_c), (ax_t, ax_s) = axes2
@@ -284,11 +285,6 @@ def main(manifest, output_dir, sweep_id, include_status, models, min_seeds,
     fig.savefig(p, dpi=200)
     click.echo(f"[compute] wrote {p}")
 
-    import json
-    (out / "compute_vs_dataset.json").write_text(json.dumps(
-        {"best_per_model": summary, "per_cell": cell_summary}, indent=1))
-    click.echo(f"[compute] wrote {out / 'compute_vs_dataset.json'}")
-
     ax_l.set_ylabel(r"labeled-set size $|L|$")
     ax_l.grid(alpha=0.3)
     ax_l.legend(fontsize=8)
@@ -309,7 +305,6 @@ def main(manifest, output_dir, sweep_id, include_status, models, min_seeds,
     from matplotlib.lines import Line2D
     all_models = [m for m in MODEL_DISPLAY if not m.startswith("tabpfn")]
     all_strats = ("entropy_batch", "top_k", "top_k_tol_only")
-    cell_summary: dict = {}
     for warm_mode in ("warm", "cold"):
         # Same two-panel layout as the best-per-model figure: what the compute
         # buys in labels (left) and in covered support (right), for every
@@ -373,6 +368,11 @@ def main(manifest, output_dir, sweep_id, include_status, models, min_seeds,
         figw.savefig(pw, dpi=200)
         plt.close(figw)
         click.echo(f"[compute] wrote {pw}")
+
+    import json
+    (out / "compute_vs_dataset.json").write_text(json.dumps(
+        {"best_per_model": summary, "per_cell": cell_summary}, indent=1))
+    click.echo(f"[compute] wrote {out / 'compute_vs_dataset.json'}")
 
 
 if __name__ == "__main__":
