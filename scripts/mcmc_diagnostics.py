@@ -60,14 +60,20 @@ OMEGA_MIN = 0.04
 
 # ── AL comparison: which (strategy, warm_start) to pick per model when the
 # user asks for AL-vs-MCMC diagnostics but doesn't supply an override.
-# Chosen from prior sweep analysis: highest mean-final hit-rate @10% tolerance.
+# Chosen from sweep analysis: highest mean-final hit-rate @10% tolerance.
+# Refreshed 2026-08-08 against the 20260803 generation, whose picks differ from
+# the previous generation's for two models: dnn_match_trafo moved from
+# top_k/cold to entropy_batch/cold, and tabpfn from top_k_tol_only to top_k.
+# Keep in sync with the "[best-per-model picks]" block that
+# plot_hit_rate_trajectories_multiseed.py prints, which derives them from the
+# manifest rather than from this dict.
 DEFAULT_AL_PICKS = {
     "transformer":     ("entropy_batch",  "cold"),
     "deep_gp":         ("entropy_batch",  "warm"),
     "exact_gp":        ("entropy_batch",  "warm"),
     "dnn":             ("entropy_batch",  "cold"),
-    "dnn_match_trafo": ("top_k",          "cold"),
-    "tabpfn":          ("top_k_tol_only", "tabpfn"),
+    "dnn_match_trafo": ("entropy_batch",  "cold"),
+    "tabpfn":          ("top_k",          "tabpfn"),
 }
 
 # Full 19-parameter ordering saved to state.pt's X tensor. Only 9 are free.
