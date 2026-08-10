@@ -55,6 +55,7 @@ from pmssm import (
     select_top_uncertain_tol_only,
     select_entropy_batch_mc,
     # Uncertainty
+    compute_uncertainty_ensemble,
     compute_uncertainty_mc_dropout,
     # Training
     train_with_validation,
@@ -221,6 +222,15 @@ def load_config_with_sweep(config_file, sweep_index=None):
                    "NOTE: because this defaults to enabled, a cold run must be "
                    "resumed with an explicit --no-warm-starting or it will "
                    "silently continue warm; --resume-from now refuses to do so.")
+@click.option('--n-ensemble', default=1, type=int,
+              help="Train K independent members per iteration and use their "
+                   "disagreement as the acquisition uncertainty instead of MC "
+                   "dropout (K=1, the default, keeps MC dropout). Members get "
+                   "distinct seeds and fresh initialisations, so their spread "
+                   "measures how much functions that all fit the labelled data "
+                   "still differ. Requires --no-train-baseline. NOTE the "
+                   "across-member covariance has rank <= K-1, so entropy_batch "
+                   "is degenerate for batches larger than that; use top_k.")
 @click.option('--allow-config-drift', is_flag=True, default=False,
               help="Permit --resume-from to change the loop configuration "
                    "(warm start, strategy, n_select, target, transform). Off by "
@@ -254,7 +264,7 @@ def load_config_with_sweep(config_file, sweep_index=None):
               help="Comma-separated GPU IDs for AL and baseline models (default: 2,3).")
 @click.option('--seed', default=42, type=int,
               help="Master random seed propagated to torch / numpy / candidate pool (default: 42).")
-def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, dropout, n_datasets, n_samples, val_fraction, output_dir, generate_data, min_gen_fraction, max_gen_attempts, gen_workers, selection_strategy, entropy_blur, entropy_beta, entropy_pool_size, candidate_generation, candidate_source, proximity_sampling, tolerance_sampling, target_value, config_file, sweep_index, early_stopping, patience, warm_starting, allow_config_drift, eval_data_path, compute_full_metrics, y_transform, mcmc_data_dir, mcmc_max_samples, static_eval_size, data_dir, use_mcmc_loader, train_baseline, resume_from, n_additional_iterations, gpu_ids, seed):
+def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, dropout, n_datasets, n_samples, val_fraction, output_dir, generate_data, min_gen_fraction, max_gen_attempts, gen_workers, selection_strategy, entropy_blur, entropy_beta, entropy_pool_size, candidate_generation, candidate_source, proximity_sampling, tolerance_sampling, target_value, config_file, sweep_index, early_stopping, patience, warm_starting, n_ensemble, allow_config_drift, eval_data_path, compute_full_metrics, y_transform, mcmc_data_dir, mcmc_max_samples, static_eval_size, data_dir, use_mcmc_loader, train_baseline, resume_from, n_additional_iterations, gpu_ids, seed):
     """
     Active learning pipeline for pMSSM relic density prediction.
 
@@ -341,6 +351,11 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
     # Collision-free dir suffix: only append when caller did not already
     # include a timestamp. This is the code path used by both manual runs and
     # the strategy-sweep launcher (slurm/submit_strategy_sweep.sh).
+    if n_ensemble > 1 and train_baseline:
+        raise click.UsageError(
+            "--n-ensemble > 1 requires --no-train-baseline: the ensemble path "
+            "trains K members per iteration and does not also maintain a "
+            "baseline arm.")
     warm_tag = "warm" if warm_starting else "cold"
     auto_suffix = f"_{selection_strategy}_{warm_tag}_seed{seed}_{timestamp}"
     if not re.search(r"_\d{8}_\d{6}$", output_dir.name):
@@ -392,6 +407,8 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
     logger.info(f"  target_value: {target_value}")
     logger.info(f"  early_stopping: {early_stopping} (patience={patience})")
     logger.info(f"  warm_starting: {warm_starting}")
+    logger.info(f"  n_ensemble: {n_ensemble}"
+                f"{' (MC dropout)' if n_ensemble == 1 else ' (member disagreement)'}")
     logger.info(f"  y_transform: {y_transform}")
     logger.info(f"  compute_full_metrics: {compute_full_metrics}")
     if eval_data_path:
@@ -882,7 +899,8 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
         if not train_baseline:
             # Capacity-test mode: train AL only. NaN baseline metrics propagate
             # through logs / summary / plots without breaking anything.
-            logger.info("Training Active Learning model (baseline disabled)...")
+            logger.info(f"Training Active Learning model (baseline disabled)"
+                        f"{f', {n_ensemble} ensemble members' if n_ensemble > 1 else ''}...")
             al_queue = mp.Queue()
             train_model_worker(device, X_combined, Y_combined, idx_train_al, idx_val_al, epochs, dropout,
                              al_queue, "AL", iter_dir, iter_plots_dir, al_checkpoint_path,
@@ -890,6 +908,32 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
                              F_combined)
             al_results = al_queue.get()
             baseline_results = dict(nan_baseline_results)
+            # Additional ensemble members. Member 0 is the model trained above, so
+            # its checkpoint doubles as the one every downstream consumer (plots,
+            # representative points, accuracy) already expects; members 1..K-1 are
+            # extra. Each is reseeded so it starts from a different
+            # initialisation, which is the whole point: their disagreement is
+            # epistemic, whereas dropout masks perturb one optimum.
+            ensemble_checkpoints = [al_checkpoint_path]
+            for _k in range(1, n_ensemble):
+                _ck = iter_dir / f"al_model_checkpoint_member{_k:02d}.pt"
+                _member_seed = (seed or 0) * 1000 + 17 * _k + iteration
+                torch.manual_seed(_member_seed)
+                np.random.seed(_member_seed % (2**32 - 1))
+                logger.info(f"  ensemble member {_k}/{n_ensemble - 1} "
+                            f"(seed {_member_seed})")
+                _q = mp.Queue()
+                train_model_worker(device, X_combined, Y_combined, idx_train_al,
+                                   idx_val_al, epochs, dropout, _q, f"AL_m{_k}",
+                                   iter_dir, iter_plots_dir, _ck,
+                                   None,  # never warm-start a member: keep inits independent
+                                   early_stopping, patience, y_transform, "DMRD",
+                                   F_combined)
+                _q.get()
+                ensemble_checkpoints.append(_ck)
+            # restore the master RNG stream so candidate generation is unaffected
+            if n_ensemble > 1:
+                torch.manual_seed(seed if seed is not None else 0)
         elif use_parallel:
             # Train AL and Baseline in parallel on different GPUs
             al_queue = mp.Queue()
@@ -965,6 +1009,32 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
         )
         model.load_state_dict(torch.load(al_checkpoint_path, map_location=device))
         logger.info(f"Loaded AL model from {al_checkpoint_path} for MC Dropout uncertainty estimation")
+
+        # ---- Acquisition uncertainty: dropout, or member disagreement --------
+        # One dispatcher so the selection branches below stay identical whichever
+        # mechanism is in use; it matches compute_uncertainty_mc_dropout's return
+        # contract exactly.
+        _ens_models = None
+        if n_ensemble > 1:
+            _ens_models = [model]
+            for _ck in ensemble_checkpoints[1:]:
+                _m = PMSSMTransformerTabular(
+                    d_model=128, nhead=4, num_layers=3,
+                    dim_feedforward=512, dropout=dropout
+                )
+                _m.load_state_dict(torch.load(_ck, map_location=device))
+                _ens_models.append(_m)
+            logger.info(f"Loaded {len(_ens_models)} ensemble members for "
+                        f"acquisition uncertainty")
+
+        def _acq_uncertainty(cands, return_predictions=False):
+            if _ens_models is not None:
+                return compute_uncertainty_ensemble(
+                    _ens_models, cands, stats, device, logger,
+                    return_predictions=return_predictions)
+            return compute_uncertainty_mc_dropout(
+                model, cands, stats, mc_samples, device, logger,
+                return_predictions=return_predictions)
 
         # Representative-points capture: MC-Dropout mean/var at the fixed anchors
         # chosen before the iteration loop. Output is in transformed space; the
@@ -1246,8 +1316,8 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
             threshold_transformed = 0.0
 
         if selection_strategy == 'entropy_batch':
-            pred_mean, pred_var, predictions = compute_uncertainty_mc_dropout(
-                model, candidates, stats, mc_samples, device, logger, return_predictions=True
+            pred_mean, pred_var, predictions = _acq_uncertainty(
+                candidates, return_predictions=True
             )
             top_indices = select_entropy_batch_mc(
                 candidates, predictions, pred_mean, pred_var,
@@ -1258,9 +1328,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
                 device=device, logger=logger
             )
         elif selection_strategy == 'top_k_tol_only':
-            pred_mean, pred_var = compute_uncertainty_mc_dropout(
-                model, candidates, stats, mc_samples, device, logger
-            )
+            pred_mean, pred_var = _acq_uncertainty(candidates)
             top_indices = select_top_uncertain_tol_only(
                 candidates, pred_mean, pred_var, n_select,
                 threshold=threshold_transformed,
@@ -1268,9 +1336,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
                 logger=logger,
             )
         else:
-            pred_mean, pred_var = compute_uncertainty_mc_dropout(
-                model, candidates, stats, mc_samples, device, logger
-            )
+            pred_mean, pred_var = _acq_uncertainty(candidates)
             top_indices = select_top_uncertain_filtered(
                 candidates, pred_mean, pred_var, n_select,
                 threshold=threshold_transformed,
@@ -1484,6 +1550,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
             # the resume path detect the drift instead of absorbing it.
             "run_config": {
                 "warm_starting": bool(warm_starting),
+                "n_ensemble": int(n_ensemble),
                 "selection_strategy": selection_strategy,
                 "n_select": int(n_select),
                 "target_value": float(target_value),

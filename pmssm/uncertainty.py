@@ -68,6 +68,72 @@ def compute_uncertainty_mc_dropout(model, X_candidates, stats, n_samples, device
     return pred_mean, pred_var
 
 
+def compute_uncertainty_ensemble(models, X_candidates, stats, device, logger,
+                                 return_predictions=False):
+    """Predictive uncertainty from disagreement across independently trained members.
+
+    Deliberately mirrors ``compute_uncertainty_mc_dropout``'s return contract, so
+    the selection path is indifferent to which produced the numbers: the (K, N, 1)
+    stack of member predictions plays the role of the (T, N, 1) stack of dropout
+    passes.
+
+    The difference is what varies between rows. Dropout perturbs one trained
+    optimum with Bernoulli masks whose scale is set by the dropout rate, a
+    regularisation hyperparameter; the spread it reports is the network's local
+    sensitivity to masking. Ensemble members are separate optima reached from
+    different initialisations, so their disagreement answers the epistemic
+    question directly, namely how much functions that all fit the labelled data
+    still differ here, and it contracts where labels accumulate without that
+    having to be assumed.
+
+    Members are evaluated in eval mode, so dropout is OFF: the variance reported
+    is across-member only and does not mix in mask noise.
+
+    Args:
+        models: list of K trained models, same architecture, independent inits
+        X_candidates: non-normalised candidates (N, 19)
+        stats: (mean_X, std_X, mean_Y, std_Y)
+        device, logger: as for the dropout version
+        return_predictions: also return the (K, N, 1) member stack
+
+    Returns:
+        pred_mean, pred_var[, predictions] with the same shapes as the MC-dropout
+        version. NOTE the sample covariance across K members has rank at most
+        K-1, so batch scores depending on log det Sigma are degenerate for
+        batches larger than that; use top-k selection unless K is large.
+    """
+    import torch
+    mean_X, std_X, mean_Y, std_Y = stats
+    X_norm = (X_candidates - mean_X) / std_X
+    if not torch.is_tensor(X_norm):
+        X_norm = torch.as_tensor(X_norm)
+    X_norm = X_norm.float()
+    batch_size = 8192
+    predictions = []
+    for k, model in enumerate(models):
+        model.to(device)
+        model.eval()                     # dropout off: across-member spread only
+        with torch.no_grad():
+            y_pred = torch.cat([model(X_norm[i:i + batch_size].to(device)).cpu()
+                                for i in range(0, len(X_norm), batch_size)], dim=0)
+        predictions.append(y_pred)
+    predictions = torch.stack(predictions, dim=0)          # (K, N, 1)
+    pred_mean = predictions.mean(dim=0)
+    # unbiased across-member variance; K is small so the correction matters
+    pred_var = predictions.var(dim=0, unbiased=True) if len(models) > 1 \
+        else torch.zeros_like(pred_mean)
+    if logger:
+        logger.info(f"Ensemble uncertainty over K={len(models)} members: "
+                    f"mean={pred_var.mean():.6f}, max={pred_var.max():.6f}")
+        if pred_var.mean() == 0:
+            logger.warning("Ensemble variance is identically zero: the members "
+                           "are not distinct. Check that each was trained with "
+                           "its own seed and a fresh initialisation.")
+    if return_predictions:
+        return pred_mean, pred_var, predictions
+    return pred_mean, pred_var
+
+
 # ===== GP Posterior Uncertainty (GP Models) =====
 
 def compute_uncertainty_gp(model, X_candidates, data_min, data_max,
