@@ -1581,11 +1581,16 @@ def _finalize_split_legend(fig, axes, *, color_handles, style_handles,
     `color_handles`/`style_handles` are pre-built Line2D lists. Pass an empty
     list to skip the corresponding legend.
     """
+    target_ax = axes[panel_index]
     for ax in axes:
         _, ymax = ax.get_ylim()
-        ax.set_ylim(0, max(ymax, 0.05) * 1.05)
+        # The panel carrying the upper-left legend needs headroom for it to sit
+        # *below* the tolerance tag drawn at (0.02, 0.98) by `_setup_axes`,
+        # instead of on top of it.
+        pad = 1.28 if (ax is target_ax and style_handles
+                       and style_loc == "upper left") else 1.05
+        ax.set_ylim(0, max(ymax, 0.05) * pad)
 
-    target_ax = axes[panel_index]
     fig.tight_layout()
     if color_handles:
         leg_c = target_ax.legend(
@@ -1595,10 +1600,13 @@ def _finalize_split_legend(fig, axes, *, color_handles, style_handles,
         )
         target_ax.add_artist(leg_c)
     if style_handles:
+        kw = {}
+        if style_loc == "upper left":
+            kw["bbox_to_anchor"] = (0.0, 0.90)      # clear of the tolerance tag
         target_ax.legend(
             handles=style_handles, loc=style_loc,
             fontsize=fontsize, frameon=True, framealpha=0.9,
-            title=style_title, title_fontsize=title_fontsize,
+            title=style_title, title_fontsize=title_fontsize, **kw,
         )
 
     out_path.parent.mkdir(parents=True, exist_ok=True)

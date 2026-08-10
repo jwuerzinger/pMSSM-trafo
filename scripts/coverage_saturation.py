@@ -216,40 +216,59 @@ def main(manifest, baseline_data_dir, mcmc_data_dir, cache_dir, output_dir,
                           _cells(X_b, edges), -1)
 
     # ── curves ───────────────────────────────────────────────────────────────
-    max_calls = min(min(len(s) for s in seqs) for seqs in al_seeds.values())
-    budgets = np.unique(np.geomspace(200, max_calls, 16).astype(int))
+    # Each model gets its own budget grid running out to its own shortest
+    # replica, so that a model with short runs (TabPFN) does not truncate
+    # everyone else's curve. `common_calls` is the largest budget every model
+    # reaches; the figure marks it, and cross-model comparisons are quoted
+    # there rather than at each curve's own endpoint.
+    model_max = {m: min(len(s) for s in seqs) for m, seqs in al_seeds.items()}
+    common_calls = min(model_max.values())
+    max_calls = max(model_max.values())
+    budgets = np.unique(np.geomspace(200, common_calls, 16).astype(int))
     out: dict = {"config": {"axes": AXES, "n_bins": n_bins, "min_cell": min_cell,
                             "tolerance": tolerance, "n_target_cells": n_target,
-                            "sweep_id": sweep_id, "n_repeats": n_repeats},
+                            "sweep_id": sweep_id, "n_repeats": n_repeats,
+                            "common_calls": int(common_calls),
+                            "model_max_calls": {m: int(v)
+                                                for m, v in model_max.items()}},
                  "al": {}, "baselines": {}}
 
     for model, seqs in al_seeds.items():
         S = len(seqs)
         out["al"][model] = {}
+        m_budgets = np.unique(np.geomspace(200, model_max[model], 16).astype(int))
         for k in (1, S):
             fr = []
-            for N in budgets:
+            for N in m_budgets:
                 per = N // k
                 vals = []
                 for _ in range(n_repeats if k < S else 1):
                     pick = rng.choice(S, size=k, replace=False)
                     vals.append(cover_frac(np.concatenate([seqs[i][:per] for i in pick])))
                 fr.append(float(np.mean(vals)))
-            out["al"][model][f"k{k}"] = {"budget": [int(b) for b in budgets],
+            out["al"][model][f"k{k}"] = {"budget": [int(b) for b in m_budgets],
                                          "coverage": fr}
+        # value at the largest budget every model reaches, for fair comparison
+        for k in (1, S):
+            r = out["al"][model][f"k{k}"]
+            j = max(i for i, b in enumerate(r["budget"]) if b <= common_calls)
+            r["coverage_at_common"] = r["coverage"][j]
         click.echo(f"[cov] {model:<16} k=1 -> {out['al'][model]['k1']['coverage'][-1]:.3f}, "
                    f"k={S} -> {out['al'][model][f'k{S}']['coverage'][-1]:.3f} "
-                   f"at N={budgets[-1]}")
+                   f"at N={m_budgets[-1]}  |  at common N={common_calls}: "
+                   f"k=1 {out['al'][model]['k1']['coverage_at_common']:.3f}, "
+                   f"k={S} {out['al'][model][f'k{S}']['coverage_at_common']:.3f}")
 
     # One pool point is one simulator call. One reference row is one proposal,
     # but the reference was uniformly subsampled, so each retained row stands
     # for total/subsample proposals; the budget is deflated accordingly.
     mcmc_factor = max(1.0, mcmc_total_rows / max(1, len(Xm)))
     click.echo(f"[cov] one reference row stands for {mcmc_factor:.1f} proposals")
+    base_budgets = np.unique(np.geomspace(200, max_calls, 16).astype(int))
     for name, cells, per_entry in (("random_scan", pool_cells, 1.0),
                                    ("mcmc", held_cells, mcmc_factor)):
         fr = []
-        for N in budgets:
+        for N in base_budgets:
             n_entries = int(N / per_entry)
             if n_entries < 1 or n_entries > len(cells):
                 fr.append(float("nan"))
@@ -258,7 +277,7 @@ def main(manifest, baseline_data_dir, mcmc_data_dir, cache_dir, output_dir,
                                                 replace=False)])
                     for _ in range(n_repeats)]
             fr.append(float(np.mean(vals)))
-        out["baselines"][name] = {"budget": [int(b) for b in budgets],
+        out["baselines"][name] = {"budget": [int(b) for b in base_budgets],
                                   "coverage": fr, "calls_per_entry": per_entry}
         last = next((v for v in reversed(fr) if v == v), float("nan"))
         click.echo(f"[cov] {name:<16} -> {last:.3f} at the largest usable budget")
@@ -266,13 +285,16 @@ def main(manifest, baseline_data_dir, mcmc_data_dir, cache_dir, output_dir,
     # ── second view: matched IN-BAND points, which removes the productivity
     # difference between k=1 and k=5 and isolates point-set diversity ────────
     out["al_inband"] = {}
-    inb_min = min(int((s >= 0).sum()) for seqs in al_seeds.values() for s in seqs)
-    inb_budgets = np.unique(np.geomspace(20, inb_min, 12).astype(int))
-    out["config"]["inband_budgets"] = [int(b) for b in inb_budgets]
+    inb_model_max = {m: min(int((s >= 0).sum()) for s in seqs)
+                     for m, seqs in al_seeds.items()}
+    inb_common = min(inb_model_max.values())
+    out["config"]["inband_common"] = int(inb_common)
+    out["config"]["inband_model_max"] = {m: int(v) for m, v in inb_model_max.items()}
     for model, seqs in al_seeds.items():
         inb_only = [s[s >= 0] for s in seqs]           # in-band cells, in order
         S = len(inb_only)
         out["al_inband"][model] = {}
+        inb_budgets = np.unique(np.geomspace(20, inb_model_max[model], 12).astype(int))
         for k in (1, S):
             fr = []
             for N in inb_budgets:
@@ -286,9 +308,15 @@ def main(manifest, baseline_data_dir, mcmc_data_dir, cache_dir, output_dir,
             out["al_inband"][model][f"k{k}"] = {"budget": [int(b) for b in inb_budgets],
                                                "coverage": fr}
         r = out["al_inband"][model]
+        for k in (1, S):
+            rr = r[f"k{k}"]
+            j = max(i for i, b in enumerate(rr["budget"]) if b <= inb_common)
+            rr["coverage_at_common"] = rr["coverage"][j]
         click.echo(f"[cov] {model:<16} in-band-matched at N={inb_budgets[-1]}: "
                    f"k=1 {r['k1']['coverage'][-1]:.3f} -> k={S} "
-                   f"{r[f'k{S}']['coverage'][-1]:.3f}")
+                   f"{r[f'k{S}']['coverage'][-1]:.3f}  |  at common "
+                   f"N={inb_common}: k=1 {r['k1']['coverage_at_common']:.3f} -> "
+                   f"k={S} {r[f'k{S}']['coverage_at_common']:.3f}")
 
     # ── figure ───────────────────────────────────────────────────────────────
     fig, (ax, ax2) = plt.subplots(1, 2, figsize=(12.5, 5.0))
@@ -303,6 +331,10 @@ def main(manifest, baseline_data_dir, mcmc_data_dir, cache_dir, output_dir,
             label="random scan")
     ax.plot(out["baselines"]["mcmc"]["budget"], out["baselines"]["mcmc"]["coverage"],
             "-.", color="0.45", lw=1.6, label="MCMC (held-out half)")
+    ax.axvline(common_calls, color="0.6", ls=(0, (1, 3)), lw=1.0, zorder=0)
+    ax.annotate("budget all models reach", xy=(common_calls, 0.02),
+                xytext=(-4, 0), textcoords="offset points", rotation=90,
+                ha="right", va="bottom", fontsize=6.5, color="0.4")
     ax.set_xscale("log")
     ax.set_xlabel("simulator calls (valid models evaluated, total across replicas)")
     ax.set_ylabel("fraction of reference in-band support covered")
@@ -316,6 +348,7 @@ def main(manifest, baseline_data_dir, mcmc_data_dir, cache_dir, output_dir,
         ax2.plot(rec[ks[0]]["budget"], rec[ks[0]]["coverage"], "-", color=c, lw=1.7,
                  label=MODEL_DISPLAY.get(model, model))
         ax2.plot(rec[ks[-1]]["budget"], rec[ks[-1]]["coverage"], "--", color=c, lw=1.3)
+    ax2.axvline(inb_common, color="0.6", ls=(0, (1, 3)), lw=1.0, zorder=0)
     ax2.set_xscale("log")
     ax2.set_xlabel("in-band points spent (total across replicas)")
     ax2.set_ylabel("fraction of reference in-band support covered")
