@@ -87,16 +87,20 @@ def build_target(mcmc_data_dir: str, ax_idx: list[int], n_bins: int, min_cell: i
     return edges, tmap, len(target), (X_b, Y_b)
 
 
-def _support_axis(ax) -> None:
-    """Fix a covered-support axis to the full 0-1 range, ticked every 0.05.
+def _support_axis(ax, full_range: bool = True) -> None:
+    """Tick a covered-support axis every 0.05, optionally over the full 0-1.
 
-    Support is a fraction of a fixed target set, so autoscaling misleads twice:
-    it makes a coverage of 0.4 look near-complete, and it stops two figures (or
-    two panels) from being read against each other. Pinning the range makes the
-    "still climbing, nowhere near saturated" reading immediate.
+    The tick spacing is always fixed, so support is read off the same grid
+    everywhere. The *range* is a choice per figure. `full_range=True` pins 0-1,
+    which is right where the question is "how complete is this?": it stops a
+    coverage of 0.4 reading as near-complete and lets two figures be compared.
+    `full_range=False` autoscales, which is right where the question is instead
+    "how do the curves differ?", as in the compute trade-off figures, where
+    pinning the axis compresses all the structure into its lower third.
     """
     from matplotlib.ticker import MultipleLocator
-    ax.set_ylim(0.0, 1.0)
+    if full_range:
+        ax.set_ylim(0.0, 1.0)
     ax.yaxis.set_major_locator(MultipleLocator(0.05))
     ax.tick_params(axis="y", labelsize=8)
 

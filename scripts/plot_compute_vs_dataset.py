@@ -340,7 +340,7 @@ def main(manifest, output_dir, sweep_id, include_status, picks_override, models,
     ax3.set_xscale("log")
     ax3.set_xlabel("cumulative surrogate compute [GPU h] (training + selection)")
     ax3.set_ylabel("fraction of reference in-band support covered")
-    _support_axis(ax3)
+    _support_axis(ax3, full_range=False)
     ax3.grid(alpha=0.3, which="both")
     fig.tight_layout()
     out = Path(output_dir)
@@ -415,7 +415,7 @@ def main(manifest, output_dir, sweep_id, include_status, picks_override, models,
             ax_i.set_ylabel(lab)
             ax_i.grid(alpha=0.3, which="both")
             if "support covered" in lab:
-                _support_axis(ax_i)
+                _support_axis(ax_i, full_range=False)
         mh = [Line2D([], [], color=phr.MODEL_COLORS.get(m, "gray"), lw=1.6,
                      label=MODEL_DISPLAY.get(m, m))
               for m in all_models if m in models_present]
