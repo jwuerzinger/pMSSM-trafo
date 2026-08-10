@@ -68,23 +68,40 @@ _UP_TO_NTUPLE = {"AT": "IN_At", "Ab": "IN_Ab", "Atau": "IN_Atau", "M_1": "IN_M_1
 ALPHA = 0.01
 
 
-def _pick_run_dirs(manifest: str, picks: dict, sweep_id: str | None,
-                   statuses: set[str]) -> dict[str, list[str]]:
-    """Run dirs per pick, restricted to one sweep.
+def _pick_run_dirs(manifest: str, picks: dict, sweep_ids: tuple[str, ...],
+                   statuses: set[str]) -> tuple[dict[str, list[str]],
+                                                dict[str, str]]:
+    """Run dirs per pick, restricted to the generation named by ``sweep_ids``.
 
     ``mcmc_diagnostics._picks_from_manifest`` filters on status alone, which
     pools generations (the Deep GP cell then contributes ten replicas from two
     sweeps). Diagnosing replica agreement across generations is meaningless,
     since the generations differ by an ingest-time veto, so the sweep is
     selected explicitly here.
+
+    ``sweep_ids`` is a tuple of sweep_id PREFIXES, because one prefix cannot
+    name the latest generation for every model: a cell whose jobs died gets
+    resubmitted under a later sweep_id, and it is the resubmission that carries
+    the generation's data. TabPFN's top_k/tabpfn cell is exactly that case, its
+    20260803_180047 rows are all ``failed`` with no ``state.pt`` on disk and the
+    replicas live under 20260806_103000 instead, so a lone "20260803_18" filter
+    silently yielded zero TabPFN replicas.
+
+    Each model must still resolve to a SINGLE prefix; a model matching two is
+    warned about, since that would pool generations again. Returns the run dirs
+    per model plus the per-model cache tag (the prefixes that matched it), so a
+    model's cache name tracks the generation it actually came from.
     """
     import csv
     out: dict[str, list[str]] = {m: [] for m in picks}
+    used: dict[str, set[str]] = {m: set() for m in picks}
     seen: set[str] = set()
     for r in csv.DictReader(open(manifest)):
         if r.get("status") not in statuses:
             continue
-        if sweep_id and not (r.get("sweep_id") or "").startswith(sweep_id):
+        sid = r.get("sweep_id") or ""
+        hit = next((p for p in sweep_ids if sid.startswith(p)), None)
+        if sweep_ids and hit is None:
             continue
         m = r.get("model")
         if m not in picks:
@@ -96,7 +113,14 @@ def _pick_run_dirs(manifest: str, picks: dict, sweep_id: str | None,
         if d not in seen:
             seen.add(d)
             out[m].append(d)
-    return out
+            used[m].add(hit or "all")
+    tags: dict[str, str] = {}
+    for m, s in used.items():
+        if len(s) > 1:
+            click.echo(f"[rank] {m}: replicas span sweeps {sorted(s)} — "
+                       "generations pooled, results not interpretable", err=True)
+        tags[m] = "+".join(sorted(s)) if s else ((sweep_ids or ("all",))[0])
+    return out, tags
 
 
 def _al_ensembles(run_dirs, veto: bool, cache: Path) -> list[np.ndarray]:
@@ -109,9 +133,19 @@ def _al_ensembles(run_dirs, veto: bool, cache: Path) -> list[np.ndarray]:
     """
     if cache.exists():
         with np.load(cache) as z:
-            return [z[k][:, None, :] for k in sorted(z.files, key=lambda x: int(x[1:]))]
+            keys = sorted(z.files, key=lambda x: int(x[1:]))
+            if keys:
+                return [z[k][:, None, :] for k in keys]
+        click.echo(f"[rank] cache {cache} holds no chains — rebuilding", err=True)
     idx = [PARAM_ORDER.index(_UP_TO_NTUPLE[p]) for p in FREE_PARAMS_UP]
     chains = _load_al_chains(run_dirs, idx, require_neutralino_lsp=veto)
+    if not chains:
+        # Never leave an empty .npz behind: it would be read back as a valid
+        # zero-replica cache and the cell would vanish from the outputs without
+        # a word (this is how TabPFN went missing).
+        click.echo(f"[rank] no state.pt found in {len(run_dirs)} run dir(s) — "
+                   f"cache {cache.name} not written", err=True)
+        return []
     cache.parent.mkdir(parents=True, exist_ok=True)
     np.savez(cache, **{f"c{i}": np.asarray(c, dtype=float)
                        for i, c in enumerate(chains)})
@@ -133,9 +167,12 @@ def _al_ensembles(run_dirs, veto: bool, cache: Path) -> list[np.ndarray]:
                    "to mu >= 0 before ranking.")
 @click.option("--require-neutralino-lsp/--no-require-neutralino-lsp",
               default=False, show_default=True)
-@click.option("--sweep-id", default="20260803_18", show_default=True,
-              help="Restrict to manifest rows whose sweep_id starts with this; "
-                   "empty string uses every generation.")
+@click.option("--sweep-id", default="20260803_18,20260806_10", show_default=True,
+              help="Comma list of sweep_id PREFIXES defining the generation; a "
+                   "row is kept when its sweep_id starts with any of them. The "
+                   "latest generation needs more than one prefix because failed "
+                   "cells were resubmitted later (TabPFN: 20260806_10). Empty "
+                   "string uses every generation.")
 @click.option("--include-status", default="completed,running,timeout,submitted",
               show_default=True,
               help="Manifest statuses to accept (the current sweep's rows still "
@@ -151,7 +188,8 @@ def main(manifest, output_dir, models, discard, fold_signs, require_neutralino_l
         wanted = {m.strip() for m in models.split(",")}
         picks = {m: sw for m, sw in picks.items() if m in wanted}
     statuses = {x.strip() for x in include_status.split(",") if x.strip()}
-    run_dirs = _pick_run_dirs(manifest, picks, sweep_id or None, statuses)
+    sweep_ids = tuple(x.strip() for x in (sweep_id or "").split(",") if x.strip())
+    run_dirs, sweep_tags = _pick_run_dirs(manifest, picks, sweep_ids, statuses)
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -160,7 +198,8 @@ def main(manifest, output_dir, models, discard, fold_signs, require_neutralino_l
             "emcee_diagnostics unavailable: run with "
             "Run3ModelGen/.pixi/envs/default/bin/python, or pass --export-only "
             "to build the chain caches with the torch environment first")
-    payload = {"config": {"sweep_id": sweep_id, "discard": discard,
+    payload = {"config": {"sweep_id": sweep_id, "sweep_ids": list(sweep_ids),
+                          "sweep_id_per_model": sweep_tags, "discard": discard,
                           "fold_signs": fold_signs,
                           "alpha": ALPHA, "bins": None if ed is None else ed.RANK_BINS,
                           "require_neutralino_lsp": require_neutralino_lsp,
@@ -168,7 +207,7 @@ def main(manifest, output_dir, models, discard, fold_signs, require_neutralino_l
                "results": {}}
 
     for model, dirs in run_dirs.items():
-        tag = (sweep_id or "all").replace("/", "_")
+        tag = (sweep_tags.get(model) or "all").replace("/", "_")
         cache = (Path(cache_dir)
                  / f"{model}_{tag}_veto{int(require_neutralino_lsp)}.npz")
         chains = _al_ensembles(dirs, require_neutralino_lsp, cache)
@@ -201,11 +240,17 @@ def main(manifest, output_dir, models, discard, fold_signs, require_neutralino_l
                 click.echo(f"[rank] {model}: {base} skipped: {exc}", err=True)
 
         worst = res.get("worst_p", res.get("worst_p_holm"))
-        estimable = bool(res.get("estimable", True))
+        # Upstream signals unestimability by zeroing n_thinned (it never returns
+        # an "estimable" key), so defaulting that key to True turned an
+        # unestimable cell into a silent "pass".
+        estimable = bool(res.get("estimable", res["n_thinned"] > 0))
         verdict = ("not_estimable" if not estimable else
                    "fail" if (worst is not None and np.isfinite(worst) and worst < ALPHA)
                    else "pass")
         payload["results"][model] = {
+            "sweep_id": sweep_tags.get(model), "n_run_dirs": len(dirs),
+            "strategy": picks[model][0], "warm_start": picks[model][1],
+            "thin_step": int(np.ceil(max_tau)) if np.isfinite(max_tau) else 1,
             "n_chains": res["n_chains"], "n_thinned": res["n_thinned"],
             "max_tau": max_tau, "estimable": estimable,
             "worst_param": res.get("worst_param"), "worst_p_holm": worst,

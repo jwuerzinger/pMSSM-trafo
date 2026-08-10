@@ -17,3 +17,6 @@ active_learning_tabpfn_output*
 pipeline_analysis*
 slurm/cluster.conf
 review/
+
+# Core dumps (a killed AL smoke test left a 5.4 GB one in the repo root)
+core.*
