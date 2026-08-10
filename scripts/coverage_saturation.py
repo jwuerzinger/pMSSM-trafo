@@ -87,6 +87,20 @@ def build_target(mcmc_data_dir: str, ax_idx: list[int], n_bins: int, min_cell: i
     return edges, tmap, len(target), (X_b, Y_b)
 
 
+def _support_axis(ax) -> None:
+    """Fix a covered-support axis to the full 0-1 range, ticked every 0.05.
+
+    Support is a fraction of a fixed target set, so autoscaling misleads twice:
+    it makes a coverage of 0.4 look near-complete, and it stops two figures (or
+    two panels) from being read against each other. Pinning the range makes the
+    "still climbing, nowhere near saturated" reading immediate.
+    """
+    from matplotlib.ticker import MultipleLocator
+    ax.set_ylim(0.0, 1.0)
+    ax.yaxis.set_major_locator(MultipleLocator(0.05))
+    ax.tick_params(axis="y", labelsize=8)
+
+
 def coverage_of(cells: np.ndarray, tmap: np.ndarray, n_target: int) -> float:
     """Fraction of target cells hit; entries < 0 are treated as out-of-band."""
     cells = cells[cells >= 0]
@@ -338,6 +352,7 @@ def main(manifest, baseline_data_dir, mcmc_data_dir, cache_dir, output_dir,
     ax.set_xscale("log")
     ax.set_xlabel("simulator calls (valid models evaluated, total across replicas)")
     ax.set_ylabel("fraction of reference in-band support covered")
+    _support_axis(ax)
     ax.grid(alpha=0.3, which="both")
     ax.legend(fontsize=8, loc="upper left",
               title="solid: one replica   dashed: budget split over 5 replicas",
@@ -352,6 +367,7 @@ def main(manifest, baseline_data_dir, mcmc_data_dir, cache_dir, output_dir,
     ax2.set_xscale("log")
     ax2.set_xlabel("in-band points spent (total across replicas)")
     ax2.set_ylabel("fraction of reference in-band support covered")
+    _support_axis(ax2)
     ax2.grid(alpha=0.3, which="both")
     ax2.legend(fontsize=8, loc="upper left")
     fig.tight_layout()

@@ -35,6 +35,7 @@ for _p in (str(_REPO_ROOT), str(_REPO_ROOT / "scripts")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+from coverage_saturation import _support_axis  # noqa: E402
 from mcmc_diagnostics import DEFAULT_AL_PICKS, MODEL_DISPLAY, PARAM_ORDER  # noqa: E402
 from coverage_saturation import (  # noqa: E402
     AXES as COV_AXES,
@@ -147,6 +148,11 @@ def _selection_seconds(main_log: Path) -> dict[int, float]:
 @click.option("--models", default=None,
               help="Comma list of picks (default: all DEFAULT_AL_PICKS).")
 @click.option("--min-seeds", default=2, show_default=True)
+@click.option("--min-iters", default=5, show_default=True,
+              help="Iterations a seed needs before its compute series is used. "
+                   "Lower it to keep a cell that barely started: the "
+                   "large-batch Deep GP run reached three iterations, and "
+                   "dropping it hid the compute it had already spent.")
 @click.option("--coverage/--no-coverage", default=True, show_default=True,
               help="Also plot covered in-band support versus cumulative compute.")
 @click.option("--mcmc-data-dir", default="/ptmp/jwuerzin/data/neutralino_v4",
@@ -157,7 +163,7 @@ def _selection_seconds(main_log: Path) -> dict[int, float]:
 @click.option("--mcmc-max-samples", default=500_000, show_default=True)
 @click.option("--require-neutralino-lsp/--no-require-neutralino-lsp",
               default=False, show_default=True)
-def main(manifest, output_dir, sweep_id, include_status, picks_override, models, min_seeds,
+def main(manifest, output_dir, sweep_id, include_status, picks_override, models, min_seeds, min_iters,
          coverage, mcmc_data_dir, tolerance, n_bins, min_cell, mcmc_max_samples,
          require_neutralino_lsp):
     import torch
@@ -252,7 +258,7 @@ def main(manifest, output_dir, sweep_id, include_status, picks_override, models,
                 L.append(int(n_tr[i]) + int(n_va[i]))
                 T.append(tr)
                 S.append(se)
-            if len(C) >= 5:
+            if len(C) >= min_iters:
                 per_seed_C.append(np.asarray(C))
                 per_seed_L.append(np.asarray(L, dtype=float))
                 per_seed_T.append(np.asarray(T))
@@ -334,6 +340,7 @@ def main(manifest, output_dir, sweep_id, include_status, picks_override, models,
     ax3.set_xscale("log")
     ax3.set_xlabel("cumulative surrogate compute [GPU h] (training + selection)")
     ax3.set_ylabel("fraction of reference in-band support covered")
+    _support_axis(ax3)
     ax3.grid(alpha=0.3, which="both")
     fig.tight_layout()
     out = Path(output_dir)
@@ -407,6 +414,8 @@ def main(manifest, output_dir, sweep_id, include_status, picks_override, models,
                             "(training + selection)")
             ax_i.set_ylabel(lab)
             ax_i.grid(alpha=0.3, which="both")
+            if "support covered" in lab:
+                _support_axis(ax_i)
         mh = [Line2D([], [], color=phr.MODEL_COLORS.get(m, "gray"), lw=1.6,
                      label=MODEL_DISPLAY.get(m, m))
               for m in all_models if m in models_present]
