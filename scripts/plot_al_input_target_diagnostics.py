@@ -422,6 +422,34 @@ def main(manifest, output_dir, models, mcmc_data_dir, baseline_data_dir,
         click.echo(f"[al-diag] wrote input_overlay.png "
                    f"({', '.join(x_samples)})")
 
+        # In-band-only variant. The unfiltered overlay above compares each
+        # loop's *whole* acquired set, ~90% of which missed the target band,
+        # against a reference that is ~64% in-band, so its curves answer two
+        # different questions ("where did the loop look?" versus "where is the
+        # answer?"). Restricting every dataset to the band makes the marginals
+        # directly comparable, which is what licenses reading a model's
+        # agreement with the reference off this figure.
+        tol, true_value = 0.1, 0.12
+        inband = {}
+        for label, X in x_samples.items():
+            Y = np.asarray(omega_samples.get(label, ()), dtype=float).ravel()
+            if Y.size != len(X):
+                click.echo(f"[al-diag] {label}: no aligned Omega; excluded "
+                           f"from the in-band overlay", err=True)
+                continue
+            keep = np.abs(Y - true_value) / true_value < tol
+            if keep.sum() < 50:
+                click.echo(f"[al-diag] {label}: only {int(keep.sum())} in-band "
+                           f"points; excluded", err=True)
+                continue
+            inband[label] = np.asarray(X)[keep]
+        if len(inband) >= 2:
+            plot_input_overlays(inband, FREE_PARAM_NAMES,
+                               str(out_dir / "input_overlay_inband.png"))
+            click.echo("[al-diag] wrote input_overlay_inband.png ("
+                       + ", ".join(f"{k}: n={len(v)}" for k, v in inband.items())
+                       + ")")
+
 
 if __name__ == "__main__":
     main()

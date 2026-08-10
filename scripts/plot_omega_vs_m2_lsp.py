@@ -62,7 +62,16 @@ def main(baseline_data_dir, output_dir, param, cut, true_value):
         o = t["MO_Omega"].array(library="np")
         mh = t["SP_m_h"].array(library="np")
         x = t[branch].array(library="np")
-        fr = np.stack([t[b].array(library="np") for b in LSP_FRAC_BRANCHES], axis=1)
+        fr = np.stack([t[b].array(library="np") for b in LSP_FRAC_BRANCHES],
+                      axis=1).astype(np.float64)
+        # The ntupler leaves the fraction branches at -1 when the LSP is not a
+        # neutralino. Such rows have no bino/wino/higgsino composition at all,
+        # but a raw -1 passes the isfinite check inside classify_lsp_type and
+        # lands in "mixed" (max < LSP_PURITY_MIN). Coerce to NaN so they are
+        # dropped, matching pmssm.data._load_lsp_fracs. Without this the
+        # "mixed" class is dominated by sneutrino/stau LSPs, which are 86% of
+        # in-band pool rows, rather than by well-tempered neutralinos.
+        fr[(fr < 0).any(axis=1)] = np.nan
         m = (o > 0) & (o < 1) & (mh != -1) & (np.abs(x) < cut)
         om_l.append(o[m])
         x_l.append(x[m])
