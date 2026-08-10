@@ -29,7 +29,7 @@ AL loops miss.
 Usage:
     python scripts/composition_fractions.py \\
         --manifest /ptmp/jwuerzin/analysis/all_runs/sweep_manifest.csv \\
-        --baseline-data-dir /ptmp/jwuerzin/data/full_scan \\
+        --baseline-data-dir /ptmp/jwuerzin/data/18387358 \\
         --mcmc-data-dir /ptmp/jwuerzin/data/neutralino_v4 \\
         --output-dir /ptmp/jwuerzin/analysis/all_runs
 """
@@ -141,6 +141,24 @@ def _inband(Y, tol, true_val):
     return np.abs(Y - true_val) / true_val < tol
 
 
+def _valid(Y, m_h=None):
+    """The standard physics filter: 0 < Omega < 1 and a real Higgs mass.
+
+    Applying this before the in-band cut is not optional. Without it the random
+    pool's in-band population looks 85% non-neutralino-LSP, because slepton-LSP
+    points are assigned a real Omega that often lands near 0.12; but almost all
+    of them fail the Higgs-mass cut, so they are not in the valid pool the
+    baseline is computed over. After filtering, the valid pool is 99.4%
+    neutralino-LSP and the composition is a statement about physics rather than
+    about unfiltered generator output.
+    """
+    Y = np.asarray(Y).ravel()
+    ok = (Y > 0) & (Y < 1)
+    if m_h is not None:
+        ok &= np.asarray(m_h).ravel() != -1
+    return ok
+
+
 AL_BRANCHES = ("IN_M_1", "IN_M_2", "IN_mu", "IN_tanb", "MO_Omega",
                "SP_LSP_Bino_frac", "SP_LSP_Wino_frac", "SP_LSP_Higgsino_frac")
 
@@ -187,7 +205,7 @@ def _al_cell_from_ntuples(run_dirs, max_iter=None):
               show_default=True)
 @click.option("--output-dir", default="/ptmp/jwuerzin/analysis/all_runs",
               show_default=True)
-@click.option("--baseline-data-dir", default="/ptmp/jwuerzin/data/full_scan",
+@click.option("--baseline-data-dir", default="/ptmp/jwuerzin/data/18387358",
               show_default=True, help="Random-scan pool (set empty to skip).")
 @click.option("--mcmc-data-dir", default="/ptmp/jwuerzin/data/neutralino_v4",
               show_default=True, help="emcee reference (set empty to skip).")
@@ -207,10 +225,14 @@ def _al_cell_from_ntuples(run_dirs, max_iter=None):
               help="Read only the first N AL iterations' ntuples (0 = all). "
                    "Useful for a quick smoke test; the full read is ~95k files.")
 @click.option("--models", default="", help="Comma-separated subset of models.")
+@click.option("--skip-al", is_flag=True, default=False,
+              help="Skip the AL cells entirely (pool/reference rows only). "
+                   "Lets the slow per-model ntuple reads run in parallel, "
+                   "one process per model, and be merged afterwards.")
 def main(manifest, output_dir, baseline_data_dir, mcmc_data_dir,
          mcmc_max_samples, cache_dir, tolerance, target,
          higgsino_window, validate_against_spheno, require_neutralino_lsp,
-         max_iter, models):
+         max_iter, models, skip_al):
     lo, hi = (float(v) for v in higgsino_window.split(","))
     imu = FREE_PARAM_NAMES.index("mu")
     out: dict = {"config": {"tolerance": tolerance, "target": target,
@@ -219,10 +241,10 @@ def main(manifest, output_dir, baseline_data_dir, mcmc_data_dir,
                             "require_neutralino_lsp": require_neutralino_lsp},
                  "rows": {}}
 
-    def record(name, *, Y, fracs=None, X_free=None, extra=None):
+    def record(name, *, Y, fracs=None, X_free=None, extra=None, m_h=None):
         """Store one row. `fracs` = SPheno's own fractions (preferred);
         `X_free` enables the tree-level reconstruction and the |mu| window."""
-        keep = _inband(Y, tolerance, target)
+        keep = _inband(Y, tolerance, target) & _valid(Y, m_h)
         if keep.sum() == 0:
             click.echo(f"[comp] {name}: no in-band points, skipping", err=True)
             return
@@ -249,7 +271,7 @@ def main(manifest, output_dir, baseline_data_dir, mcmc_data_dir,
                    f"{rec.get('higgsino_target_window', float('nan')):.3f}")
 
     # ── AL cells: SPheno fractions from the per-iteration worker ntuples ─────
-    picks = dict(DEFAULT_AL_PICKS)
+    picks = {} if skip_al else dict(DEFAULT_AL_PICKS)
     if models:
         keep_m = {m.strip() for m in models.split(",") if m.strip()}
         picks = {m: sw for m, sw in picks.items() if m in keep_m}
@@ -289,11 +311,12 @@ def main(manifest, output_dir, baseline_data_dir, mcmc_data_dir,
         import plot_hit_rate_trajectories_multiseed as phr   # noqa: PLC0415
         Xb, Yb = phr._load_xy_full(baseline_data_dir, "DMRD", Path(cache_dir))
         Xb_free = np.asarray(Xb)[:, FREE_PARAM_INDICES]
-        oms, frs = [], []
+        oms, frs, mhs = [], [], []
         for p in sorted(Path(baseline_data_dir).glob("ntuple.*.root")):
             try:
                 t = uproot.open(p)["susy"]
                 oms.append(t["MO_Omega"].array(library="np"))
+                mhs.append(t["SP_m_h"].array(library="np"))
                 frs.append(np.stack(
                     [t[b].array(library="np") for b in
                      ("SP_LSP_Bino_frac", "SP_LSP_Wino_frac",
@@ -302,7 +325,7 @@ def main(manifest, output_dir, baseline_data_dir, mcmc_data_dir,
                 continue
         if oms:
             record("random pool", Y=np.concatenate(oms),
-                   fracs=np.concatenate(frs))
+                   fracs=np.concatenate(frs), m_h=np.concatenate(mhs))
             keep = _inband(Yb, tolerance, target)
             amu = np.abs(Xb_free[keep][:, imu])
             out["rows"]["random pool"]["higgsino_target_window"] = \

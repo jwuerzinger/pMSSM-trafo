@@ -248,6 +248,57 @@ def _load_y_full(data_dir: str, target: str, cache_dir: Path) -> np.ndarray:
     return Y
 
 
+def _load_pool_neutralino_mask(data_dir: str, cache_dir: Path,
+                               n_expected: int | None = None) -> np.ndarray | None:
+    """Boolean mask over the unfiltered pool: is the LSP a neutralino?
+
+    Read straight from the pool ntuples' `SP_LSP_type` (in {1,2,3} for a
+    neutralino LSP) in the same file order `load_pmssm_data` uses, and cached as
+    .npy beside the X/Y caches.
+
+    Needed because the random-scan baseline must count the same population the
+    AL loops can produce. A slepton-LSP candidate is assigned Omega = -1 by the
+    generation config the AL runs use, so it can never be an AL hit; leaving
+    such points in the pool would credit random scanning with hits that are
+    unreachable by construction. The effect is small (they are 0.6% of the valid
+    pool and 2% of its in-band points, because almost all of them also fail the
+    Higgs-mass cut) but it makes numerator and denominator consistent on both
+    sides of the comparison.
+
+    Returns None if the branch is unavailable or the row count disagrees with
+    the cached pool, so callers can fall back rather than mis-align a mask.
+    """
+    safe = data_dir.replace("/", "_").strip("_")
+    cache = cache_dir / f"lspneut_full_{safe}.npy"
+    if cache.exists():
+        m = np.load(cache)
+        if n_expected is None or len(m) == n_expected:
+            return m
+        click.echo(f"[baseline-veto] cached mask has {len(m)} rows, pool has "
+                   f"{n_expected}; ignoring cache", err=True)
+    try:
+        import uproot  # noqa: PLC0415
+        files = sorted(Path(data_dir).glob("ntuple.*.root"))
+        if not files:
+            files = sorted(Path(data_dir).glob("*.root"))
+        parts = []
+        for f in files:
+            t = uproot.open(f)["susy"]
+            parts.append(np.isin(t["SP_LSP_type"].array(library="np"), (1, 2, 3)))
+        m = np.concatenate(parts)
+    except Exception as e:  # noqa: BLE001
+        click.echo(f"[baseline-veto] could not build the mask ({e}); "
+                   f"baseline stays unvetoed", err=True)
+        return None
+    if n_expected is not None and len(m) != n_expected:
+        click.echo(f"[baseline-veto] mask has {len(m)} rows but the pool has "
+                   f"{n_expected}; refusing to apply it", err=True)
+        return None
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    np.save(cache, m)
+    return m
+
+
 def _load_xy_full(data_dir: str, target: str, cache_dir: Path) -> tuple[np.ndarray, np.ndarray]:
     """Load (or read from .npy cache) the full unshuffled (X, Y) pool used by AL runs.
 
@@ -2126,6 +2177,12 @@ def plot_best_per_model(traj, tols, uncertainty, true_val, out_dir,
 @click.option("--accuracy-dropout", default=0.1, type=float, show_default=True,
               help="Dropout rate used to instantiate the transformer for "
                    "checkpoint loading (matches the AL training default).")
+@click.option("--baseline-require-neutralino-lsp/--no-baseline-require-neutralino-lsp",
+              default=True, show_default=True,
+              help="Restrict the random-scan baseline pool to neutralino-LSP "
+                   "models. On by default: the AL generation config assigns "
+                   "Omega = -1 to slepton-LSP candidates, so an unrestricted "
+                   "pool credits random scanning with hits AL cannot make.")
 @click.option("--require-neutralino-lsp/--no-require-neutralino-lsp",
               default=False, show_default=True,
               help="Post-hoc veto of non-neutralino LSPs (sneutrinos): drop "
@@ -2134,6 +2191,7 @@ def plot_best_per_model(traj, tols, uncertainty, true_val, out_dir,
                    "is rebased so per-iteration slicing stays consistent.")
 def main(manifest, sweep_id, output_dir, uncertainty, target, tolerances,
          min_seeds, include_status, baseline_data_dir,
+         baseline_require_neutralino_lsp,
          compute_accuracy, mcmc_data_dir, mcmc_max_samples, mcmc_yield_json,
          accuracy_device, accuracy_cache_refresh,
          accuracy_static_eval_size, accuracy_dropout,
@@ -2165,6 +2223,36 @@ def main(manifest, sweep_id, output_dir, uncertainty, target, tolerances,
     if baseline_data_dir:
         try:
             Y_full = _load_y_full(baseline_data_dir, target, out_dir)
+            # Restrict the random-scan baseline to neutralino-LSP models, so it
+            # counts the same population the AL loops can produce (a slepton-LSP
+            # candidate comes back with Omega = -1 under the AL generation
+            # config and can never be a hit). Numerator and denominator are both
+            # restricted, so this is a change of population, not a reweighting.
+            veto_stats = None
+            if baseline_require_neutralino_lsp:
+                m = _load_pool_neutralino_mask(baseline_data_dir, out_dir,
+                                               n_expected=len(Y_full))
+                if m is not None:
+                    n_before = len(Y_full)
+                    ib_before = {t: int(np.sum(np.abs(Y_full - true_val) / true_val < t))
+                                 for t in tols}
+                    Y_full = Y_full[m]
+                    veto_stats = {
+                        "n_valid_before": n_before,
+                        "n_valid_after": int(len(Y_full)),
+                        "n_valid_discarded": int(n_before - len(Y_full)),
+                        "frac_valid_discarded": float((n_before - len(Y_full)) / n_before),
+                        "inband_before": ib_before,
+                        "inband_after": {t: int(np.sum(np.abs(Y_full - true_val) / true_val < t))
+                                         for t in tols},
+                    }
+                    click.echo(f"[baseline-veto] pool restricted to neutralino LSP: "
+                               f"{veto_stats['n_valid_discarded']} of {n_before} valid "
+                               f"models dropped ({veto_stats['frac_valid_discarded']*100:.2f}%)")
+                    for t in tols:
+                        b, a = ib_before[t], veto_stats["inband_after"][t]
+                        click.echo(f"[baseline-veto]   tol={t:.0%}: in-band {b} -> {a} "
+                                   f"({(b-a)/max(b,1)*100:.1f}% dropped)")
             prevalence = _pool_prevalence(Y_full, true_val, tols)
             p_valid, n_valid, n_total, log_src = _extract_validity_rate(
                 df["expected_run_dir"].dropna().tolist()

@@ -138,6 +138,12 @@ def _selection_seconds(main_log: Path) -> dict[int, float]:
 @click.option("--sweep-id", default=None,
               help="Only manifest rows whose sweep_id starts with this prefix.")
 @click.option("--include-status", default="completed,running,timeout", show_default=True)
+@click.option("--picks", "picks_override", default=None,
+              help="Override the (strategy, warm) cell per model as "
+                   "model:strategy:warm[,...]. Needed for off-sweep families "
+                   "whose cell is not the benchmark's best, e.g. the "
+                   "large-batch runs, which use top_k where DEFAULT_AL_PICKS "
+                   "names entropy_batch and would therefore match no row.")
 @click.option("--models", default=None,
               help="Comma list of picks (default: all DEFAULT_AL_PICKS).")
 @click.option("--min-seeds", default=2, show_default=True)
@@ -151,7 +157,7 @@ def _selection_seconds(main_log: Path) -> dict[int, float]:
 @click.option("--mcmc-max-samples", default=500_000, show_default=True)
 @click.option("--require-neutralino-lsp/--no-require-neutralino-lsp",
               default=False, show_default=True)
-def main(manifest, output_dir, sweep_id, include_status, models, min_seeds,
+def main(manifest, output_dir, sweep_id, include_status, picks_override, models, min_seeds,
          coverage, mcmc_data_dir, tolerance, n_bins, min_cell, mcmc_max_samples,
          require_neutralino_lsp):
     import torch
@@ -162,6 +168,19 @@ def main(manifest, output_dir, sweep_id, include_status, models, min_seeds,
 
     statuses = {s.strip() for s in include_status.split(",")}
     picks = dict(DEFAULT_AL_PICKS)
+    if picks_override:
+        parsed = {}
+        for tok in picks_override.split(","):
+            tok = tok.strip()
+            if not tok:
+                continue
+            try:
+                m, st, wm = tok.split(":")
+            except ValueError:
+                raise click.ClickException(
+                    f"--picks entry {tok!r} is not model:strategy:warm") from None
+            parsed[m] = (st, wm)
+        picks = parsed
     if models:
         wanted = {m.strip() for m in models.split(",")}
         picks = {m: sw for m, sw in picks.items() if m in wanted}

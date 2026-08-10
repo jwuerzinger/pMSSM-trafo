@@ -106,13 +106,18 @@ def mcmc_yield(mcmc_data_dir: str, tols: list[float]) -> dict:
 
 
 def al_yields(manifest: str, tol: float, require_neutralino_lsp: bool,
-              p_valid: float) -> dict:
+              p_valid: float, include_status=("completed", "timeout")) -> dict:
     """Per best-per-model cell: final cumulative hits/desired (attempt units)
     AND final hit rate (per valid retained training point) — the two unit
     systems of the paper's yield table."""
     phr._DESIRED_P_VALID = p_valid
+    # Accept `timeout` as well as `completed`. A run's status reflects how its
+    # SLURM job ended, not whether it produced a usable 40-iteration state: the
+    # Deep GP warm cell has one seed at a full 40 iterations that is marked
+    # timeout purely because its row was repointed at an archived copy, and
+    # excluding it silently dropped the cell from five seeds to three.
     rows = [r for r in csv.DictReader(open(manifest))
-            if r["status"] == "completed"]
+            if r["status"] in set(include_status)]
     out = {}
     for model, (strat, warm) in DEFAULT_AL_PICKS.items():
         finals, finals_valid = [], []
