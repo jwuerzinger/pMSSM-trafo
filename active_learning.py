@@ -217,7 +217,15 @@ def load_config_with_sweep(config_file, sweep_index=None):
 @click.option('--patience', default=200, type=int,
               help="Early stopping patience (epochs without improvement, default: 200).")
 @click.option('--warm-starting/--no-warm-starting', default=True,
-              help="Warm-start from previous iteration checkpoint (default: enabled).")
+              help="Warm-start from previous iteration checkpoint (default: enabled). "
+                   "NOTE: because this defaults to enabled, a cold run must be "
+                   "resumed with an explicit --no-warm-starting or it will "
+                   "silently continue warm; --resume-from now refuses to do so.")
+@click.option('--allow-config-drift', is_flag=True, default=False,
+              help="Permit --resume-from to change the loop configuration "
+                   "(warm start, strategy, n_select, target, transform). Off by "
+                   "default: such a resume yields a run whose halves are not "
+                   "comparable, which is silent in the outputs.")
 @click.option('--eval-data-path', default=None, type=str,
               help="Path to external eval dataset (ROOT/CSV) for validation.")
 @click.option('--compute-full-metrics/--no-compute-full-metrics', default=False,
@@ -246,7 +254,7 @@ def load_config_with_sweep(config_file, sweep_index=None):
               help="Comma-separated GPU IDs for AL and baseline models (default: 2,3).")
 @click.option('--seed', default=42, type=int,
               help="Master random seed propagated to torch / numpy / candidate pool (default: 42).")
-def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, dropout, n_datasets, n_samples, val_fraction, output_dir, generate_data, min_gen_fraction, max_gen_attempts, gen_workers, selection_strategy, entropy_blur, entropy_beta, entropy_pool_size, candidate_generation, candidate_source, proximity_sampling, tolerance_sampling, target_value, config_file, sweep_index, early_stopping, patience, warm_starting, eval_data_path, compute_full_metrics, y_transform, mcmc_data_dir, mcmc_max_samples, static_eval_size, data_dir, use_mcmc_loader, train_baseline, resume_from, n_additional_iterations, gpu_ids, seed):
+def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, dropout, n_datasets, n_samples, val_fraction, output_dir, generate_data, min_gen_fraction, max_gen_attempts, gen_workers, selection_strategy, entropy_blur, entropy_beta, entropy_pool_size, candidate_generation, candidate_source, proximity_sampling, tolerance_sampling, target_value, config_file, sweep_index, early_stopping, patience, warm_starting, allow_config_drift, eval_data_path, compute_full_metrics, y_transform, mcmc_data_dir, mcmc_max_samples, static_eval_size, data_dir, use_mcmc_loader, train_baseline, resume_from, n_additional_iterations, gpu_ids, seed):
     """
     Active learning pipeline for pMSSM relic density prediction.
 
@@ -588,6 +596,60 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
         if saved is None:
             raise click.UsageError(f"No state.pt found in {resume_from}")
         logger.info(f"Resuming from {resume_from} (last completed iteration: {saved['iteration']})")
+
+        # ---- Guard against silent configuration drift ----------------------
+        # A resume that changes the loop's configuration produces a run whose
+        # two halves are not comparable, and the failure is invisible in the
+        # outputs. This bit us once: three extended-budget probes continued
+        # with warm starting enabled because --warm-starting defaults to True
+        # and the resume was launched without the explicit flag, so their
+        # post-resume iterations measured a configuration change rather than a
+        # longer run. Compare against whatever the original run recorded and
+        # refuse to continue on a mismatch.
+        _current_cfg = {
+            "warm_starting": bool(warm_starting),
+            "selection_strategy": selection_strategy,
+            "n_select": int(n_select),
+            "target_value": float(target_value),
+            "y_transform": y_transform,
+        }
+        _prev_cfg = saved.get("run_config")
+        _cfg_source = "state.pt"
+        if _prev_cfg is None:
+            # States written before run_config was persisted: fall back to the
+            # summary.json a completed run leaves behind.
+            _summary_path = Path(resume_from) / "summary.json"
+            if _summary_path.exists():
+                try:
+                    import json as _json
+                    _prev_cfg = _json.loads(_summary_path.read_text()).get("config")
+                    _cfg_source = "summary.json"
+                except Exception as _e:                        # noqa: BLE001
+                    logger.warning(f"Could not read {_summary_path}: {_e}")
+        if _prev_cfg:
+            _drift = {k: (_prev_cfg[k], v) for k, v in _current_cfg.items()
+                      if k in _prev_cfg and _prev_cfg[k] != v}
+            if _drift:
+                _msg = "; ".join(f"{k}: original={o!r} now={n!r}"
+                                 for k, (o, n) in sorted(_drift.items()))
+                if allow_config_drift:
+                    logger.warning(f"[resume] CONFIGURATION DRIFT ({_cfg_source}) "
+                                   f"accepted via --allow-config-drift: {_msg}")
+                else:
+                    raise click.UsageError(
+                        f"Resume would change the run configuration ({_cfg_source}): "
+                        f"{_msg}. The resumed iterations would not be comparable to "
+                        f"the original ones. Re-launch with the original settings "
+                        f"(note --warm-starting defaults to True, so a cold run "
+                        f"needs an explicit --no-warm-starting), or pass "
+                        f"--allow-config-drift if the change is intended.")
+            else:
+                logger.info(f"[resume] configuration matches the original run "
+                            f"({_cfg_source})")
+        else:
+            logger.warning("[resume] no recorded configuration found in "
+                           "state.pt or summary.json; cannot verify that this "
+                           "resume preserves the original settings")
         # Restore accumulated data
         X, Y = saved["X"], saved["Y"]
         X_val, Y_val = saved["X_val"], saved["Y_val"]
@@ -1414,6 +1476,19 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
         # ---- Checkpoint run state for resume -------------------------------
         from pmssm.resume import save_state, capture_rng
         save_state(output_dir, {
+            # Settings a resume must not silently change. The --warm-starting
+            # default is True, so a resume launched without the explicit flag
+            # (e.g. straight to a per-model submit script, bypassing
+            # submit_al_bundled.sh, which is what builds that flag) flips a
+            # cold run to warm from that iteration on. Persisting these lets
+            # the resume path detect the drift instead of absorbing it.
+            "run_config": {
+                "warm_starting": bool(warm_starting),
+                "selection_strategy": selection_strategy,
+                "n_select": int(n_select),
+                "target_value": float(target_value),
+                "y_transform": y_transform,
+            },
             "iteration": iteration,
             "X": X, "Y": Y, "X_val": X_val, "Y_val": Y_val,
             "F": F, "F_val": F_val,
