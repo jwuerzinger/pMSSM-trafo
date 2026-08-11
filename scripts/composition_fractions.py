@@ -224,6 +224,12 @@ def _al_cell_from_ntuples(run_dirs, max_iter=None):
 @click.option("--max-iter", default=0, type=int, show_default=True,
               help="Read only the first N AL iterations' ntuples (0 = all). "
                    "Useful for a quick smoke test; the full read is ~95k files.")
+@click.option("--picks", "picks_override", default="",
+              help="Override the canonical (strategy, warm) per model, as "
+                   "'model:strategy:warm' entries separated by commas. Probe "
+                   "manifests need this: the large-batch runs use top_k, so "
+                   "against DEFAULT_AL_PICKS they would match no rows and the "
+                   "cells would be silently absent from the output.")
 @click.option("--models", default="", help="Comma-separated subset of models.")
 @click.option("--skip-al", is_flag=True, default=False,
               help="Skip the AL cells entirely (pool/reference rows only). "
@@ -232,7 +238,7 @@ def _al_cell_from_ntuples(run_dirs, max_iter=None):
 def main(manifest, output_dir, baseline_data_dir, mcmc_data_dir,
          mcmc_max_samples, cache_dir, tolerance, target,
          higgsino_window, validate_against_spheno, require_neutralino_lsp,
-         max_iter, models, skip_al):
+         max_iter, picks_override, models, skip_al):
     lo, hi = (float(v) for v in higgsino_window.split(","))
     imu = FREE_PARAM_NAMES.index("mu")
     out: dict = {"config": {"tolerance": tolerance, "target": target,
@@ -272,6 +278,14 @@ def main(manifest, output_dir, baseline_data_dir, mcmc_data_dir,
 
     # ── AL cells: SPheno fractions from the per-iteration worker ntuples ─────
     picks = {} if skip_al else dict(DEFAULT_AL_PICKS)
+    for ent in (e.strip() for e in picks_override.split(",")):
+        if not ent:
+            continue
+        parts = ent.split(":")
+        if len(parts) != 3:
+            raise click.UsageError(
+                f"--picks entries are model:strategy:warm, got {ent!r}")
+        picks[parts[0]] = (parts[1], parts[2])
     if models:
         keep_m = {m.strip() for m in models.split(",") if m.strip()}
         picks = {m: sw for m, sw in picks.items() if m in keep_m}
