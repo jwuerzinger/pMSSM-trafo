@@ -226,6 +226,29 @@ def main(manifest, mcmc_data_dir, baseline_data_dir, output_dir, tolerance,
     p_valid, n_valid, n_total, src = phr._extract_validity_rate(run_dirs)
     if p_valid is None:
         raise click.ClickException("could not extract p_valid from any run log")
+
+    # Efficiency is (in-band AND neutralino AND valid) / (ALL attempts). The
+    # denominator must keep every attempt, sneutrinos included, because a
+    # simulator call is paid for before its LSP is known. Writing that as
+    # prevalence x p_valid, the neutralino cut therefore belongs in p_valid's
+    # NUMERATOR, where it cancels prevalence's denominator:
+    #
+    #   (I_vn / N_vn) x (N_vn / N_a) = I_vn / N_a
+    #
+    # The rate parsed from the run logs is N_v / N_a, which counts a sneutrino
+    # model as valid because the pool stores its true Omega. An AL run assigns
+    # Omega = -1 to the same point, so it fails the validity cut there: the two
+    # datasets disagree on what "valid" means, and using the pool's rate
+    # overstates both the random and the AL per-attempt yields by N_v / N_vn.
+    # The factor cancels in the AL-vs-random ratio but not against the MCMC
+    # reference, whose per-attempt yield is native and carries no such factor.
+    p_valid_pool = p_valid
+    if discard["applied"]:
+        p_valid = p_valid * discard["pool_rows_kept"] / discard["pool_rows"]
+        click.echo(f"[yield] p_valid deflated to the neutralino-LSP population: "
+                   f"{p_valid_pool:.6f} -> {p_valid:.6f} "
+                   f"({discard['pool_rows_kept']:,}/{discard['pool_rows']:,} of "
+                   f"the valid pool)")
     random_yield = prevalence * p_valid
     click.echo(f"[yield] p_valid={p_valid:.4f} ({n_valid}/{n_total}, {src})")
     click.echo(f"[yield] pool prevalence@{tolerance:.0%}={prevalence:.4f} "
@@ -265,6 +288,7 @@ def main(manifest, mcmc_data_dir, baseline_data_dir, output_dir, tolerance,
     result = {"tolerance": tolerance, "true_value": true_value,
               "require_neutralino_lsp": require_neutralino_lsp,
               "baseline_neutralino_restriction": discard,
+              "p_valid_pool_unrestricted": p_valid_pool,
               "p_valid": p_valid, "pool_prevalence": prevalence,
               "random_yield_per_attempt": random_yield,
               "mcmc": m, "al": al}

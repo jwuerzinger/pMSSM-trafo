@@ -281,10 +281,21 @@ def _load_pool_neutralino_mask(data_dir: str, cache_dir: Path,
         files = sorted(Path(data_dir).glob("ntuple.*.root"))
         if not files:
             files = sorted(Path(data_dir).glob("*.root"))
+        # The mask has to index the FILTERED pool, because that is what
+        # _load_y_full returns. Applying load_pmssm_data's combined validity cut
+        # here is what aligns the two: without it the mask spans every attempted
+        # row (3.0e6) against the pool's valid ones (1.34e6) and the length guard
+        # below rejects it, which is how this silently did nothing until now.
+        from pmssm.data import TARGET_CONFIG  # noqa: PLC0415
+        tb = TARGET_CONFIG["DMRD"]["branch"]
         parts = []
         for f in files:
             t = uproot.open(f)["susy"]
-            parts.append(np.isin(t["SP_LSP_type"].array(library="np"), (1, 2, 3)))
+            y = t[tb].array(library="np")
+            mh = t["SP_m_h"].array(library="np")
+            valid = (y > 0) & (y < 1.0) & (mh != -1)
+            neut = np.isin(t["SP_LSP_type"].array(library="np"), (1, 2, 3))
+            parts.append(neut[valid])
         m = np.concatenate(parts)
     except Exception as e:  # noqa: BLE001
         click.echo(f"[baseline-veto] could not build the mask ({e}); "
