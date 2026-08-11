@@ -160,7 +160,9 @@ def train_model_worker(gpu_id, X, Y, idx_train, idx_val, epochs, dropout,
                       warm_start_path=None, early_stopping=True, patience=200,
                       y_transform='zscore', target='DMRD', lsp_fracs=None,
                       arch='transformer',
-                      dnn_d_model=64, dnn_num_layers=4, dnn_dim_feedforward=256):
+                      dnn_d_model=64, dnn_num_layers=4, dnn_dim_feedforward=256,
+                      tf_d_model=128, tf_nhead=4, tf_num_layers=3,
+                      tf_dim_feedforward=512):
     """
     Worker function for multiprocessing neural-network training.
 
@@ -252,11 +254,14 @@ def train_model_worker(gpu_id, X, Y, idx_train, idx_val, epochs, dropout,
             dropout=dropout,
         )
     elif arch == 'transformer':
+        # Transformer dimensions are parameters, not constants: a capacity
+        # sweep needs them, and the defaults reproduce the production model
+        # (803,330 parameters) exactly.
         model = PMSSMTransformerTabular(
-            d_model=128,
-            nhead=4,
-            num_layers=3,
-            dim_feedforward=512,
+            d_model=tf_d_model,
+            nhead=tf_nhead,
+            num_layers=tf_num_layers,
+            dim_feedforward=tf_dim_feedforward,
             dropout=dropout,
         )
     else:
