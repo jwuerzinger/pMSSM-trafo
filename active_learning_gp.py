@@ -20,6 +20,7 @@ _GP_PIPELINE_ROOT = Path(__file__).parent / "al_pmssmwithgp" / "model"
 sys.path.insert(0, str(_GP_PIPELINE_ROOT))
 
 # Import from unified pmssm package
+from pmssm.training import collect_worker_result
 from pmssm import (
     # Configuration
     PARAM_ORDER,
@@ -1001,8 +1002,23 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, v
 
             # Read from queues BEFORE joining — joining first can deadlock
             # if the result object is large enough to fill the pipe buffer.
-            al_results = al_queue.get()
-            baseline_results = baseline_queue.get()
+            # collect_worker_result also covers the mirror-image failure: a
+            # worker that dies without producing a result, which a bare get()
+            # would wait out until the job's wall-clock limit.
+            try:
+                al_results = collect_worker_result(
+                    al_queue, al_process, "AL", logger)
+                baseline_results = collect_worker_result(
+                    baseline_queue, baseline_process, "Baseline", logger)
+            except RuntimeError:
+                # Never leave a live sibling behind: non-daemon children keep
+                # the interpreter alive at exit, which would turn this fast
+                # failure back into the hang it exists to prevent.
+                for _p in (al_process, baseline_process):
+                    if _p.is_alive():
+                        _p.terminate()
+                        _p.join(timeout=30)
+                raise
 
             al_process.join()
             baseline_process.join()

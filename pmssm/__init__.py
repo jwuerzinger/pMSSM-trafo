@@ -101,6 +101,7 @@ from .uncertainty import (
 )
 
 from .training import (
+    collect_worker_result,
     train_with_validation,
     train_model_worker,
     create_gp_model,
@@ -214,6 +215,7 @@ __all__ = [
     'train_with_validation',
     'train_model_worker',
     'create_gp_model',
+    'collect_worker_result',
     'train_gp_model',
     'train_gp_worker',
     'model_has_likelihood',

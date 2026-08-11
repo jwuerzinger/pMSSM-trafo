@@ -120,25 +120,52 @@ def compute_gp_r2(model, x_val, y_val, model_type, jitter=1e-3, num_samples=8, t
     device = next(model.parameters()).device
     model.eval()
 
+    # Predict in chunks. This is called on the TRAINING set as well as the
+    # validation set (see train_gp_model), so an unbatched call scales with the
+    # labelled set and eventually asks the GPU for a workspace it cannot serve.
+    # On ROCm that surfaced as "Device memory allocation size is too small for
+    # TRSM" followed by "Memory access fault by GPU", killing the training
+    # worker after it had logged completion but before it wrote its checkpoint,
+    # which left the parent blocked on a result that never arrived. It bit the
+    # Deep GP at n_train = 12740 while 12487 had been fine, so the limit is not
+    # a clean threshold. gp_predict already chunks at this size.
+    #
+    # Chunking is safe because a point's posterior mean depends only on the
+    # (fixed) training data, not on the other points in its batch: verified
+    # exact to float32 round-off (4.8e-7) for the deterministic exact-GP path.
+    # For the Deep GP each chunk draws its own likelihood samples, so values are
+    # not bitwise reproducible, but they were never reproducible anyway: the R2
+    # it reports is a Monte-Carlo estimate that already moves by ~0.01 between
+    # identical calls.
+    batch = 1024
+
+    def _predict_chunked(fn):
+        out = []
+        for start in range(0, len(x_val), batch):
+            out.append(fn(x_val[start:start + batch].to(device)))
+        return torch.cat(out, dim=0) if out else torch.empty(0)
+
     if model_type == "mlp":
         with torch.no_grad():
-            y_pred_transformed = model(x_val.to(device)).squeeze()
+            y_pred_transformed = _predict_chunked(
+                lambda xb: model(xb).squeeze(-1).view(-1).cpu())
     elif model_type == "deep_gp":
         model.likelihood.eval()
         with torch.no_grad(), \
              gpytorch.settings.fast_pred_var(False), \
              gpytorch.settings.cholesky_jitter(float_value=jitter, double_value=jitter), \
              gpytorch.settings.num_likelihood_samples(num_samples):
-            preds = model.likelihood(model(x_val.to(device)))
-            y_pred_transformed = preds.mean.detach().mean(dim=0).squeeze()
+            y_pred_transformed = _predict_chunked(
+                lambda xb: model.likelihood(model(xb)).mean.detach()
+                .mean(dim=0).view(-1).cpu())
     else:
         # exact_gp, sparse_gp
         model.likelihood.eval()
         with torch.no_grad(), \
              gpytorch.settings.fast_pred_var(), \
              gpytorch.settings.cholesky_jitter(float_value=jitter, double_value=jitter):
-            preds = model.likelihood(model(x_val.to(device)))
-            y_pred_transformed = preds.mean.detach()
+            y_pred_transformed = _predict_chunked(
+                lambda xb: model.likelihood(model(xb)).mean.detach().view(-1).cpu())
 
     # Convert to physical space for R² calculation
     y_true_transformed = y_val.view(-1).to(device)

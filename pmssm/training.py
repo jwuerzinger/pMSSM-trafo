@@ -757,3 +757,64 @@ def train_gp_worker(gpu_id, X, Y, X_val, Y_val, data_min, data_max,
         "val_losses": val_losses,
         "lengthscales": lengthscales,
     })
+
+
+def collect_worker_result(result_queue, process, name, logger=None, poll=30.0):
+    """Wait for a training worker's result, failing fast if the worker dies.
+
+    The ordering constraint here is two-sided, which is why a plain get() or a
+    plain join() are both wrong.
+
+    Reading before joining is necessary: a child that puts a large result on the
+    queue and then exits blocks in its feeder thread until the parent drains the
+    pipe, so joining first can deadlock.
+
+    But a timeout-less ``get()`` has the mirror-image failure. If the child dies
+    WITHOUT putting anything, the parent waits forever. That is not hypothetical:
+    an unbatched GP evaluation used to fault the GPU ("Memory access fault by
+    GPU" on ROCm), killing the worker after it had logged training completion
+    but before it wrote its checkpoint. The parent then slept until the job hit
+    its 24-hour wall-clock limit, having produced nothing, and SLURM recorded
+    the run as TIMEOUT, which points at the budget rather than at the fault.
+
+    Polling with a timeout and checking liveness in between costs nothing and
+    turns that into an immediate, named error.
+
+    Args:
+        result_queue: the mp.Queue the worker writes its result to
+        process: the mp.Process to watch
+        name: label used in the error message ("AL", "Baseline", ...)
+        logger: optional logger for the death notice
+        poll: seconds between liveness checks
+
+    Returns:
+        Whatever the worker put on the queue.
+
+    Raises:
+        RuntimeError: the worker exited without producing a result.
+    """
+    import queue as _queue
+
+    while True:
+        try:
+            return result_queue.get(timeout=poll)
+        except _queue.Empty:
+            if process.is_alive():
+                continue
+            # The worker is gone. Its exit and the queue's feeder flush are not
+            # ordered relative to each other, so give the queue one more look
+            # before declaring failure.
+            try:
+                return result_queue.get(timeout=poll)
+            except _queue.Empty:
+                code = process.exitcode
+                msg = (f"{name} training worker exited with code {code} without "
+                       f"returning a result.")
+                if code is not None and code < 0:
+                    msg += (f" Negative codes are signals ({-code}: 6=abort, "
+                            f"9=SIGKILL, 11=SIGSEGV); a ROCm GPU memory fault "
+                            f"arrives this way. Check the job's stderr for "
+                            f"'Memory access fault by GPU'.")
+                if logger:
+                    logger.error(msg)
+                raise RuntimeError(msg) from None
