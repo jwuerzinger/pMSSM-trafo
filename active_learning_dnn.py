@@ -55,6 +55,7 @@ from pmssm import (
     select_entropy_batch_mc,
     # Uncertainty
     compute_uncertainty_ensemble,
+    compute_uncertainty_laplace,
     compute_uncertainty_mc_dropout,
     # Training
     train_with_validation,
@@ -246,6 +247,23 @@ def load_config_with_sweep(config_file, sweep_index=None):
                    "--no-train-baseline. The across-member covariance has rank "
                    "<= K-1, so entropy_batch is degenerate for larger batches; "
                    "use top_k.")
+@click.option('--acq-uncertainty', default='dropout',
+              type=click.Choice(['dropout', 'laplace']),
+              help="How the acquisition uncertainty is computed. 'dropout' "
+                   "(default) takes the spread of --mc-samples stochastic "
+                   "passes. 'laplace' uses a last-layer linearised Laplace "
+                   "posterior over the penultimate features, which is EXACT "
+                   "here because the head is linear and the loss is MSE. It "
+                   "grows with distance from the labelled features rather than "
+                   "with local weight sensitivity, needs ONE forward pass "
+                   "instead of --mc-samples, and yields a candidate covariance "
+                   "of rank up to the feature dimension instead of "
+                   "--mc-samples-1, which entropy_batch needs. Incompatible "
+                   "with --n-ensemble > 1.")
+@click.option('--laplace-prior-precision', default=1.0, type=float,
+              help="Gaussian prior precision on the last-layer weights for "
+                   "--acq-uncertainty laplace. Ranking is insensitive to it in "
+                   "this regime, so the default is a numerical safeguard.")
 @click.option('--seed', default=42, type=int,
               help="Master random seed propagated to torch / numpy / candidate pool (default: 42).")
 @click.option('--d-model', default=64, type=int,
@@ -254,7 +272,7 @@ def load_config_with_sweep(config_file, sweep_index=None):
               help="DNN hidden layer count (default: 4).")
 @click.option('--dim-feedforward', default=256, type=int,
               help="DNN hidden layer width (default: 256).")
-def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, dropout, n_datasets, n_samples, val_fraction, output_dir, generate_data, min_gen_fraction, max_gen_attempts, gen_workers, selection_strategy, entropy_blur, entropy_beta, entropy_pool_size, candidate_generation, proximity_sampling, tolerance_sampling, target_value, config_file, sweep_index, early_stopping, patience, warm_starting, eval_data_path, compute_full_metrics, y_transform, mcmc_data_dir, mcmc_max_samples, static_eval_size, data_dir, use_mcmc_loader, train_baseline, resume_from, n_additional_iterations, gpu_ids, seed, n_ensemble, d_model, num_layers, dim_feedforward):
+def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, dropout, n_datasets, n_samples, val_fraction, output_dir, generate_data, min_gen_fraction, max_gen_attempts, gen_workers, selection_strategy, entropy_blur, entropy_beta, entropy_pool_size, candidate_generation, proximity_sampling, tolerance_sampling, target_value, config_file, sweep_index, early_stopping, patience, warm_starting, eval_data_path, compute_full_metrics, y_transform, mcmc_data_dir, mcmc_max_samples, static_eval_size, data_dir, use_mcmc_loader, train_baseline, resume_from, n_additional_iterations, gpu_ids, seed, n_ensemble, acq_uncertainty, laplace_prior_precision, d_model, num_layers, dim_feedforward):
     """
     Active learning pipeline for pMSSM relic density prediction (DNN variant).
 
@@ -345,6 +363,10 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
     # Collision-free dir suffix: only append when caller did not already
     # include a timestamp. This is the code path used by both manual runs and
     # the strategy-sweep launcher (slurm/submit_strategy_sweep.sh).
+    if n_ensemble > 1 and acq_uncertainty == 'laplace':
+        raise click.UsageError(
+            "--acq-uncertainty laplace and --n-ensemble > 1 are two different "
+            "answers to the same question; pick one.")
     if n_ensemble > 1 and train_baseline:
         raise click.UsageError(
             "--n-ensemble > 1 requires --no-train-baseline: the ensemble path "
@@ -404,6 +426,9 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
     logger.info(f"  warm_starting: {warm_starting}")
     logger.info(f"  n_ensemble: {n_ensemble}"
                 f"{' (MC dropout)' if n_ensemble == 1 else ' (member disagreement)'}")
+    logger.info(f"  acq_uncertainty: {acq_uncertainty}"
+                + (f" (prior_precision={laplace_prior_precision:g})"
+                   if acq_uncertainty == "laplace" else ""))
     logger.info(f"  y_transform: {y_transform}")
     logger.info(f"  compute_full_metrics: {compute_full_metrics}")
     if eval_data_path:
@@ -943,10 +968,38 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
             logger.info(f"Loaded {len(_ens_models)} ensemble members for "
                         f"acquisition uncertainty")
 
+        def _to_model_space(Yp):
+            """Physical target -> the space the network's output lives in.
+
+            Mirrors PMSSMDataset exactly; the Laplace noise scale is estimated
+            from residuals, so it has to be in the same units as the output.
+            """
+            if y_transform == 'log':
+                from pmssm.data import transform_y
+                return transform_y(Yp, target='DMRD').reshape(-1)
+            _mX, _sX, _mY, _sY = stats
+            return ((Yp - _mY) / _sY).reshape(-1)
+
         def _acq_uncertainty(cands, return_predictions=False):
             if _ens_models is not None:
                 return compute_uncertainty_ensemble(
                     _ens_models, cands, stats, device, logger,
+                    return_predictions=return_predictions)
+            if acq_uncertainty == 'laplace':
+                # Draw count is chosen to exceed the feature dimension
+                # (dim_feedforward//2 + 1, so 257 at the production width), or
+                # the candidate covariance would be needlessly rank-limited and
+                # we would reproduce the very defect this replaces. The draws
+                # are matmuls on the features, not forward passes, so the cost
+                # of asking for many is negligible.
+                return compute_uncertainty_laplace(
+                    model, cands,
+                    X_combined[idx_train_al],
+                    _to_model_space(Y_combined[idx_train_al]),
+                    stats, max(int(mc_samples), 512), device, logger,
+                    X_noise=X_combined[idx_val_al],
+                    y_noise_t=_to_model_space(Y_combined[idx_val_al]),
+                    prior_precision=laplace_prior_precision,
                     return_predictions=return_predictions)
             return compute_uncertainty_mc_dropout(
                 model, cands, stats, mc_samples, device, logger,

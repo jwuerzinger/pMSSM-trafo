@@ -96,6 +96,7 @@ from .selection import (
 from .uncertainty import (
     compute_uncertainty_mc_dropout,
     compute_uncertainty_ensemble,
+    compute_uncertainty_laplace,
     compute_uncertainty_gp,
 )
 
@@ -206,6 +207,7 @@ __all__ = [
     # Uncertainty estimation
     'compute_uncertainty_mc_dropout',
     'compute_uncertainty_ensemble',
+    'compute_uncertainty_laplace',
     'compute_uncertainty_gp',
 
     # Training
