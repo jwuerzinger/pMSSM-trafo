@@ -51,6 +51,23 @@ DISPLAY = {"transformer": "Transformer", "dnn": "DNN",
            "dnn_match_trafo": "DNN (matched)"}
 
 
+def _random_baseline(prevalence_json: Path, tolerance: float) -> float:
+    """Random-scan hits per ATTEMPT at this tolerance, as measured on the pool.
+
+    Must be read rather than assumed. The per-attempt rate is the in-band
+    prevalence among VALID models times p_valid (0.009237 x 0.445414 = 0.004114
+    at tolerance 0.1); taking prevalence to be a round 1% instead understates
+    every reported multiple by about 9%.
+    """
+    d = json.loads(prevalence_json.read_text())
+    per_attempt = d.get("prevalence_per_attempt", {})
+    key = f"{tolerance:.4f}"
+    if key in per_attempt:
+        return float(per_attempt[key])
+    prev = float(d["prevalence"][key])
+    return prev * float(d["p_valid"]["p_valid"])
+
+
 def _log_span(path: Path) -> float:
     """Seconds between the first and last timestamped line."""
     if not path.exists():
@@ -143,7 +160,7 @@ def _composition(run_dirs, iteration, tolerance, target):
     the main table instead of merely looking like it.
     """
     from composition_fractions import _al_cell_from_ntuples, sanitize_spheno_fracs
-    from pmssm.visualization import classify_lsp_type
+    from pmssm.visualization import LSP_TYPE_NAMES, classify_lsp_type
 
     om, fr, _n_seeds, n_files = _al_cell_from_ntuples(
         [str(d) for d in run_dirs], max_iter=iteration)
@@ -153,11 +170,18 @@ def _composition(run_dirs, iteration, tolerance, target):
     keep = np.abs(np.asarray(om, dtype=np.float64) - target) / target < tolerance
     if keep.sum() == 0:
         return None
-    labels = np.asarray(classify_lsp_type(fr[keep]))
-    n = int(keep.sum())
-    out = {"n": n, "n_ntuple_files": int(n_files)}
-    for k in ("bino", "wino", "higgsino", "mixed"):
-        out[k] = float((labels == k).sum()) / n
+    # classify_lsp_type returns integer CODES (0 bino, 1 wino, 2 higgsino,
+    # 3 mixed, -1 non-neutralino/missing), not names. Comparing against strings
+    # silently yields all-zero fractions, so map through LSP_TYPE_NAMES and
+    # normalise over the classified rows only, matching tab:composition's
+    # convention of excluding non-neutralino LSPs from the four columns.
+    codes = np.asarray(classify_lsp_type(fr[keep]))
+    n_in = int(keep.sum())
+    n_cls = int((codes >= 0).sum())
+    out = {"n": n_in, "n_classified": n_cls, "n_ntuple_files": int(n_files),
+           "no_neutralino_lsp": float(n_in - n_cls) / max(1, n_in)}
+    for code, name in LSP_TYPE_NAMES.items():
+        out[name] = float((codes == code).sum()) / max(1, n_cls)
     return out
 
 
@@ -177,6 +201,10 @@ def main(manifest, output_dir, iteration, tolerance, target, mu_window,
          ens_glob, skip_composition):
     lo, hi = (float(v) for v in mu_window.split(","))
     out_root = Path("/ptmp/jwuerzin/output")
+    rand = _random_baseline(Path(output_dir) / "random_baseline_prevalence.json",
+                            tolerance)
+    click.echo(f"[ens] random baseline at tol={tolerance:g}: "
+               f"{rand:.6f} hits/attempt")
     rows = list(csv.DictReader(open(manifest)))
     results: dict = {}
 
@@ -235,8 +263,8 @@ def main(manifest, output_dir, iteration, tolerance, target, mu_window,
             f"        {'':<14}{'ensemble':>12}{'dropout':>16}\n"
             f"        {'hits/desired':<14}{e_hd:>12.4f}"
             f"{d_hd:>10.4f}+-{agg['hits_desired_sem']:.4f}\n"
-            f"        {'vs random':<14}{e_hd / P_VALID * 100:>11.2f}x"
-            f"{d_hd / P_VALID * 100:>15.2f}x\n"
+            f"        {'vs random':<14}{e_hd / rand:>11.2f}x"
+            f"{d_hd / rand:>15.2f}x\n"
             f"        {'hit rate':<14}{e['hit_rate']:>12.4f}"
             f"{agg['hit_rate']:>10.4f}+-{agg['hit_rate_sem']:.4f}\n"
             f"        {'GPU-hours':<14}{e['gpu_hours']:>12.4f}"
@@ -253,6 +281,7 @@ def main(manifest, output_dir, iteration, tolerance, target, mu_window,
     p = Path(output_dir) / "ensemble_comparison.json"
     p.write_text(json.dumps({"config": {"iteration": iteration,
                                         "p_valid": P_VALID,
+                                        "random_hits_per_attempt": rand,
                                         "tolerance": tolerance},
                              "results": results}, indent=1))
     click.echo(f"\n[ens] wrote {p}")
