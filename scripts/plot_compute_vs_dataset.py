@@ -107,6 +107,37 @@ def _tabpfn_fit_eval_seconds(main_log: Path) -> dict[int, float]:
     return out
 
 
+def _iter_dir_chain(d: Path) -> dict[int, Path]:
+    """{iteration number: directory} for a run, following resume chains.
+
+    A run resumed with --resume-from writes only the iterations IT ran, so a
+    continuation directory starts at e.g. iteration_041 while its state.pt
+    carries the whole history from iteration 1. The earlier iterations live in
+    the base directory, whose name is a prefix of the continuation's. Walking
+    both is what makes a resumed run's cumulative compute complete; reading the
+    continuation alone would silently drop every iteration before the resume
+    point, and the resulting trajectory would look plausible.
+    """
+    out: dict[int, Path] = {}
+    candidates = [d]
+    parent, name = d.parent, d.name
+    if parent.is_dir():
+        # Longest-prefix siblings first, so the nearest ancestor in a chain of
+        # resumes wins over an earlier one for any iteration they share.
+        candidates += sorted(
+            (sib for sib in parent.iterdir()
+             if sib.is_dir() and sib != d and name.startswith(sib.name)),
+            key=lambda sib: len(sib.name), reverse=True)
+    for cand in candidates:
+        for it_dir in cand.glob("iteration_[0-9][0-9][0-9]"):
+            try:
+                n = int(it_dir.name.split("_")[1])
+            except ValueError:
+                continue
+            out.setdefault(n, it_dir)      # first candidate wins
+    return out
+
+
 def _selection_seconds(main_log: Path) -> dict[int, float]:
     """{iteration: selection seconds} parsed from active_learning.log."""
     out: dict[int, float] = {}
@@ -241,9 +272,18 @@ def main(manifest, output_dir, sweep_id, include_status, picks_override, models,
             fit_secs = _tabpfn_fit_eval_seconds(d / "active_learning.log")
             C, L, T, S = [], [], [], []
             cum = 0.0
+            chain = _iter_dir_chain(d)
             for i in range(len(n_tr)):
-                iter_dir = d / f"iteration_{i + 1:03d}"
-                if not iter_dir.exists():
+                iter_dir = chain.get(i + 1)
+                if iter_dir is None:
+                    # Stop, but say so. Truncating in silence yields a curve
+                    # that ends early for no visible reason, which is how a
+                    # resumed run's extension can vanish from a figure.
+                    if i < len(n_tr) - 1:
+                        click.echo(
+                            f"[compute] {d.name}: no directory for iteration "
+                            f"{i + 1} of {len(n_tr)} (searched the resume "
+                            f"chain); truncating this seed there", err=True)
                     break
                 tr = _train_seconds(iter_dir)
                 if tr is None:
