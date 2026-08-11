@@ -167,10 +167,18 @@ def al_yields(manifest: str, tol: float, require_neutralino_lsp: bool,
                    "additionally computed (consumed by the hit-rate plots' "
                    "reference lines). The primary --tolerance is always "
                    "included first.")
+@click.option("--baseline-require-neutralino-lsp/--no-baseline-require-neutralino-lsp",
+              default=True, show_default=True,
+              help="Restrict the random-scan pool to neutralino-LSP models "
+                   "before taking the band prevalence. On by default: an "
+                   "unrestricted pool credits random scanning with in-band "
+                   "points the AL loops cannot reach, since their generation "
+                   "config assigns Omega = -1 to slepton-LSP candidates.")
 @click.option("--require-neutralino-lsp/--no-require-neutralino-lsp",
               default=False, show_default=True)
 def main(manifest, mcmc_data_dir, baseline_data_dir, output_dir, tolerance,
-         mcmc_tolerances, require_neutralino_lsp):
+         mcmc_tolerances, baseline_require_neutralino_lsp,
+         require_neutralino_lsp):
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     true_value = 0.12
@@ -178,8 +186,41 @@ def main(manifest, mcmc_data_dir, baseline_data_dir, output_dir, tolerance,
                           if s.strip() and abs(float(s) - tolerance) > 1e-12]
 
     # ── random-scan baseline ────────────────────────────────────────────────
+    # The pool is restricted to neutralino-LSP models before the prevalence is
+    # taken, so that numerator and denominator describe the same population on
+    # both sides of the comparison. The AL generation config assigns Omega = -1
+    # to a slepton-LSP candidate, making it structurally unreachable as an AL
+    # hit rather than merely rare; counting such points for random scanning
+    # credits it with hits no loop could produce. They are only 0.6% of the
+    # valid pool but 2% of its in-band points, being enriched on the relic
+    # shell, so the correction is small and one-directional.
     Y_full = phr._load_y_full(baseline_data_dir, "DMRD", out_dir)
+    n_pool_raw = len(Y_full)
+    inband_raw = int((np.abs(Y_full - true_value) / true_value < tolerance).sum())
+    neut_mask = None
+    if baseline_require_neutralino_lsp:
+        neut_mask = phr._load_pool_neutralino_mask(baseline_data_dir, out_dir,
+                                                   n_expected=len(Y_full))
+        if neut_mask is None:
+            click.echo("[yield] WARNING no SP_LSP_type available; baseline left "
+                       "unrestricted, multipliers will be ~2% low", err=True)
+        else:
+            Y_full = Y_full[neut_mask]
     prevalence = float(np.mean(np.abs(Y_full - true_value) / true_value < tolerance))
+    inband_kept = int((np.abs(Y_full - true_value) / true_value < tolerance).sum())
+    discard = {"pool_rows": n_pool_raw, "pool_rows_kept": int(len(Y_full)),
+               "pool_discarded": n_pool_raw - int(len(Y_full)),
+               "pool_discarded_frac": (n_pool_raw - len(Y_full)) / max(1, n_pool_raw),
+               "inband_rows": inband_raw, "inband_kept": inband_kept,
+               "inband_discarded": inband_raw - inband_kept,
+               "inband_discarded_frac": (inband_raw - inband_kept) / max(1, inband_raw),
+               "applied": neut_mask is not None}
+    if neut_mask is not None:
+        click.echo(f"[yield] neutralino-LSP restriction: dropped "
+                   f"{discard['pool_discarded']:,} of {n_pool_raw:,} valid pool "
+                   f"rows ({discard['pool_discarded_frac']:.2%}) and "
+                   f"{discard['inband_discarded']:,} of {inband_raw:,} in-band "
+                   f"({discard['inband_discarded_frac']:.2%})")
     run_dirs = [r["expected_run_dir"] for r in csv.DictReader(open(manifest))
                 if r["status"] == "completed"]
     p_valid, n_valid, n_total, src = phr._extract_validity_rate(run_dirs)
@@ -223,6 +264,7 @@ def main(manifest, mcmc_data_dir, baseline_data_dir, output_dir, tolerance,
 
     result = {"tolerance": tolerance, "true_value": true_value,
               "require_neutralino_lsp": require_neutralino_lsp,
+              "baseline_neutralino_restriction": discard,
               "p_valid": p_valid, "pool_prevalence": prevalence,
               "random_yield_per_attempt": random_yield,
               "mcmc": m, "al": al}
