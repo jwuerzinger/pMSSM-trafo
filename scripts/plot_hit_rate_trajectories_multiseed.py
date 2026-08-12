@@ -86,17 +86,20 @@ MODEL_COLORS = {
     # group visually; linestyle disambiguates (see ORACLE_LS below).
     "transformer_oracle": "tab:blue",
     "deep_gp_oracle":     "tab:green",
-    # Same colour as the parent: the pair is the comparison.
-    "transformer_laplace":     "tab:blue",
-    "dnn_laplace":             "tab:red",
-    "dnn_match_trafo_laplace": "tab:pink",
+    # A darker shade of the parent's hue: close enough to read as a pair,
+    # distinct enough to tell apart in both the plot and the legend. Sharing the
+    # parent's exact colour and separating only on linestyle was unreadable.
+    "transformer_laplace":     "navy",
+    "dnn_laplace":             "indigo",
+    "dnn_match_trafo_laplace": "mediumvioletred",
 }
 # Linestyle override for *_oracle model rows (dotted, regardless of warm/cold).
 ORACLE_LS = ":"
 # Laplace-acquisition variants reuse their parent model's colour so a per-model
 # comparison reads as one pair, and are dashed so the uncertainty method is what
 # the linestyle encodes.
-LAPLACE_LS = "--"
+LAPLACE_LS = (0, (3, 1, 1, 1))     # dash-dot-dot: distinct from "-" and "--"
+LAPLACE_MARKER = "^"               # distinct from WARM_MARKER's o/s/x
 # Friendly display labels used in legends.
 MODEL_DISPLAY = {
     "transformer":         "Transformer",
@@ -135,6 +138,24 @@ def _line_style(model: str, warm: str) -> str:
     if model.endswith("_laplace"):
         return LAPLACE_LS
     return WARM_LS.get(warm, "-")
+
+
+def _marker(model: str, warm: str) -> str:
+    """Marker for a curve; Laplace variants get their own so a pair separates
+    even when colour AND linestyle are already spoken for."""
+    if model.endswith("_laplace"):
+        return LAPLACE_MARKER
+    return WARM_MARKER.get(warm, "x")
+
+
+def _base_model(model: str) -> str:
+    """Strip the acquisition-variant suffix to get the architecture name.
+
+    Per-model figures group on this, so a Laplace cell shares axes with the
+    MC-dropout cell it is meant to be compared against instead of being written
+    to a separate file where no comparison is possible.
+    """
+    return model[: -len("_laplace")] if model.endswith("_laplace") else model
 
 WARM_MARKER = {
     "warm":   "o",
@@ -1748,7 +1769,7 @@ def plot_models_per_strategy(traj, tols, uncertainty, true_val, out_dir,
                     ax, iters_ax, Y,
                     color=MODEL_COLORS.get(m, "gray"),
                     linestyle=_line_style(m, w),
-                    marker=WARM_MARKER.get(w, "x"),
+                    marker=_marker(m, w),
                     label=None,
                     uncertainty=uncertainty,
                 )
@@ -1774,6 +1795,14 @@ def plot_models_per_strategy(traj, tols, uncertainty, true_val, out_dir,
                    markersize=5, label=w)
             for w in warms_present
         ]
+        # Explain the variant linestyle whenever a Laplace cell is drawn here;
+        # without this the dash-dot-dot curves are unlabelled.
+        if any(m.endswith("_laplace") for (m, _, _) in cfgs):
+            style_handles.append(Line2D(
+                [0], [0], color="black", linestyle=LAPLACE_LS,
+                marker=LAPLACE_MARKER, markersize=5,
+                label="Laplace acquisition",
+            ))
         if prevalence:
             style_handles.append(Line2D(
                 [0], [0], color="black", linestyle=":", lw=1.4,
@@ -1818,9 +1847,14 @@ def plot_strategies_per_model(traj, tols, uncertainty, true_val, out_dir,
     # Oracle (theoretical-limit) cells are NOT shown on per-model strategy
     # plots — they go into the standalone `*_oracle_comparison.png` plot
     # alongside the regular best-pick curves for transformer and deep_gp.
-    models = sorted({m for (m, _, _) in traj if not m.endswith("_oracle")})
+    models = sorted({_base_model(m) for (m, _, _) in traj
+                     if not m.endswith("_oracle")})
     for model in models:
-        cfgs = [(m, s, w) for (m, s, w) in traj if m == model]
+        # Group by architecture, so a *_laplace cell lands on the same axes as
+        # the MC-dropout cell it is being compared with. Colour here encodes
+        # strategy, so with a matched strategy the two arms separate on
+        # linestyle and marker alone.
+        cfgs = [(m, s, w) for (m, s, w) in traj if _base_model(m) == model]
         if not cfgs:
             continue
         fig, axes = plt.subplots(1, len(tols), figsize=(6 * len(tols), 5),
@@ -1837,7 +1871,7 @@ def plot_strategies_per_model(traj, tols, uncertainty, true_val, out_dir,
                     ax, iters_ax, Y,
                     color=STRATEGY_COLORS.get(s, "gray"),
                     linestyle=_line_style(m, w),
-                    marker=WARM_MARKER.get(w, "x"),
+                    marker=_marker(m, w),
                     label=None,
                     uncertainty=uncertainty,
                 )
@@ -1862,6 +1896,14 @@ def plot_strategies_per_model(traj, tols, uncertainty, true_val, out_dir,
                    markersize=5, label=w)
             for w in warms_present
         ]
+        # Explain the variant linestyle whenever a Laplace cell is drawn here;
+        # without this the dash-dot-dot curves are unlabelled.
+        if any(m.endswith("_laplace") for (m, _, _) in cfgs):
+            style_handles.append(Line2D(
+                [0], [0], color="black", linestyle=LAPLACE_LS,
+                marker=LAPLACE_MARKER, markersize=5,
+                label="Laplace acquisition",
+            ))
         if prevalence:
             style_handles.append(Line2D(
                 [0], [0], color="black", linestyle=":", lw=1.4,
@@ -2098,8 +2140,10 @@ def plot_best_per_model(traj, tols, uncertainty, true_val, out_dir,
             _draw_curve(
                 ax, iters_ax, Y,
                 color=MODEL_COLORS.get(m, "gray"),
-                linestyle="-",
-                marker="o",
+                # "-"/"o" for everything as before; only Laplace variants
+                # deviate, so main-body figures are unchanged.
+                linestyle=LAPLACE_LS if m.endswith("_laplace") else "-",
+                marker=LAPLACE_MARKER if m.endswith("_laplace") else "o",
                 label=None,
                 uncertainty=uncertainty,
             )
@@ -2119,7 +2163,11 @@ def plot_best_per_model(traj, tols, uncertainty, true_val, out_dir,
                 n = len(traj[(m, s, w)][tol][1])
                 break
         color_handles.append(Line2D(
-            [0], [0], color=MODEL_COLORS.get(m, "gray"), lw=2.4, marker="o",
+            [0], [0], color=MODEL_COLORS.get(m, "gray"), lw=2.4,
+            # Mirror the curve: a hardcoded solid-circle handle made the two
+            # entries of an architecture's pair indistinguishable in the legend.
+            linestyle=LAPLACE_LS if m.endswith("_laplace") else "-",
+            marker=LAPLACE_MARKER if m.endswith("_laplace") else "o",
             markersize=5,
             label=f"{MODEL_DISPLAY.get(m, m)} (n={n})",
         ))
@@ -2266,6 +2314,7 @@ def main(manifest, sweep_id, output_dir, uncertainty, target, tolerances,
     if baseline_data_dir:
         try:
             Y_full = _load_y_full(baseline_data_dir, target, out_dir)
+            Y_full_indexable = Y_full
             # Restrict the random-scan baseline to neutralino-LSP models, so it
             # counts the same population the AL loops can produce (a slepton-LSP
             # candidate comes back with Omega = -1 under the AL generation
@@ -2279,6 +2328,17 @@ def main(manifest, sweep_id, output_dir, uncertainty, target, tolerances,
                     n_before = len(Y_full)
                     ib_before = {t: int(np.sum(np.abs(Y_full - true_val) / true_val < t))
                                  for t in tols}
+                    # Two different uses need two different objects. The
+                    # PREVALENCE wants the restricted population, so drop the
+                    # rows. The baseline TRAJECTORY is reconstructed by indexing
+                    # baseline_add_indices into the pool, and those indices refer
+                    # to the unrestricted pool, so dropping rows there shifts
+                    # every index and overruns the array. Sentinel instead,
+                    # exactly as the AL generation config does: a non-neutralino
+                    # candidate comes back with Omega = -1, so it fails every
+                    # in-band test while leaving positions intact.
+                    Y_full_indexable = np.array(Y_full, dtype=float, copy=True)
+                    Y_full_indexable[~m] = -1.0
                     Y_full = Y_full[m]
                     veto_stats = {
                         "n_valid_before": n_before,
@@ -2356,6 +2416,7 @@ def main(manifest, sweep_id, output_dir, uncertainty, target, tolerances,
             click.echo(f"[warn] could not load random baseline pool from {baseline_data_dir}: {exc}",
                        err=True)
             Y_full = None
+            Y_full_indexable = None
             prevalence = None
             prevalence_per_attempt = None
 
@@ -2395,7 +2456,8 @@ def main(manifest, sweep_id, output_dir, uncertainty, target, tolerances,
         baseline_traj = None
         if Y_full is not None:
             baseline_traj = _collect_baseline_trajectories(
-                df, true_val, tols, min_seeds, traj_fn_baseline, Y_full,
+                # Position-preserving copy: see the sentinel note above.
+                df, true_val, tols, min_seeds, traj_fn_baseline, Y_full_indexable,
             )
         # For the per-attempt metric, the baseline trajectory comes back in
         # per-valid-sample units (same as the hit_rate panel). Multiply by
