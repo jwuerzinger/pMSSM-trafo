@@ -93,6 +93,20 @@ if [[ "${VETO:-0}" == "1" ]]; then
     EXTRA_FLAGS+=(--require-neutralino-lsp)
     echo "[opt] neutralino-LSP veto: ON"
 fi
+# The per-run accuracy_trajectory.json caches carry no fingerprint of the
+# reference set, so they go stale invisibly whenever the eval data or a run's
+# iterations change. REFRESH=1 forces re-evaluation.
+if [[ "${REFRESH:-0}" == "1" ]]; then
+    EXTRA_FLAGS+=(--accuracy-cache-refresh)
+    echo "[opt] accuracy cache: FORCED REFRESH"
+fi
+# A custom manifest lets this wrapper drive a focused comparison (e.g. the
+# Laplace cells against their MC-dropout counterparts) without touching the
+# main sweep's figures.
+if [[ -n "${MANIFEST:-}" ]]; then
+    EXTRA_FLAGS+=(--manifest "${MANIFEST}")
+    echo "[opt] manifest: ${MANIFEST}"
+fi
 if [[ -n "${OUTPUT_DIR:-}" ]]; then
     EXTRA_FLAGS+=(--output-dir "${OUTPUT_DIR}")
     echo "[opt] output dir: ${OUTPUT_DIR}"

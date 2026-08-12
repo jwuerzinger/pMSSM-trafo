@@ -86,9 +86,17 @@ MODEL_COLORS = {
     # group visually; linestyle disambiguates (see ORACLE_LS below).
     "transformer_oracle": "tab:blue",
     "deep_gp_oracle":     "tab:green",
+    # Same colour as the parent: the pair is the comparison.
+    "transformer_laplace":     "tab:blue",
+    "dnn_laplace":             "tab:red",
+    "dnn_match_trafo_laplace": "tab:pink",
 }
 # Linestyle override for *_oracle model rows (dotted, regardless of warm/cold).
 ORACLE_LS = ":"
+# Laplace-acquisition variants reuse their parent model's colour so a per-model
+# comparison reads as one pair, and are dashed so the uncertainty method is what
+# the linestyle encodes.
+LAPLACE_LS = "--"
 # Friendly display labels used in legends.
 MODEL_DISPLAY = {
     "transformer":         "Transformer",
@@ -99,6 +107,9 @@ MODEL_DISPLAY = {
     "dnn_match_trafo":     "DNN (matched)",
     "transformer_oracle":  "Transformer (oracle)",
     "deep_gp_oracle":      "Deep GP (oracle)",
+    "transformer_laplace":     "Transformer (Laplace)",
+    "dnn_laplace":             "DNN (Laplace)",
+    "dnn_match_trafo_laplace": "DNN matched (Laplace)",
 }
 STRATEGY_COLORS = {
     "top_k":          "tab:blue",
@@ -110,6 +121,21 @@ WARM_LS = {
     "cold":   "--",
     "tabpfn": "-",
 }
+
+
+def _line_style(model: str, warm: str) -> str:
+    """Linestyle for a curve: warm mode normally, method for Laplace variants.
+
+    Linestyle usually encodes the warm/cold mode. The Laplace acquisition cells
+    are all cold, and they share their parent model's colour so that a per-model
+    pair reads as one comparison, so for those the linestyle is repurposed to
+    encode the uncertainty method instead. Nothing is lost: a *_laplace cell with
+    warm start does not exist, and the main-body figures contain no Laplace rows.
+    """
+    if model.endswith("_laplace"):
+        return LAPLACE_LS
+    return WARM_LS.get(warm, "-")
+
 WARM_MARKER = {
     "warm":   "o",
     "cold":   "s",
@@ -909,8 +935,14 @@ def _classification_accuracy_trajectory(run, run_dir: str, seed: int,
     # checkpoints are saved by the same per-model AL pipeline, so the
     # _load_iter_model dispatch only knows the bare model name. Strip the
     # _oracle suffix before any downstream dispatch.
-    if model_type.endswith("_oracle"):
-        model_type = model_type[: -len("_oracle")]
+    # The same applies to the *_laplace acquisition variants: they are separate
+    # manifest entries so they plot as their own curves, but on disk they are
+    # ordinary per-model checkpoints, so the dispatch must see the bare name.
+    # Without this the accuracy pass cannot build a model for them at all.
+    for _suffix in ("_oracle", "_laplace"):
+        if model_type.endswith(_suffix):
+            model_type = model_type[: -len(_suffix)]
+            break
 
     run_dir_p = Path(run_dir)
     cache = {} if refresh else _load_accuracy_cache(run_dir_p)
@@ -1715,7 +1747,7 @@ def plot_models_per_strategy(traj, tols, uncertainty, true_val, out_dir,
                 _draw_curve(
                     ax, iters_ax, Y,
                     color=MODEL_COLORS.get(m, "gray"),
-                    linestyle=WARM_LS.get(w, "-"),
+                    linestyle=_line_style(m, w),
                     marker=WARM_MARKER.get(w, "x"),
                     label=None,
                     uncertainty=uncertainty,
@@ -1804,7 +1836,7 @@ def plot_strategies_per_model(traj, tols, uncertainty, true_val, out_dir,
                 _draw_curve(
                     ax, iters_ax, Y,
                     color=STRATEGY_COLORS.get(s, "gray"),
-                    linestyle=WARM_LS.get(w, "-"),
+                    linestyle=_line_style(m, w),
                     marker=WARM_MARKER.get(w, "x"),
                     label=None,
                     uncertainty=uncertainty,
@@ -2269,6 +2301,26 @@ def main(manifest, sweep_id, output_dir, uncertainty, target, tolerances,
                 df["expected_run_dir"].dropna().tolist()
             )
             if p_valid is not None:
+                # Efficiency is (in-band AND neutralino AND valid) / (ALL
+                # attempts). The prevalence above is already restricted to the
+                # neutralino population, so p_valid must be too, or the product
+                # is (I_vn/N_vn)(N_v/N_a) instead of I_vn/N_a and every
+                # per-attempt number comes out N_v/N_vn (~0.6%) high. The rate
+                # parsed from the logs counts a sneutrino model as valid, since
+                # the pool stores its true Omega, whereas an AL run assigns it
+                # Omega = -1 and drops it as invalid: the two datasets disagree
+                # on what "valid" means. The factor cancels in an AL-vs-random
+                # ratio but not against the MCMC reference, whose per-attempt
+                # yield is native.
+                if veto_stats is not None:
+                    p_valid_pool = p_valid
+                    p_valid = p_valid * (veto_stats["n_valid_after"]
+                                         / veto_stats["n_valid_before"])
+                    veto_stats["p_valid_pool_unrestricted"] = p_valid_pool
+                    veto_stats["p_valid_neutralino"] = p_valid
+                    click.echo(f"[baseline-veto] p_valid deflated to the "
+                               f"neutralino population: {p_valid_pool:.6f} -> "
+                               f"{p_valid:.6f}")
                 prevalence_per_attempt = {t: v * p_valid for t, v in prevalence.items()}
                 p_valid_info = {"p_valid": p_valid, "n_valid": n_valid,
                                 "n_total": n_total, "source_log": log_src}

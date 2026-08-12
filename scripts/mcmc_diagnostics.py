@@ -93,6 +93,12 @@ MODEL_DISPLAY = {
     "dnn":             "DNN",
     "dnn_match_trafo": "DNN (matched)",
     "tabpfn":          "TabPFN",
+    # Laplace-acquisition variants. plot_compute_vs_dataset iterates the keys of
+    # this dict to decide what to draw, so they must be registered here to appear
+    # in the compute figures at all.
+    "transformer_laplace":     "Transformer (Laplace)",
+    "dnn_laplace":             "DNN (Laplace)",
+    "dnn_match_trafo_laplace": "DNN matched (Laplace)",
 }
 
 

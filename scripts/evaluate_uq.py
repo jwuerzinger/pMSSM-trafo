@@ -651,7 +651,11 @@ def main(manifest, baseline_data_dir, mcmc_data_dir, cache_dir, output_dir,
     rows = [r for r in csv.DictReader(open(manifest)) if r["status"] in statuses]
     results: dict = {}
     for model, (strat, warm) in picks.items():
-        base_type = model[:-len("_oracle")] if model.endswith("_oracle") else model
+        base_type = model
+        for _sfx in ("_oracle", "_laplace"):
+            if base_type.endswith(_sfx):
+                base_type = base_type[: -len(_sfx)]
+                break
         sel = [r for r in rows
                if (r["model"], r["strategy"], r["warm_start"]) == (model, strat, warm)
                and (seed_filter is None or int(r["seed"]) in seed_filter)]
