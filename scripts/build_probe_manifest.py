@@ -6,10 +6,13 @@ analysis (composition, MCMC diagnostics, UQ) discovers work through a manifest,
 so those probes are invisible to all of it. This reconstructs the rows from the
 directories on disk.
 
-Resumed runs are emitted as SEPARATE rows of the same (model, strategy, warm)
-cell, one per directory. That is deliberate: a continuation directory holds only
-the iterations it ran, so pooling the base and the continuation is what
-reproduces the full labelled trajectory for cell-level statistics.
+For a resumed run, only the MOST ADVANCED directory is emitted. The continuation
+inherits the entire history in its state.pt and the compute parser follows the
+base->continuation chain to locate the early iteration directories, so that one
+row already carries the full trajectory. Emitting the base as a second row of the
+same cell makes it look like a second seed, and the trajectory is then truncated
+to the shorter of the two, i.e. back to 40 iterations, silently hiding the very
+extension these probes exist to measure.
 
 Usage:
     python scripts/build_probe_manifest.py --pattern '*ext160*' \\
@@ -88,7 +91,7 @@ def _parse(name: str):
 @click.option("--sweep-id", default="probe", show_default=True)
 def main(output_root, pattern, out, sweep_id):
     root = Path(output_root)
-    rows = []
+    candidates: dict[tuple, tuple[int, Path]] = {}
     for d in sorted(root.glob(pattern)):
         if not d.is_dir() or not (d / "state.pt").exists():
             continue
@@ -96,7 +99,28 @@ def main(output_root, pattern, out, sweep_id):
         if parsed is None:
             click.echo(f"[probe-manifest] unparsed, skipping: {d.name}", err=True)
             continue
-        model, strat, warm, seed = parsed
+        # Keep only the MOST ADVANCED directory per cell. A resumed run's
+        # continuation inherits the whole history in its state.pt, and
+        # plot_compute_vs_dataset follows the base->continuation chain to find
+        # the early iteration directories, so the continuation alone carries the
+        # full trajectory. Emitting the base as well would make it a second
+        # "seed" of the same cell, and the trajectory would then be truncated to
+        # the shorter of the two, i.e. back to 40 iterations, hiding the very
+        # extension the probe exists to measure.
+        try:
+            import torch  # noqa: PLC0415
+            n_iter = len(list(torch.load(d / "state.pt", weights_only=False,
+                                         map_location="cpu").get("al_n_train") or []))
+        except Exception:                                   # noqa: BLE001
+            n_iter = 0
+        key = parsed
+        if key not in candidates or n_iter > candidates[key][0]:
+            candidates[key] = (n_iter, d)
+
+    rows = []
+    for (model, strat, warm, seed), (n_iter, d) in sorted(candidates.items()):
+        click.echo(f"[probe-manifest] {model}/{strat}/{warm}/seed{seed}: "
+                   f"{n_iter} iterations from {d.name}")
         rows.append({
             "sweep_id": sweep_id, "submit_time": "", "model": model,
             "strategy": strat, "warm_start": warm, "seed": seed,

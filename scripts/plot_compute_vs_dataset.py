@@ -61,21 +61,32 @@ def _ts(line: str) -> datetime | None:
     return datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S") if m else None
 
 
+# Each training attempt opens with this line. The driver APPENDS to the log on a
+# resume rather than truncating, so a retried iteration accumulates several
+# attempts in one file and a naive first-to-last span measures the wall-clock
+# between the earliest failure and the eventual success. For the Deep GP, which
+# was retried three times after GPU faults, that inflated its total from
+# ~2.6 to 37 GPU-hours. Only the final attempt produced the checkpoint the
+# results rest on, so only that attempt is the cost of the result.
+_ATTEMPT_START = re.compile(r"Training set size:")
+
+
 def _train_seconds(iter_dir: Path) -> float | None:
     log = iter_dir / "al_training.log"
     if not log.exists():
         return None
-    first = last = None
     with open(log, errors="replace") as fh:
-        for line in fh:
-            t = _ts(line)
-            if t is not None:
-                if first is None:
-                    first = t
-                last = t
-    if first is None or last is None:
-        return None
-    return (last - first).total_seconds()
+        lines = fh.readlines()
+    starts = [i for i, ln in enumerate(lines) if _ATTEMPT_START.search(ln)]
+    tail = lines[starts[-1]:] if starts else lines
+    stamps = [t for t in (_ts(ln) for ln in tail) if t is not None]
+    if len(stamps) < 2:
+        # A single-timestamp attempt carries no measurable span; fall back to the
+        # whole file rather than reporting zero, and only if that has two.
+        stamps = [t for t in (_ts(ln) for ln in lines) if t is not None]
+        if len(stamps) < 2:
+            return None
+    return (stamps[-1] - stamps[0]).total_seconds()
 
 
 _TABPFN_FITEVAL_RE = re.compile(
@@ -407,7 +418,13 @@ def main(manifest, output_dir, sweep_id, include_status, picks_override, models,
 
     # ── per warm-mode figures: every (model, strategy) cell ──────────────────
     from matplotlib.lines import Line2D
-    all_models = [m for m in MODEL_DISPLAY if not m.startswith("tabpfn")]
+    # Acquisition-variant cells (*_laplace) are registered in MODEL_DISPLAY so
+    # that --picks can name them, but they must not leak into the main-body
+    # per-warm-mode figures just by being registered: those compare
+    # architectures under one acquisition rule. Select them explicitly instead.
+    all_models = [m for m in MODEL_DISPLAY
+                  if not m.startswith("tabpfn")
+                  and not m.endswith(("_laplace", "_oracle"))]
     all_strats = ("entropy_batch", "top_k", "top_k_tol_only")
     for warm_mode in ("warm", "cold"):
         # Same two-panel layout as the best-per-model figure: what the compute
