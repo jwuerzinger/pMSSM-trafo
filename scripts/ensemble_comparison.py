@@ -36,9 +36,14 @@ for _p in (str(_REPO_ROOT), str(_REPO_ROOT / "scripts")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-# Run3ModelGen's validity rate: hits/desired is per ATTEMPT, so the random
-# baseline must be deflated by it rather than using raw pool prevalence.
-P_VALID = 0.445414
+# Run3ModelGen's validity rate, restricted to the neutralino-LSP population so
+# that hits/attempt means (in-band AND neutralino AND valid) / (ALL attempts),
+# the same definition the yield table and Fig. 1 use. The unrestricted pool rate
+# is 0.445414; it counts a sneutrino model as valid because the pool stores its
+# true Omega, while an AL run assigns Omega = -1 and drops it, so using it here
+# would make these per-attempt numbers ~0.6% high and inconsistent with the rest
+# of the paper. Overridable, and read from the baseline JSON when available.
+P_VALID = 0.442699
 _TS = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})")
 _SEL_START = re.compile(r"Running \d+ MC Dropout forward passes"
                         r"|Ensemble uncertainty over"
@@ -203,6 +208,18 @@ def main(manifest, output_dir, iteration, tolerance, target, mu_window,
     out_root = Path("/ptmp/jwuerzin/output")
     rand = _random_baseline(Path(output_dir) / "random_baseline_prevalence.json",
                             tolerance)
+    # Prefer the p_valid actually recorded alongside that baseline, so this
+    # script cannot drift from whatever definition produced it.
+    global P_VALID
+    try:
+        _bj = json.loads((Path(output_dir) / "random_baseline_prevalence.json").read_text())
+        _pv = float(_bj["p_valid"]["p_valid"])
+        if abs(_pv - P_VALID) > 1e-9:
+            click.echo(f"[ens] p_valid from baseline JSON: {_pv:.6f} "
+                       f"(module default {P_VALID:.6f})")
+            P_VALID = _pv
+    except Exception:
+        click.echo(f"[ens] using module default p_valid={P_VALID:.6f}", err=True)
     click.echo(f"[ens] random baseline at tol={tolerance:g}: "
                f"{rand:.6f} hits/attempt")
     rows = list(csv.DictReader(open(manifest)))

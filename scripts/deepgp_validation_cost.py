@@ -47,7 +47,8 @@ for _p in (str(_REPO_ROOT), str(_REPO_ROOT / "scripts"),
         sys.path.insert(0, _p)
 
 
-def _build(n_train: int, n_val: int, device: str, jitter: float):
+def _build(n_train: int, n_val: int, device: str, jitter: float,
+           inducing_strategy: str = "vanilla"):
     """A Deep GP on random data of the requested shape, as the driver builds it."""
     import torch
     from gp_pipeline.models.deep_gp import DeepGP
@@ -58,19 +59,20 @@ def _build(n_train: int, n_val: int, device: str, jitter: float):
     yv = torch.randn(n_val, generator=g)
     m = DeepGP(xt.to(device), yt.to(device), xv.to(device), yv.to(device), 19,
                lengthscale=1.0, noise=1e-2, num_inducing_max=256,
-               inducing_strategy="vanilla", kernel="RBF", num_samples=8, seed=1)
+               inducing_strategy=inducing_strategy, kernel="RBF",
+               num_samples=8, seed=1)
     return m.to(device)
 
 
 def _time_one(n_train: int, n_val: int, device: str, jitter: float,
-              only: str = "all") -> dict:
+              only: str = "all", inducing_strategy: str = "vanilla") -> dict:
     """One training epoch and one validation pass, timed separately."""
     import gpytorch
     import torch
     from gpytorch.mlls import DeepApproximateMLL, VariationalELBO
     from torch.utils.data import DataLoader, TensorDataset
 
-    m = _build(n_train, n_val, device, jitter)
+    m = _build(n_train, n_val, device, jitter, inducing_strategy)
     mll = DeepApproximateMLL(VariationalELBO(m.likelihood, m, n_train))
     opt = torch.optim.Adam(m.parameters(), lr=1e-3)
     loader = DataLoader(TensorDataset(m.x_train, m.y_train), batch_size=256,
@@ -127,7 +129,7 @@ def _time_one(n_train: int, n_val: int, device: str, jitter: float,
 
 
 @click.command()
-@click.option("--mode", type=click.Choice(["time", "sweep", "_child", "isolate"]),
+@click.option("--mode", type=click.Choice(["time", "sweep", "_child", "isolate", "scale"]),
               default="time", show_default=True)
 @click.option("--only", type=click.Choice(["build", "train", "val_unbatched",
                                            "val_batched", "all"]),
@@ -140,12 +142,55 @@ def _time_one(n_train: int, n_val: int, device: str, jitter: float,
               help="0 = n_train/4, the driver's 80/20 split.")
 @click.option("--sizes", default="20000,40000,60000,80000,120000,160000",
               show_default=True, help="sweep mode: n_train values to try.")
+@click.option("--inducing-strategy", default="vanilla",
+              type=click.Choice(["vanilla", "kmeans"]), show_default=True,
+              help="The driver defaults to kmeans, which clusters ALL n_train "
+                   "points at every model construction; vanilla takes a slice. "
+                   "For large n_train this choice can dominate everything else.")
 @click.option("--device", default="cuda:0", show_default=True)
 @click.option("--jitter", default=1e-3, show_default=True)
 @click.option("--out", default="/ptmp/jwuerzin/analysis/all_runs/deepgp_validation_cost.json",
               show_default=True)
-def main(mode, only, n_train, n_val, sizes, device, jitter, out):
+def main(mode, only, inducing_strategy, n_train, n_val, sizes, device, jitter, out):
     nv = n_val or max(1, n_train // 4)
+
+    if mode == "scale":
+        # How does a FIXED training iteration scale with n_train? Per-step cost
+        # is independent of it, so the epoch should grow linearly in the number
+        # of steps; this checks that and times the inducing-point construction,
+        # which for kmeans is O(n_train * M * iters) on the CPU and runs at every
+        # model construction.
+        import torch
+        rows = []
+        for s_ in (int(x) for x in sizes.split(",")):
+            cmd = [sys.executable, __file__, "--mode", "_child", "--only", "train",
+                   "--n-train", str(s_), "--device", device, "--jitter", str(jitter),
+                   "--inducing-strategy", inducing_strategy]
+            t0 = time.perf_counter()
+            pr = subprocess.run(cmd, capture_output=True, text=True,
+                                env={**os.environ, "PYTHONUNBUFFERED": "1"})
+            wall = time.perf_counter() - t0
+            line = next((l for l in pr.stdout.splitlines() if l.startswith("{")), None)
+            if pr.returncode == 0 and line:
+                r = json.loads(line)
+                steps = -(-s_ // 256)
+                click.echo(f"  n_train={s_:>8}  epoch {r['train_epoch_s']:8.2f}s"
+                           f"  steps {steps:>6}  per-step {r['train_epoch_s']/steps*1e3:6.1f} ms"
+                           f"  peak {r['peak_gpu_gb']:5.2f} GB"
+                           f"  build+total wall {wall:7.1f}s")
+                r["wall_incl_build_s"] = wall
+                rows.append(r)
+            else:
+                click.echo(f"  n_train={s_:>8}  FAILED rc={pr.returncode}"
+                           f"{'  (GPU fault)' if 'Memory access fault' in pr.stderr else ''}"
+                           f"  wall {wall:.0f}s")
+                rows.append({"n_train": s_, "ok": False, "wall_s": wall,
+                             "stderr_tail": pr.stderr.strip().splitlines()[-2:]})
+        Path(out).write_text(json.dumps({"mode": "scale",
+                                         "inducing_strategy": inducing_strategy,
+                                         "rows": rows}, indent=1))
+        click.echo(f"  wrote {out}")
+        return
 
     if mode == "isolate":
         # Bisect the wall, and for each size run every phase in its own
@@ -173,7 +218,7 @@ def main(mode, only, n_train, n_val, sizes, device, jitter, out):
     if mode == "_child":
         # Run by the sweep in a subprocess so a GPU abort cannot take the parent
         # down with it. Result goes to stdout as one JSON line.
-        print(json.dumps(_time_one(n_train, nv, device, jitter, only)), flush=True)
+        print(json.dumps(_time_one(n_train, nv, device, jitter, only, inducing_strategy)), flush=True)
         return
 
     if mode == "time":
