@@ -439,7 +439,8 @@ def compare_and_plot(mcmc_dir: str | Path,
                      params: list[str] = DEFAULT_FREE_PARAMS,
                      print_summary: bool = True,
                      require_neutralino_lsp: bool = False,
-                     mcmc_nwalkers: int = 0) -> Path:
+                     mcmc_nwalkers: int = 0,
+                     skip_mcmc: bool = False) -> Path:
     """Compute diagnostics for MCMC + each AL pick, render comparison plot.
 
     Returns the path to the written PNG. When ``require_neutralino_lsp`` is
@@ -447,11 +448,19 @@ def compare_and_plot(mcmc_dir: str | Path,
     non-neutralino rows (sneutrinos etc.) vetoed before chain statistics
     are computed. ``mcmc_nwalkers`` splits each MCMC file into walker-chains
     (emcee-era ntuples).
+
+    ``skip_mcmc`` drops the reference row and compares AL cells only. The
+    reference pass reads 17.5M rows over 9 branches, so for a comparison that
+    is purely between AL arms (e.g. dropout vs Laplace acquisition) it is the
+    dominant cost and contributes nothing: the reference row is already
+    published once from the main run.
     """
     # 1) MCMC diagnostics
-    mcmc = compute_diagnostics(mcmc_dir, params=params, print_table=False,
-                               require_neutralino_lsp=require_neutralino_lsp,
-                               nwalkers=mcmc_nwalkers)
+    mcmc = None
+    if not skip_mcmc:
+        mcmc = compute_diagnostics(mcmc_dir, params=params, print_table=False,
+                                   require_neutralino_lsp=require_neutralino_lsp,
+                                   nwalkers=mcmc_nwalkers)
 
     # 2) AL diagnostics per model
     idx_map = {p: PARAM_ORDER.index(p) for p in params}
@@ -479,7 +488,7 @@ def compare_and_plot(mcmc_dir: str | Path,
         }
 
     # 3) Assemble source table (MCMC first, then models by pick order)
-    sources: list[tuple[str, dict]] = [("MCMC (ref)", mcmc)]
+    sources: list[tuple[str, dict]] = [] if mcmc is None else [("MCMC (ref)", mcmc)]
     for model in picks_spec:
         if model in al_results:
             s, w = picks_spec[model]
@@ -490,11 +499,14 @@ def compare_and_plot(mcmc_dir: str | Path,
     # 4) Render + write JSON
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    png_path = out_dir / "mcmc_diagnostics_comparison.png"
+    # Name by content: without the reference row this is an AL-vs-AL comparison,
+    # and calling it mcmc_* would invite it being read as the paper's Table 3.
+    stem = "al_diagnostics_comparison" if mcmc is None else "mcmc_diagnostics_comparison"
+    png_path = out_dir / f"{stem}.png"
     _render_comparison_plot(sources, params, png_path)
 
     import json
-    json_path = out_dir / "mcmc_diagnostics_comparison.json"
+    json_path = out_dir / f"{stem}.json"
     dump = {
         "mcmc": mcmc,
         "al": {m: {"meta": al_meta.get(m, {}), "diagnostics": al_results.get(m)}
@@ -607,8 +619,14 @@ def _parse_picks_arg(spec: str) -> dict[str, tuple[str, str]]:
 
 def _parse_args():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--data-dir", required=True, type=Path,
-                   help="Directory containing per-chain ROOT files (one chain per file).")
+    p.add_argument("--data-dir", type=Path, default=None,
+                   help="Directory containing per-chain ROOT files (one chain per "
+                        "file). Required unless --skip-mcmc.")
+    p.add_argument("--skip-mcmc", action="store_true",
+                   help="Compare AL cells only, with no reference row. The "
+                        "reference pass dominates runtime and is irrelevant when "
+                        "the comparison is between two AL arms; writes "
+                        "al_diagnostics_comparison.{png,json} instead.")
     p.add_argument("--params", default=",".join(DEFAULT_FREE_PARAMS),
                    help="Comma-separated branch names to diagnose. "
                         f"Default: {','.join(DEFAULT_FREE_PARAMS)}")
@@ -641,14 +659,19 @@ def _parse_args():
 def main():
     args = _parse_args()
     params = [s.strip() for s in args.params.split(",") if s.strip()]
-    compute_diagnostics(
-        data_dir=args.data_dir,
-        params=params,
-        skip_file_cut=args.no_file_cut,
-        print_table=True,
-        require_neutralino_lsp=args.require_neutralino_lsp,
-        nwalkers=args.mcmc_nwalkers,
-    )
+    if args.skip_mcmc and args.al_manifest is None:
+        raise SystemExit("--skip-mcmc leaves nothing to do without --al-manifest")
+    if not args.skip_mcmc:
+        if args.data_dir is None:
+            raise SystemExit("--data-dir is required unless --skip-mcmc is given")
+        compute_diagnostics(
+            data_dir=args.data_dir,
+            params=params,
+            skip_file_cut=args.no_file_cut,
+            print_table=True,
+            require_neutralino_lsp=args.require_neutralino_lsp,
+            nwalkers=args.mcmc_nwalkers,
+        )
     if args.al_manifest is not None:
         if args.output_dir is None:
             raise SystemExit("--output-dir is required with --al-manifest")
@@ -662,6 +685,7 @@ def main():
             params=params,
             require_neutralino_lsp=args.require_neutralino_lsp,
             mcmc_nwalkers=args.mcmc_nwalkers,
+            skip_mcmc=args.skip_mcmc,
         )
 
 

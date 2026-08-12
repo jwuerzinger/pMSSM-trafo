@@ -1087,29 +1087,13 @@ def plot_advanced_diagnostics(model, X_eval_norm, Y_eval_true, X_train_norm,
     """
     device = next(model.parameters()).device
     model.eval()
-    X_eval_norm = X_eval_norm.to(device)
     Y_eval_true = Y_eval_true.view(-1).to(device)
 
-    # Get predictions
-    if model_type == "mlp":
-        with torch.no_grad():
-            mean = model(X_eval_norm).squeeze().cpu()
-    elif model_type == "deep_gp":
-        model.likelihood.eval()
-        with torch.no_grad(), \
-             gpytorch.settings.fast_pred_var(False), \
-             gpytorch.settings.cholesky_jitter(float_value=jitter, double_value=jitter), \
-             gpytorch.settings.num_likelihood_samples(num_samples):
-            preds = model.likelihood(model(X_eval_norm))
-            mean = preds.mean.detach().mean(dim=0).squeeze().cpu()
-    else:
-        # exact_gp, sparse_gp
-        model.likelihood.eval()
-        with torch.no_grad(), \
-             gpytorch.settings.fast_pred_var(), \
-             gpytorch.settings.cholesky_jitter(float_value=jitter, double_value=jitter):
-            preds = model.likelihood(model(X_eval_norm))
-            mean = preds.mean.detach().cpu()
+    # Chunked: peak memory must not scale with n_eval, which for a GP path on
+    # ROCm otherwise ends in an uncatchable GPU memory-access fault.
+    from .evaluation import predict_chunked  # noqa: PLC0415  (circular at module level)
+    mean, _lower, _upper = predict_chunked(
+        model, X_eval_norm, model_type, jitter=jitter, num_samples=num_samples)
 
     y_true = Y_eval_true.cpu()
 

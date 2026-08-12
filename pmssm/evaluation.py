@@ -180,6 +180,74 @@ def compute_gp_r2(model, x_val, y_val, model_type, jitter=1e-3, num_samples=8, t
     return r2
 
 
+PREDICT_CHUNK = 1024
+
+
+def predict_chunked(model, X, model_type, *, jitter=1e-3, num_samples=8,
+                    batch=PREDICT_CHUNK, want_confidence=False):
+    """Forward pass in fixed-size chunks; returns (mean, lower, upper) on CPU.
+
+    Every GP path here allocates work that grows with the size of the batch it
+    is handed, so passing a whole evaluation set in one call makes peak memory a
+    function of n_eval rather than of the model. On ROCm the failure is not a
+    catchable ``torch.OutOfMemoryError`` but a rocBLAS TRSM workspace warning
+    followed by ``Memory access fault by GPU`` and SIGABRT, which kills the
+    process and loses the run. Chunking makes peak memory constant in n_eval.
+
+    ``want_confidence`` also returns the +-2 sigma band. For "mlp" there is no
+    posterior, so lower and upper are the mean.
+    """
+    device = next(model.parameters()).device
+    means, lowers, uppers = [], [], []
+
+    def _flush(m, lo, up):
+        means.append(m.cpu())
+        if want_confidence:
+            lowers.append(lo.cpu())
+            uppers.append(up.cpu())
+
+    model.eval()
+    if model_type != "mlp":
+        model.likelihood.eval()
+
+    for start in range(0, len(X), batch):
+        xb = X[start:start + batch].to(device)
+        if model_type == "mlp":
+            with torch.no_grad():
+                m = model(xb).squeeze(-1).view(-1)
+            _flush(m, m, m)
+        elif model_type == "deep_gp":
+            with torch.no_grad(), \
+                 gpytorch.settings.fast_pred_var(False), \
+                 gpytorch.settings.cholesky_jitter(float_value=jitter, double_value=jitter), \
+                 gpytorch.settings.num_likelihood_samples(num_samples):
+                preds = model.likelihood(model(xb))
+                m = preds.mean.detach().mean(dim=0).view(-1)
+                if want_confidence:
+                    lo, up = preds.confidence_region()
+                    _flush(m, lo.detach().mean(dim=0).view(-1),
+                           up.detach().mean(dim=0).view(-1))
+                else:
+                    _flush(m, None, None)
+        else:
+            # exact_gp, sparse_gp
+            with torch.no_grad(), \
+                 gpytorch.settings.fast_pred_var(), \
+                 gpytorch.settings.cholesky_jitter(float_value=jitter, double_value=jitter):
+                preds = model.likelihood(model(xb))
+                m = preds.mean.detach().view(-1)
+                if want_confidence:
+                    lo, up = preds.confidence_region()
+                    _flush(m, lo.detach().view(-1), up.detach().view(-1))
+                else:
+                    _flush(m, None, None)
+
+    mean = torch.cat(means) if means else torch.empty(0)
+    if not want_confidence:
+        return mean, None, None
+    return mean, torch.cat(lowers), torch.cat(uppers)
+
+
 def compute_comprehensive_metrics(model, X_eval_norm, Y_eval_true, model_type,
                                   threshold=0.0, jitter=1e-3, num_samples=8,
                                   logger=None):
@@ -224,38 +292,13 @@ def compute_comprehensive_metrics(model, X_eval_norm, Y_eval_true, model_type,
         return {"error": "al_pmssmwithgp not available"}
 
     device = next(model.parameters()).device
-    X_eval_norm = X_eval_norm.to(device)
     Y_eval_true = Y_eval_true.view(-1).to(device)
 
-    model.eval()
-
-    if model_type == "mlp":
-        with torch.no_grad():
-            mean = model(X_eval_norm).squeeze()
-        # MLP has no confidence region
-        upper = lower = mean
-    elif model_type == "deep_gp":
-        model.likelihood.eval()
-        with torch.no_grad(), \
-             gpytorch.settings.fast_pred_var(False), \
-             gpytorch.settings.cholesky_jitter(float_value=jitter, double_value=jitter), \
-             gpytorch.settings.num_likelihood_samples(num_samples):
-            preds = model.likelihood(model(X_eval_norm))
-            mean = preds.mean.detach().mean(dim=0).squeeze()
-            lower, upper = preds.confidence_region()
-            lower = lower.detach().mean(dim=0).squeeze()
-            upper = upper.detach().mean(dim=0).squeeze()
-    else:
-        # exact_gp, sparse_gp
-        model.likelihood.eval()
-        with torch.no_grad(), \
-             gpytorch.settings.fast_pred_var(), \
-             gpytorch.settings.cholesky_jitter(float_value=jitter, double_value=jitter):
-            preds = model.likelihood(model(X_eval_norm))
-            mean = preds.mean.detach()
-            lower, upper = preds.confidence_region()
-            lower = lower.detach()
-            upper = upper.detach()
+    # Chunked: peak memory must not scale with n_eval. See predict_chunked.
+    mean, lower, upper = predict_chunked(
+        model, X_eval_norm, model_type, jitter=jitter,
+        num_samples=num_samples, want_confidence=True)
+    mean, lower, upper = mean.to(device), lower.to(device), upper.to(device)
 
     # Classification accuracy
     acc, _conf = compute_accuracy(mean, Y_eval_true, threshold)
