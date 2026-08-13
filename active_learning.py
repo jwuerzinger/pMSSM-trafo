@@ -208,8 +208,25 @@ def load_config_with_sweep(config_file, sweep_index=None):
               help="Gaussian proximity weighting width around target value (0 to disable, default: 0.1).")
 @click.option('--tolerance-sampling', default=1.0, type=float,
               help="Hard cut: keep only candidates within ±tolerance of threshold in transformed space (0 to disable, default: 1.0).")
-@click.option('--target-value', default=0.12, type=float,
-              help="Target relic density value for proximity weighting (default: 0.12).")
+@click.option('--target', 'target', default='DMRD',
+              type=click.Choice(sorted(TARGET_CONFIG)),
+              help="Observable the surrogate learns and the AL loop targets. "
+                   "'DMRD' is the dark matter relic density (boundary Omega h^2 "
+                   "= 0.12); 'ExpR' is the SModelS best expected r-value, whose "
+                   "boundary r = 1 is the LHC exclusion contour. Selects the "
+                   "ROOT branch, the ingest validity cuts and the Run3ModelGen "
+                   "steps used to label generated points (default: DMRD).")
+@click.option('--target-value', default=None, type=float,
+              help="Physical target value for proximity weighting. Defaults to "
+                   "the selected target's registry value (0.12 for DMRD, 1.0 "
+                   "for ExpR), so it normally needs no explicit setting.")
+@click.option('--no-mcmc-eval', is_flag=True, default=False,
+              help="Ignore --mcmc-data-dir and run without an MCMC reference "
+                   "set. Needed for targets that have no posterior reference: "
+                   "the per-model submit scripts always pass --mcmc-data-dir "
+                   "(two of them hardcode it), and an empty value cannot "
+                   "override a shell ':-' default, so this flag is the only way "
+                   "to disable it purely through AL_EXTRA_ARGS.")
 @click.option('--config-file', default=None, type=str,
               help="YAML config file (overrides CLI args). Supports parameter sweeps.")
 @click.option('--sweep-index', default=None, type=int,
@@ -284,7 +301,7 @@ def load_config_with_sweep(config_file, sweep_index=None):
               help="Comma-separated GPU IDs for AL and baseline models (default: 2,3).")
 @click.option('--seed', default=42, type=int,
               help="Master random seed propagated to torch / numpy / candidate pool (default: 42).")
-def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, dropout, n_datasets, n_samples, val_fraction, output_dir, generate_data, min_gen_fraction, max_gen_attempts, gen_workers, selection_strategy, entropy_blur, entropy_beta, entropy_pool_size, candidate_generation, candidate_source, proximity_sampling, tolerance_sampling, target_value, config_file, sweep_index, early_stopping, patience, warm_starting, n_ensemble, acq_uncertainty, laplace_prior_precision, allow_config_drift, eval_data_path, compute_full_metrics, y_transform, mcmc_data_dir, mcmc_max_samples, static_eval_size, data_dir, use_mcmc_loader, train_baseline, resume_from, n_additional_iterations, gpu_ids, seed):
+def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, dropout, n_datasets, n_samples, val_fraction, output_dir, generate_data, min_gen_fraction, max_gen_attempts, gen_workers, selection_strategy, entropy_blur, entropy_beta, entropy_pool_size, candidate_generation, candidate_source, proximity_sampling, tolerance_sampling, target, target_value, no_mcmc_eval, config_file, sweep_index, early_stopping, patience, warm_starting, n_ensemble, acq_uncertainty, laplace_prior_precision, allow_config_drift, eval_data_path, compute_full_metrics, y_transform, mcmc_data_dir, mcmc_max_samples, static_eval_size, data_dir, use_mcmc_loader, train_baseline, resume_from, n_additional_iterations, gpu_ids, seed):
     """
     Active learning pipeline for pMSSM relic density prediction.
 
@@ -311,6 +328,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
             'candidate_source': 'candidate_source',
             'proximity_sampling': 'proximity_sampling',
             'tolerance_sampling': 'tolerance_sampling',
+            'target': 'target',
             'target_value': 'target_value',
             'early_stopping': 'early_stopping',
             'patience': 'patience',
@@ -348,12 +366,43 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
         candidate_source = locals().get('candidate_source', candidate_source)
         proximity_sampling = locals().get('proximity_sampling', proximity_sampling)
         tolerance_sampling = locals().get('tolerance_sampling', tolerance_sampling)
+        target = locals().get('target', target)
         target_value = locals().get('target_value', target_value)
         early_stopping = locals().get('early_stopping', early_stopping)
         patience = locals().get('patience', patience)
         warm_starting = locals().get('warm_starting', warm_starting)
         compute_full_metrics = locals().get('compute_full_metrics', compute_full_metrics)
         y_transform = locals().get('y_transform', y_transform)
+
+    # ---- Resolve the target's physical value ---------------------------------
+    # Must run AFTER the config-file block (so a YAML target/target_value still
+    # wins) and BEFORE the banner and the resume drift check, which both record
+    # it. For DMRD this yields 0.12 bit-exactly, so the drift check still matches
+    # state.pt files written before --target-value became registry-derived.
+    if target_value is None:
+        target_value = float(TARGET_CONFIG[target]["true_value"])
+
+    # The zscore branch derives its threshold from raw-Y statistics, which are
+    # only meaningful for a bounded target like the relic density. For an
+    # r-value spanning ~9 decades the threshold and the tolerance window would
+    # be silently meaningless, so refuse instead of generalising.
+    if y_transform != 'log' and target != 'DMRD':
+        raise click.UsageError(
+            f"--y-transform {y_transform} is only supported for target DMRD; "
+            f"target {target!r} needs --y-transform log (its threshold would "
+            f"otherwise be derived from raw-Y statistics)."
+        )
+
+    # Targets with no posterior reference cannot use the MCMC loader, whose
+    # file-level filters are relic-density-shaped.
+    if use_mcmc_loader and not TARGET_CONFIG[target].get("has_mcmc_reference", False):
+        raise click.UsageError(
+            f"--use-mcmc-loader requires a target with an MCMC reference "
+            f"dataset; {target!r} has none."
+        )
+
+    if no_mcmc_eval and mcmc_data_dir is not None:
+        mcmc_data_dir = None
 
     # Propagate master seed to torch / numpy / python-random
     torch.manual_seed(seed)
@@ -428,6 +477,9 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
     logger.info(f"  candidate_generation: {candidate_generation}")
     logger.info(f"  proximity_sampling: {proximity_sampling}")
     logger.info(f"  tolerance_sampling: {tolerance_sampling}")
+    # Analysis scripts recover the target from this line (they default to DMRD
+    # when it is absent), so keep the "  key: value" shape.
+    logger.info(f"  target: {target}")
     logger.info(f"  target_value: {target_value}")
     logger.info(f"  early_stopping: {early_stopping} (patience={patience})")
     logger.info(f"  warm_starting: {warm_starting}")
@@ -460,11 +512,12 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
     plots_dir.mkdir(parents=True, exist_ok=True)
     if use_mcmc_loader:
         logger.info(f"Using load_mcmc_data (MCMC-specific filters) on {data_dir}")
-        X, Y, F = load_mcmc_data(data_dir=data_dir, logger=logger, return_lsp_fracs=True)
+        X, Y, F = load_mcmc_data(data_dir=data_dir, logger=logger, target=target,
+                                 return_lsp_fracs=True)
     else:
         X, Y, F = load_pmssm_data(n_datasets=n_datasets, logger=logger,
                                   plot_dir=str(plots_dir), data_dir=data_dir,
-                                  return_lsp_fracs=True)
+                                  target=target, return_lsp_fracs=True)
 
     # Shuffle once up-front: loaders concatenate ROOT files (= MCMC chains)
     # in file order, so X[:n_samples] would otherwise draw from a single chain.
@@ -478,6 +531,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
     X_mcmc, Y_mcmc, F_mcmc = None, None, None
     if mcmc_data_dir is not None:
         X_mcmc, Y_mcmc, F_mcmc = load_mcmc_data(data_dir=mcmc_data_dir, logger=logger,
+                                                target=target,
                                                 return_lsp_fracs=True,
                                                 max_samples=mcmc_max_samples or None)
         logger.info(f"MCMC evaluation dataset: {len(X_mcmc)} samples from {mcmc_data_dir}")
@@ -651,6 +705,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
         # longer run. Compare against whatever the original run recorded and
         # refuse to continue on a mismatch.
         _current_cfg = {
+            "target": target,
             "warm_starting": bool(warm_starting),
             "selection_strategy": selection_strategy,
             "n_select": int(n_select),
@@ -931,7 +986,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
             al_queue = mp.Queue()
             train_model_worker(device, X_combined, Y_combined, idx_train_al, idx_val_al, epochs, dropout,
                              al_queue, "AL", iter_dir, iter_plots_dir, al_checkpoint_path,
-                             al_warm_start, early_stopping, patience, y_transform, "DMRD",
+                             al_warm_start, early_stopping, patience, y_transform, target,
                              F_combined)
             al_results = al_queue.get()
             baseline_results = dict(nan_baseline_results)
@@ -954,7 +1009,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
                                    idx_val_al, epochs, dropout, _q, f"AL_m{_k}",
                                    iter_dir, iter_plots_dir, _ck,
                                    None,  # never warm-start a member: keep inits independent
-                                   early_stopping, patience, y_transform, "DMRD",
+                                   early_stopping, patience, y_transform, target,
                                    F_combined)
                 _q.get()
                 ensemble_checkpoints.append(_ck)
@@ -970,14 +1025,14 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
                 target=train_model_worker,
                 args=(AL_GPU_ID, X_combined, Y_combined, idx_train_al, idx_val_al, epochs, dropout, al_queue, "AL",
                       iter_dir, iter_plots_dir, al_checkpoint_path, al_warm_start,
-                      early_stopping, patience, y_transform, "DMRD", F_combined)
+                      early_stopping, patience, y_transform, target, F_combined)
             )
             baseline_process = mp.Process(
                 target=train_model_worker,
                 args=(BASELINE_GPU_ID, X_baseline_combined, Y_baseline_combined, idx_train_base, idx_val_base, epochs,
                       dropout, baseline_queue, "Baseline", iter_dir, iter_plots_dir,
                       baseline_checkpoint_path, baseline_warm_start, early_stopping, patience,
-                      y_transform, "DMRD", F_baseline_combined)
+                      y_transform, target, F_baseline_combined)
             )
 
             al_process.start()
@@ -996,7 +1051,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
             al_queue = mp.Queue()
             train_model_worker(device, X_combined, Y_combined, idx_train_al, idx_val_al, epochs, dropout,
                              al_queue, "AL", iter_dir, iter_plots_dir, al_checkpoint_path,
-                             al_warm_start, early_stopping, patience, y_transform, "DMRD",
+                             al_warm_start, early_stopping, patience, y_transform, target,
                              F_combined)
             al_results = al_queue.get()
 
@@ -1005,7 +1060,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
             train_model_worker(device, X_baseline_combined, Y_baseline_combined, idx_train_base, idx_val_base,
                              epochs, dropout, baseline_queue, "Baseline", iter_dir,
                              iter_plots_dir, baseline_checkpoint_path, baseline_warm_start,
-                             early_stopping, patience, y_transform, "DMRD",
+                             early_stopping, patience, y_transform, target,
                              F_baseline_combined)
             baseline_results = baseline_queue.get()
 
@@ -1062,7 +1117,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
             """
             if y_transform == 'log':
                 from pmssm.data import transform_y
-                return transform_y(Yp, target='DMRD').reshape(-1)
+                return transform_y(Yp, target=target).reshape(-1)
             _mX, _sX, _mY, _sY = stats
             return ((Yp - _mY) / _sY).reshape(-1)
 
@@ -1113,7 +1168,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
         # AL own-val predictions (always computed — one scatter panel + metric).
         al_own_loss, al_own_r2, al_own_yt, al_own_yp = cross_evaluate_transformer(
             model, stats, X_val, Y_val,
-            y_transform=y_transform, target='DMRD', device=device, return_predictions=True)
+            y_transform=y_transform, target=target, device=device, return_predictions=True)
 
         scatter_results = [
             dict(model_name="AL", dataset_name="AL Val", y_true=al_own_yt, y_pred=al_own_yp,
@@ -1129,7 +1184,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
         if train_baseline:
             al_cross_loss, al_cross_r2, al_cross_yt, al_cross_yp = cross_evaluate_transformer(
                 model, stats, X_baseline_val, Y_baseline_val,
-                y_transform=y_transform, target='DMRD', device=device, return_predictions=True)
+                y_transform=y_transform, target=target, device=device, return_predictions=True)
 
             baseline_stats = compute_stats(X_baseline_combined, Y_baseline_combined, idx_train_base)
             baseline_model = PMSSMTransformerTabular(
@@ -1137,10 +1192,10 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
             baseline_model.load_state_dict(torch.load(baseline_checkpoint_path, map_location=device))
             base_cross_loss, base_cross_r2, base_cross_yt, base_cross_yp = cross_evaluate_transformer(
                 baseline_model, baseline_stats, X_val, Y_val,
-                y_transform=y_transform, target='DMRD', device=device, return_predictions=True)
+                y_transform=y_transform, target=target, device=device, return_predictions=True)
             base_own_loss, base_own_r2, base_own_yt, base_own_yp = cross_evaluate_transformer(
                 baseline_model, baseline_stats, X_baseline_val, Y_baseline_val,
-                y_transform=y_transform, target='DMRD', device=device, return_predictions=True)
+                y_transform=y_transform, target=target, device=device, return_predictions=True)
 
             logger.info(f"Cross-eval: AL_on_base_val_loss={al_cross_loss:.6f}, AL_on_base_val_R²={al_cross_r2:.4f}, base_on_al_val_loss={base_cross_loss:.6f}, base_on_al_val_R²={base_cross_r2:.4f}")
             al_on_base_val_losses.append(al_cross_loss)
@@ -1166,7 +1221,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
         if X_mcmc is not None:
             mcmc_loss_al, mcmc_r2_al, mcmc_yt_al, mcmc_yp_al = cross_evaluate_transformer(
                 model, stats, X_mcmc, Y_mcmc,
-                y_transform=y_transform, target='DMRD', device=device, return_predictions=True)
+                y_transform=y_transform, target=target, device=device, return_predictions=True)
             al_on_mcmc_losses.append(mcmc_loss_al)
             al_on_mcmc_r2.append(mcmc_r2_al)
             scatter_results.append(dict(model_name="AL", dataset_name="MCMC",
@@ -1174,7 +1229,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
             if train_baseline:
                 mcmc_loss_base, mcmc_r2_base, mcmc_yt_base, mcmc_yp_base = cross_evaluate_transformer(
                     baseline_model, baseline_stats, X_mcmc, Y_mcmc,
-                    y_transform=y_transform, target='DMRD', device=device, return_predictions=True)
+                    y_transform=y_transform, target=target, device=device, return_predictions=True)
                 baseline_on_mcmc_losses.append(mcmc_loss_base)
                 baseline_on_mcmc_r2.append(mcmc_r2_base)
                 logger.info(f"MCMC eval: AL_loss={mcmc_loss_al:.6f}, AL_R²={mcmc_r2_al:.4f}, "
@@ -1190,7 +1245,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
         if X_static_random is not None:
             static_loss_al, static_r2_al, static_yt_al, static_yp_al = cross_evaluate_transformer(
                 model, stats, X_static_random, Y_static_random,
-                y_transform=y_transform, target='DMRD', device=device, return_predictions=True)
+                y_transform=y_transform, target=target, device=device, return_predictions=True)
             al_on_static_random_losses.append(static_loss_al)
             al_on_static_random_r2.append(static_r2_al)
             scatter_results.append(dict(model_name="AL", dataset_name="Static Rnd",
@@ -1198,7 +1253,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
             if train_baseline:
                 static_loss_base, static_r2_base, static_yt_base, static_yp_base = cross_evaluate_transformer(
                     baseline_model, baseline_stats, X_static_random, Y_static_random,
-                    y_transform=y_transform, target='DMRD', device=device, return_predictions=True)
+                    y_transform=y_transform, target=target, device=device, return_predictions=True)
                 baseline_on_static_random_losses.append(static_loss_base)
                 baseline_on_static_random_r2.append(static_r2_base)
                 logger.info(f"Static random eval: AL_loss={static_loss_al:.6f}, AL_R²={static_r2_al:.4f}, "
@@ -1239,13 +1294,13 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
             # Train: extra inference on each role's own training set.
             _, _, _al_tr_yt, _al_tr_yp = cross_evaluate_transformer(
                 model, stats, X, Y,
-                y_transform=y_transform, target='DMRD', device=device,
+                y_transform=y_transform, target=target, device=device,
                 return_predictions=True)
             al_accs["train"] = binary_accuracy(_al_tr_yt, _al_tr_yp, _acc_thr)
             if train_baseline and baseline_model is not None:
                 _, _, _bs_tr_yt, _bs_tr_yp = cross_evaluate_transformer(
                     baseline_model, baseline_stats, X_baseline_train, Y_baseline_train,
-                    y_transform=y_transform, target='DMRD', device=device,
+                    y_transform=y_transform, target=target, device=device,
                     return_predictions=True)
                 base_accs["train"] = binary_accuracy(_bs_tr_yt, _bs_tr_yp, _acc_thr)
             write_iter_accuracies(output_dir, iteration, al_accs=al_accs,
@@ -1265,7 +1320,10 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
                 logger.info(f"Loading external eval dataset from {eval_data_path}")
                 from pmssm import load_true_eval_dataset
                 X_eval_full, Y_eval_full = load_true_eval_dataset(
-                    eval_data_path, target=None, logger=logger  # No target transformation for transformer
+                    # target selects the ROOT branch / CSV column to read; the
+                    # returned Y is untransformed either way. Passing None here
+                    # used to raise KeyError on TARGET_CONFIG[None].
+                    eval_data_path, target=target, logger=logger
                 )
 
             # Compute R² on eval dataset
@@ -1324,7 +1382,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
             threshold_phys = target_value  # 0.12
             if y_transform == 'log':
                 from pmssm.data import transform_y
-                threshold_transformed_acc = transform_y(torch.tensor([threshold_phys]), target="DMRD").item()
+                threshold_transformed_acc = transform_y(torch.tensor([threshold_phys]), target=target).item()
             else:  # zscore
                 threshold_transformed_acc = (threshold_phys - mean_Y) / std_Y
             acc = ((y_pred_norm >= threshold_transformed_acc) == (y_true_norm >= threshold_transformed_acc)).float().mean().item()
@@ -1371,7 +1429,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
         if proximity_sampling > 0 or tolerance_sampling > 0:
             if y_transform == 'log':
                 from pmssm.data import transform_y
-                threshold_transformed = transform_y(torch.tensor([target_value]), target="DMRD").item()
+                threshold_transformed = transform_y(torch.tensor([target_value]), target=target).item()
             else:  # zscore
                 threshold_transformed = (target_value - mean_Y) / std_Y
         else:
@@ -1517,11 +1575,11 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
                     df.to_csv(attempt_csv, index=False)
 
                 logger.info(f"Generation attempt {attempt + 1}/{max_gen_attempts} ({len(attempt_indices)} points)...")
-                ntuple_paths = generate_models_from_csv(attempt_csv, attempt_dir, logger, n_workers=gen_workers)
+                ntuple_paths = generate_models_from_csv(attempt_csv, attempt_dir, logger, n_workers=gen_workers, target=target)
 
                 for ntuple_path in ntuple_paths:
                     batch_X, batch_Y, batch_F = load_generated_data(
-                        ntuple_path, logger, return_lsp_fracs=True)
+                        ntuple_path, logger, return_lsp_fracs=True, target=target)
                     if batch_X is not None and len(batch_X) > 0:
                         collected_X.append(batch_X)
                         collected_Y.append(batch_Y)
@@ -1610,7 +1668,12 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
             # submit_al_bundled.sh, which is what builds that flag) flips a
             # cold run to warm from that iteration on. Persisting these lets
             # the resume path detect the drift instead of absorbing it.
+            # Also stored top-level so every driver's state.pt exposes the
+            # target the same way to external tooling (the other three drivers
+            # have no run_config dict).
+            "target": target,
             "run_config": {
+                "target": target,
                 "warm_starting": bool(warm_starting),
                 "n_ensemble": int(n_ensemble),
                 "acq_uncertainty": acq_uncertainty,
@@ -1701,7 +1764,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
     if repr_log:
         _rep_out, _rep_csv = plot_representative_trajectories(
             repr_log, repr_points['Y'], repr_points['cls'], repr_points['labels'],
-            target_value, output_dir, y_transform=y_transform, target='DMRD',
+            target_value, output_dir, y_transform=y_transform, target=target,
         )
         logger.info(f"Representative-points trajectory: {_rep_out}")
         logger.info(f"Representative-points CSV: {_rep_csv}")
@@ -1710,6 +1773,9 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
     summary = {
         "timestamp": timestamp,
         "config": {
+            "target": target,
+            "target_value": target_value,
+            "y_transform": y_transform,
             "n_iterations": n_iterations,
             "n_candidates": n_candidates,
             "n_select": n_select,

@@ -42,22 +42,98 @@ PARAM_RANGES = {
 
 # ===== Target Configurations =====
 
-# Target-specific configuration (true values, thresholds, ROOT branch names)
+# Canonical Run3ModelGen step definitions, keyed by step name. `gen_steps` below
+# names a subset of these; pmssm.model_generation materialises them in the listed
+# order. Kept here (rather than inline in model_generation) so the AL loop's
+# online scan config and the target registry stay in one place.
+#
+# NB the SModelS step takes no `log_dir` (run_SModelS reads only input_dir and
+# output_dir), and it must come LAST among the SPheno consumers: in the legacy
+# in-process path it appends the NLL cross sections to the SPheno output in
+# place, so any consumer ordered after it would read a mutated spectrum.
+MODELGEN_STEP_DEFS = {
+    "prep_input": {"name": "prep_input", "output_dir": "input", "prefix": "IN"},
+    "SPheno": {"name": "SPheno", "input_dir": "input", "output_dir": "SPheno",
+               "log_dir": "SPheno_log", "prefix": "SP"},
+    "micromegas": {"name": "micromegas", "input_dir": "SPheno",
+                   "output_dir": "micromegas", "prefix": "MO"},
+    "SModelS": {"name": "SModelS", "input_dir": "SPheno",
+                "output_dir": "SModelS", "prefix": "SModelS"},
+}
+
+# Target-specific configuration. Every key here must return the historical
+# hardcoded value for "DMRD", so adding a target cannot change relic-density
+# results. Keys:
+#   true_value   physical value the transform divides by (transform_y)
+#   threshold    decision threshold in transformed space
+#   branch       ROOT branch holding the target
+#   label        matplotlib label for the physical target
+#   valid_max    exclusive upper ingest cut, or None for no upper cut. The
+#                relic density uses 1.0 ("does not overclose the universe");
+#                for an exclusion r-value the >1 half IS the region of
+#                interest, so an upper cut there would delete it.
+#   hist_range   range= for the ingest histogram, or None to autoscale
+#   gen_require_neutralino_lsp
+#                whether load_generated_data vetoes non-neutralino LSPs.
+#                This governs NEWLY GENERATED data only. Pool ingest
+#                (load_pmssm_data) keeps its own explicit argument, default
+#                False, which no driver passes — do not couple the two, or the
+#                relic-density pool would suddenly shrink.
+#   gen_steps    Run3ModelGen steps the AL loop runs to label a candidate
+#   has_mcmc_reference
+#                whether an emcee posterior reference dataset exists
 TARGET_CONFIG = {
     "DMRD": {
         "true_value": 0.12,          # Observed dark matter relic density
         "threshold": 0.0,            # Decision threshold in transformed space
-        "branch": "MO_Omega"         # ROOT file branch name
+        "branch": "MO_Omega",        # ROOT file branch name
+        "label": r"$\Omega h^2$",
+        "valid_max": 1.0,
+        "hist_range": (0.0, 1.0),
+        "gen_require_neutralino_lsp": True,
+        "gen_steps": ("prep_input", "SPheno", "micromegas"),
+        "has_mcmc_reference": True,
+    },
+    # SModelS best expected r-value: the LHC exclusion boundary. r > 1 means the
+    # model is expected to be excluded, so true_value = 1.0 puts the boundary at
+    # log(r/1) = 0, exactly where the relic density's 0.12 sits for DMRD.
+    # Run3ModelGen fills the branch with the sentinel -1. when no analysis
+    # applies, so the (Y > 0) ingest cut is precisely "SModelS returned a
+    # verdict". micromegas stays in gen_steps although the target does not need
+    # it: it costs ~3% of the SModelS step and keeps MO_Omega on every generated
+    # point, so the two target branches remain cross-comparable.
+    "ExpR": {
+        "true_value": 1.0,
+        "threshold": 0.0,
+        "branch": "SModelS_bestExpR_r_expected",
+        "label": r"$r_{\mathrm{exp}}$",
+        "valid_max": None,
+        "hist_range": None,
+        "gen_require_neutralino_lsp": False,
+        "gen_steps": ("prep_input", "SPheno", "micromegas", "SModelS"),
+        "has_mcmc_reference": False,
     },
     "CrossSection": {
         "true_value": 0.03,
         "threshold": 0.0,
-        "branch": "xsec_TOTAL"
+        "branch": "xsec_TOTAL",
+        "label": r"$\sigma_{\mathrm{tot}}$",
+        "valid_max": 1.0,
+        "hist_range": (0.0, 1.0),
+        "gen_require_neutralino_lsp": True,
+        "gen_steps": ("prep_input", "SPheno", "micromegas"),
+        "has_mcmc_reference": False,
     },
     "CLs": {
         "true_value": 0.05,
         "threshold": 0.05,
-        "branch": "Final__CLs"
+        "branch": "Final__CLs",
+        "label": r"$\mathrm{CL}_s$",
+        "valid_max": 1.0,
+        "hist_range": (0.0, 1.0),
+        "gen_require_neutralino_lsp": True,
+        "gen_steps": ("prep_input", "SPheno", "micromegas"),
+        "has_mcmc_reference": False,
     },
 }
 

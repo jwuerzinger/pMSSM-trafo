@@ -353,7 +353,10 @@ def load_config_with_sweep(config_file, sweep_index=None):
 @click.option('--max-gen-attempts', default=10, type=int, help="Maximum number of generation attempts per iteration (default: 10).")
 @click.option('--gen-workers', default=1, type=int, help="Number of parallel genModels.py workers per generation attempt (default: 1).")
 # Target & model options
-@click.option('--target', default='DMRD', type=click.Choice(['DMRD', 'CrossSection', 'CLs']),
+@click.option('--no-mcmc-eval', is_flag=True, default=False,
+              help="Ignore --mcmc-data-dir and run without an MCMC reference "
+                   "set, for targets that have no posterior reference.")
+@click.option('--target', default='DMRD', type=click.Choice(sorted(TARGET_CONFIG)),
               help="Target function to predict.")
 @click.option('--model-type', default='exact_gp',
               type=click.Choice(['exact_gp', 'deep_gp', 'sparse_gp', 'mlp']),
@@ -426,7 +429,7 @@ def load_config_with_sweep(config_file, sweep_index=None):
               help="Master random seed propagated to torch / numpy / candidate pool (default: 42).")
 def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, val_fraction,
          output_dir, generate_data, min_gen_fraction, max_gen_attempts, gen_workers,
-         target, model_type, kernel, lengthscale, noise, jitter, learning_rate,
+         target, no_mcmc_eval, model_type, kernel, lengthscale, noise, jitter, learning_rate,
          epochs, early_stopping, patience,
          use_ard, use_dkl, feature_dim,
          num_hidden_dims, num_middle_dims, num_inducing_max, inducing_strategy,
@@ -489,6 +492,9 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, v
         torch.cuda.manual_seed_all(seed)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    if no_mcmc_eval and mcmc_data_dir is not None:
+        mcmc_data_dir = None
+
     threshold = TARGET_CONFIG[target]["threshold"]
 
     if n_candidates < n_select:
@@ -603,7 +609,7 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, v
     plots_dir.mkdir(parents=True, exist_ok=True)
     X, Y, F = load_pmssm_data(n_datasets=n_datasets, logger=logger,
                               plot_dir=str(plots_dir), data_dir=data_dir,
-                              return_lsp_fracs=True)
+                              target=target, return_lsp_fracs=True)
 
     # Shuffle once up-front: loaders concatenate ROOT files (= MCMC chains)
     # in file order, so X[:n_samples] would otherwise draw from a single chain.
@@ -659,6 +665,7 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, v
     X_mcmc, Y_mcmc, F_mcmc = None, None, None
     if mcmc_data_dir is not None:
         X_mcmc, Y_mcmc, F_mcmc = load_mcmc_data(data_dir=mcmc_data_dir, logger=logger,
+                                                target=target,
                                                 return_lsp_fracs=True,
                                                 max_samples=mcmc_max_samples or None)
         logger.info(f"Loaded MCMC evaluation data: {len(X_mcmc)} samples")
@@ -795,6 +802,16 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, v
         if saved is None:
             raise click.UsageError(f"No state.pt found in {resume_from}")
         logger.info(f"Resuming from {resume_from} (last completed iteration: {saved['iteration']})")
+        # A resume that changes the target would append labels of one observable
+        # to a dataset of another. state.pt written before --target was persisted
+        # has no key, so treat that as the historical DMRD default.
+        _saved_target = saved.get("target", "DMRD")
+        if _saved_target != target:
+            raise click.UsageError(
+                f"Refusing to resume: this run was trained on target "
+                f"{_saved_target!r} but --target is {target!r}. Pass "
+                f"--target {_saved_target} to continue it."
+            )
         X, Y = saved["X"], saved["Y"]
         X_val, Y_val = saved["X_val"], saved["Y_val"]
         F = saved.get("F", torch.full((len(X), 3), float('nan')))
@@ -1513,12 +1530,13 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, v
 
                 logger.info(f"Generation attempt {attempt + 1}/{max_gen_attempts}...")
                 ntuple_paths = generate_models_from_csv(
-                    attempt_csv, attempt_dir, logger, n_workers=gen_workers
+                    attempt_csv, attempt_dir, logger, n_workers=gen_workers,
+                    target=target
                 )
 
                 for ntuple_path in ntuple_paths:
                     batch_X, batch_Y, batch_F = load_generated_data(
-                        ntuple_path, logger, return_lsp_fracs=True)
+                        ntuple_path, logger, return_lsp_fracs=True, target=target)
                     if batch_X is not None and len(batch_X) > 0:
                         collected_X.append(batch_X)
                         collected_Y.append(batch_Y)
@@ -1607,6 +1625,7 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, v
         # ---- Checkpoint run state for resume -------------------------------
         from pmssm.resume import save_state, capture_rng
         save_state(output_dir, {
+            "target": target,
             "iteration": iteration,
             "X": X, "Y": Y, "X_val": X_val, "Y_val": Y_val,
             "F": F, "F_val": F_val,

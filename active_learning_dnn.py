@@ -202,7 +202,14 @@ def load_config_with_sweep(config_file, sweep_index=None):
               help="Gaussian proximity weighting width around target value (0 to disable, default: 0.1).")
 @click.option('--tolerance-sampling', default=1.0, type=float,
               help="Hard cut: keep only candidates within ±tolerance of threshold in transformed space (0 to disable, default: 1.0).")
-@click.option('--target-value', default=0.12, type=float,
+@click.option('--target', 'target', default='DMRD',
+              type=click.Choice(sorted(TARGET_CONFIG)),
+              help="Observable the surrogate learns and the AL loop targets "
+                   "(default: DMRD). See active_learning.py for details.")
+@click.option('--no-mcmc-eval', is_flag=True, default=False,
+              help="Ignore --mcmc-data-dir and run without an MCMC reference "
+                   "set, for targets that have no posterior reference.")
+@click.option('--target-value', default=None, type=float,
               help="Target relic density value for proximity weighting (default: 0.12).")
 @click.option('--config-file', default=None, type=str,
               help="YAML config file (overrides CLI args). Supports parameter sweeps.")
@@ -272,7 +279,7 @@ def load_config_with_sweep(config_file, sweep_index=None):
               help="DNN hidden layer count (default: 4).")
 @click.option('--dim-feedforward', default=256, type=int,
               help="DNN hidden layer width (default: 256).")
-def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, dropout, n_datasets, n_samples, val_fraction, output_dir, generate_data, min_gen_fraction, max_gen_attempts, gen_workers, selection_strategy, entropy_blur, entropy_beta, entropy_pool_size, candidate_generation, proximity_sampling, tolerance_sampling, target_value, config_file, sweep_index, early_stopping, patience, warm_starting, eval_data_path, compute_full_metrics, y_transform, mcmc_data_dir, mcmc_max_samples, static_eval_size, data_dir, use_mcmc_loader, train_baseline, resume_from, n_additional_iterations, gpu_ids, seed, n_ensemble, acq_uncertainty, laplace_prior_precision, d_model, num_layers, dim_feedforward):
+def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, dropout, n_datasets, n_samples, val_fraction, output_dir, generate_data, min_gen_fraction, max_gen_attempts, gen_workers, selection_strategy, entropy_blur, entropy_beta, entropy_pool_size, candidate_generation, proximity_sampling, tolerance_sampling, target, target_value, no_mcmc_eval, config_file, sweep_index, early_stopping, patience, warm_starting, eval_data_path, compute_full_metrics, y_transform, mcmc_data_dir, mcmc_max_samples, static_eval_size, data_dir, use_mcmc_loader, train_baseline, resume_from, n_additional_iterations, gpu_ids, seed, n_ensemble, acq_uncertainty, laplace_prior_precision, d_model, num_layers, dim_feedforward):
     """
     Active learning pipeline for pMSSM relic density prediction (DNN variant).
 
@@ -298,6 +305,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
             'candidate_generation': 'candidate_generation',
             'proximity_sampling': 'proximity_sampling',
             'tolerance_sampling': 'tolerance_sampling',
+            'target': 'target',
             'target_value': 'target_value',
             'early_stopping': 'early_stopping',
             'patience': 'patience',
@@ -337,6 +345,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
         candidate_generation = locals().get('candidate_generation', candidate_generation)
         proximity_sampling = locals().get('proximity_sampling', proximity_sampling)
         tolerance_sampling = locals().get('tolerance_sampling', tolerance_sampling)
+        target = locals().get('target', target)
         target_value = locals().get('target_value', target_value)
         early_stopping = locals().get('early_stopping', early_stopping)
         patience = locals().get('patience', patience)
@@ -346,6 +355,27 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
         d_model = locals().get('d_model', d_model)
         num_layers = locals().get('num_layers', num_layers)
         dim_feedforward = locals().get('dim_feedforward', dim_feedforward)
+
+    # ---- Resolve the target's physical value ---------------------------------
+    # After the config-file block (so a YAML target/target_value still wins) and
+    # before the banner and any resume check. For DMRD this is 0.12 bit-exactly.
+    if target_value is None:
+        target_value = float(TARGET_CONFIG[target]["true_value"])
+
+    if y_transform != 'log' and target != 'DMRD':
+        raise click.UsageError(
+            f"--y-transform {y_transform} is only supported for target DMRD; "
+            f"target {target!r} needs --y-transform log."
+        )
+
+    if use_mcmc_loader and not TARGET_CONFIG[target].get("has_mcmc_reference", False):
+        raise click.UsageError(
+            f"--use-mcmc-loader requires a target with an MCMC reference "
+            f"dataset; {target!r} has none."
+        )
+
+    if no_mcmc_eval and mcmc_data_dir is not None:
+        mcmc_data_dir = None
 
     # Propagate master seed to torch / numpy / python-random
     torch.manual_seed(seed)
@@ -421,6 +451,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
     logger.info(f"  candidate_generation: {candidate_generation}")
     logger.info(f"  proximity_sampling: {proximity_sampling}")
     logger.info(f"  tolerance_sampling: {tolerance_sampling}")
+    logger.info(f"  target: {target}")
     logger.info(f"  target_value: {target_value}")
     logger.info(f"  early_stopping: {early_stopping} (patience={patience})")
     logger.info(f"  warm_starting: {warm_starting}")
@@ -453,11 +484,12 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
     plots_dir.mkdir(parents=True, exist_ok=True)
     if use_mcmc_loader:
         logger.info(f"Using load_mcmc_data (MCMC-specific filters) on {data_dir}")
-        X, Y, F = load_mcmc_data(data_dir=data_dir, logger=logger, return_lsp_fracs=True)
+        X, Y, F = load_mcmc_data(data_dir=data_dir, logger=logger, target=target,
+                                 return_lsp_fracs=True)
     else:
         X, Y, F = load_pmssm_data(n_datasets=n_datasets, logger=logger,
                                   plot_dir=str(plots_dir), data_dir=data_dir,
-                                  return_lsp_fracs=True)
+                                  target=target, return_lsp_fracs=True)
 
     # Shuffle once up-front: loaders concatenate ROOT files (= MCMC chains)
     # in file order, so X[:n_samples] would otherwise draw from a single chain.
@@ -471,6 +503,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
     X_mcmc, Y_mcmc, F_mcmc = None, None, None
     if mcmc_data_dir is not None:
         X_mcmc, Y_mcmc, F_mcmc = load_mcmc_data(data_dir=mcmc_data_dir, logger=logger,
+                                                target=target,
                                                 return_lsp_fracs=True,
                                                 max_samples=mcmc_max_samples or None)
         logger.info(f"MCMC evaluation dataset: {len(X_mcmc)} samples from {mcmc_data_dir}")
@@ -606,6 +639,16 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
         if saved is None:
             raise click.UsageError(f"No state.pt found in {resume_from}")
         logger.info(f"Resuming from {resume_from} (last completed iteration: {saved['iteration']})")
+        # A resume that changes the target would append labels of one observable
+        # to a dataset of another. state.pt written before --target existed has
+        # no key, so treat that as the historical DMRD default.
+        _saved_target = saved.get("target", "DMRD")
+        if _saved_target != target:
+            raise click.UsageError(
+                f"Refusing to resume: this run was trained on target "
+                f"{_saved_target!r} but --target is {target!r}. Pass "
+                f"--target {_saved_target} to continue it."
+            )
         # Restore accumulated data
         X, Y = saved["X"], saved["Y"]
         X_val, Y_val = saved["X_val"], saved["Y_val"]
@@ -835,7 +878,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
             al_queue = mp.Queue()
             train_model_worker(device, X_combined, Y_combined, idx_train_al, idx_val_al, epochs, dropout,
                              al_queue, "AL", iter_dir, iter_plots_dir, al_checkpoint_path,
-                             al_warm_start, early_stopping, patience, y_transform, "DMRD",
+                             al_warm_start, early_stopping, patience, y_transform, target,
                              F_combined, arch='dnn',
                              dnn_d_model=d_model, dnn_num_layers=num_layers,
                              dnn_dim_feedforward=dim_feedforward)
@@ -857,7 +900,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
                 train_model_worker(device, X_combined, Y_combined, idx_train_al,
                                    idx_val_al, epochs, dropout, _q, f"AL_m{_k}",
                                    iter_dir, iter_plots_dir, _ck, None,
-                                   early_stopping, patience, y_transform, "DMRD",
+                                   early_stopping, patience, y_transform, target,
                                    F_combined, arch='dnn',
                                    dnn_d_model=d_model, dnn_num_layers=num_layers,
                                    dnn_dim_feedforward=dim_feedforward)
@@ -875,7 +918,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
                 target=train_model_worker,
                 args=(AL_GPU_ID, X_combined, Y_combined, idx_train_al, idx_val_al, epochs, dropout, al_queue, "AL",
                       iter_dir, iter_plots_dir, al_checkpoint_path, al_warm_start,
-                      early_stopping, patience, y_transform, "DMRD", F_combined),
+                      early_stopping, patience, y_transform, target, F_combined),
                 kwargs={'arch': 'dnn',
                         'dnn_d_model': d_model,
                         'dnn_num_layers': num_layers,
@@ -886,7 +929,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
                 args=(BASELINE_GPU_ID, X_baseline_combined, Y_baseline_combined, idx_train_base, idx_val_base, epochs,
                       dropout, baseline_queue, "Baseline", iter_dir, iter_plots_dir,
                       baseline_checkpoint_path, baseline_warm_start, early_stopping, patience,
-                      y_transform, "DMRD", F_baseline_combined),
+                      y_transform, target, F_baseline_combined),
                 kwargs={'arch': 'dnn',
                         'dnn_d_model': d_model,
                         'dnn_num_layers': num_layers,
@@ -909,7 +952,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
             al_queue = mp.Queue()
             train_model_worker(device, X_combined, Y_combined, idx_train_al, idx_val_al, epochs, dropout,
                              al_queue, "AL", iter_dir, iter_plots_dir, al_checkpoint_path,
-                             al_warm_start, early_stopping, patience, y_transform, "DMRD",
+                             al_warm_start, early_stopping, patience, y_transform, target,
                              F_combined, arch='dnn',
                              dnn_d_model=d_model, dnn_num_layers=num_layers,
                              dnn_dim_feedforward=dim_feedforward)
@@ -920,7 +963,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
             train_model_worker(device, X_baseline_combined, Y_baseline_combined, idx_train_base, idx_val_base,
                              epochs, dropout, baseline_queue, "Baseline", iter_dir,
                              iter_plots_dir, baseline_checkpoint_path, baseline_warm_start,
-                             early_stopping, patience, y_transform, "DMRD",
+                             early_stopping, patience, y_transform, target,
                              F_baseline_combined, arch='dnn',
                              dnn_d_model=d_model, dnn_num_layers=num_layers,
                              dnn_dim_feedforward=dim_feedforward)
@@ -976,7 +1019,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
             """
             if y_transform == 'log':
                 from pmssm.data import transform_y
-                return transform_y(Yp, target='DMRD').reshape(-1)
+                return transform_y(Yp, target=target).reshape(-1)
             _mX, _sX, _mY, _sY = stats
             return ((Yp - _mY) / _sY).reshape(-1)
 
@@ -1027,7 +1070,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
         # AL own-val predictions (always computed — one scatter panel + metric).
         al_own_loss, al_own_r2, al_own_yt, al_own_yp = cross_evaluate_transformer(
             model, stats, X_val, Y_val,
-            y_transform=y_transform, target='DMRD', device=device, return_predictions=True)
+            y_transform=y_transform, target=target, device=device, return_predictions=True)
 
         scatter_results = [
             dict(model_name="AL", dataset_name="AL Val", y_true=al_own_yt, y_pred=al_own_yp,
@@ -1043,7 +1086,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
         if train_baseline:
             al_cross_loss, al_cross_r2, al_cross_yt, al_cross_yp = cross_evaluate_transformer(
                 model, stats, X_baseline_val, Y_baseline_val,
-                y_transform=y_transform, target='DMRD', device=device, return_predictions=True)
+                y_transform=y_transform, target=target, device=device, return_predictions=True)
 
             baseline_stats = compute_stats(X_baseline_combined, Y_baseline_combined, idx_train_base)
             baseline_model = PMSSMFeedForward(
@@ -1052,10 +1095,10 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
             baseline_model.load_state_dict(torch.load(baseline_checkpoint_path, map_location=device))
             base_cross_loss, base_cross_r2, base_cross_yt, base_cross_yp = cross_evaluate_transformer(
                 baseline_model, baseline_stats, X_val, Y_val,
-                y_transform=y_transform, target='DMRD', device=device, return_predictions=True)
+                y_transform=y_transform, target=target, device=device, return_predictions=True)
             base_own_loss, base_own_r2, base_own_yt, base_own_yp = cross_evaluate_transformer(
                 baseline_model, baseline_stats, X_baseline_val, Y_baseline_val,
-                y_transform=y_transform, target='DMRD', device=device, return_predictions=True)
+                y_transform=y_transform, target=target, device=device, return_predictions=True)
 
             logger.info(f"Cross-eval: AL_on_base_val_loss={al_cross_loss:.6f}, AL_on_base_val_R²={al_cross_r2:.4f}, base_on_al_val_loss={base_cross_loss:.6f}, base_on_al_val_R²={base_cross_r2:.4f}")
             al_on_base_val_losses.append(al_cross_loss)
@@ -1081,7 +1124,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
         if X_mcmc is not None:
             mcmc_loss_al, mcmc_r2_al, mcmc_yt_al, mcmc_yp_al = cross_evaluate_transformer(
                 model, stats, X_mcmc, Y_mcmc,
-                y_transform=y_transform, target='DMRD', device=device, return_predictions=True)
+                y_transform=y_transform, target=target, device=device, return_predictions=True)
             al_on_mcmc_losses.append(mcmc_loss_al)
             al_on_mcmc_r2.append(mcmc_r2_al)
             scatter_results.append(dict(model_name="AL", dataset_name="MCMC",
@@ -1089,7 +1132,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
             if train_baseline:
                 mcmc_loss_base, mcmc_r2_base, mcmc_yt_base, mcmc_yp_base = cross_evaluate_transformer(
                     baseline_model, baseline_stats, X_mcmc, Y_mcmc,
-                    y_transform=y_transform, target='DMRD', device=device, return_predictions=True)
+                    y_transform=y_transform, target=target, device=device, return_predictions=True)
                 baseline_on_mcmc_losses.append(mcmc_loss_base)
                 baseline_on_mcmc_r2.append(mcmc_r2_base)
                 logger.info(f"MCMC eval: AL_loss={mcmc_loss_al:.6f}, AL_R²={mcmc_r2_al:.4f}, "
@@ -1105,7 +1148,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
         if X_static_random is not None:
             static_loss_al, static_r2_al, static_yt_al, static_yp_al = cross_evaluate_transformer(
                 model, stats, X_static_random, Y_static_random,
-                y_transform=y_transform, target='DMRD', device=device, return_predictions=True)
+                y_transform=y_transform, target=target, device=device, return_predictions=True)
             al_on_static_random_losses.append(static_loss_al)
             al_on_static_random_r2.append(static_r2_al)
             scatter_results.append(dict(model_name="AL", dataset_name="Static Rnd",
@@ -1113,7 +1156,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
             if train_baseline:
                 static_loss_base, static_r2_base, static_yt_base, static_yp_base = cross_evaluate_transformer(
                     baseline_model, baseline_stats, X_static_random, Y_static_random,
-                    y_transform=y_transform, target='DMRD', device=device, return_predictions=True)
+                    y_transform=y_transform, target=target, device=device, return_predictions=True)
                 baseline_on_static_random_losses.append(static_loss_base)
                 baseline_on_static_random_r2.append(static_r2_base)
                 logger.info(f"Static random eval: AL_loss={static_loss_al:.6f}, AL_R²={static_r2_al:.4f}, "
@@ -1154,13 +1197,13 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
             # Train: extra inference on each role's own training set.
             _, _, _al_tr_yt, _al_tr_yp = cross_evaluate_transformer(
                 model, stats, X, Y,
-                y_transform=y_transform, target='DMRD', device=device,
+                y_transform=y_transform, target=target, device=device,
                 return_predictions=True)
             al_accs["train"] = binary_accuracy(_al_tr_yt, _al_tr_yp, _acc_thr)
             if train_baseline and baseline_model is not None:
                 _, _, _bs_tr_yt, _bs_tr_yp = cross_evaluate_transformer(
                     baseline_model, baseline_stats, X_baseline_train, Y_baseline_train,
-                    y_transform=y_transform, target='DMRD', device=device,
+                    y_transform=y_transform, target=target, device=device,
                     return_predictions=True)
                 base_accs["train"] = binary_accuracy(_bs_tr_yt, _bs_tr_yp, _acc_thr)
             write_iter_accuracies(output_dir, iteration, al_accs=al_accs,
@@ -1180,7 +1223,10 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
                 logger.info(f"Loading external eval dataset from {eval_data_path}")
                 from pmssm import load_true_eval_dataset
                 X_eval_full, Y_eval_full = load_true_eval_dataset(
-                    eval_data_path, target=None, logger=logger  # No target transformation for transformer
+                    # target selects the ROOT branch / CSV column to read; the
+                    # returned Y is untransformed either way. Passing None here
+                    # used to raise KeyError on TARGET_CONFIG[None].
+                    eval_data_path, target=target, logger=logger
                 )
 
             # Compute R² on eval dataset
@@ -1239,7 +1285,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
             threshold_phys = target_value  # 0.12
             if y_transform == 'log':
                 from pmssm.data import transform_y
-                threshold_transformed_acc = transform_y(torch.tensor([threshold_phys]), target="DMRD").item()
+                threshold_transformed_acc = transform_y(torch.tensor([threshold_phys]), target=target).item()
             else:  # zscore
                 threshold_transformed_acc = (threshold_phys - mean_Y) / std_Y
             acc = ((y_pred_norm >= threshold_transformed_acc) == (y_true_norm >= threshold_transformed_acc)).float().mean().item()
@@ -1273,7 +1319,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
         if proximity_sampling > 0 or tolerance_sampling > 0:
             if y_transform == 'log':
                 from pmssm.data import transform_y
-                threshold_transformed = transform_y(torch.tensor([target_value]), target="DMRD").item()
+                threshold_transformed = transform_y(torch.tensor([target_value]), target=target).item()
             else:  # zscore
                 threshold_transformed = (target_value - mean_Y) / std_Y
         else:
@@ -1408,11 +1454,11 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
                     df.to_csv(attempt_csv, index=False)
 
                 logger.info(f"Generation attempt {attempt + 1}/{max_gen_attempts} ({len(attempt_indices)} points)...")
-                ntuple_paths = generate_models_from_csv(attempt_csv, attempt_dir, logger, n_workers=gen_workers)
+                ntuple_paths = generate_models_from_csv(attempt_csv, attempt_dir, logger, n_workers=gen_workers, target=target)
 
                 for ntuple_path in ntuple_paths:
                     batch_X, batch_Y, batch_F = load_generated_data(
-                        ntuple_path, logger, return_lsp_fracs=True)
+                        ntuple_path, logger, return_lsp_fracs=True, target=target)
                     if batch_X is not None and len(batch_X) > 0:
                         collected_X.append(batch_X)
                         collected_Y.append(batch_Y)
@@ -1495,6 +1541,8 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
         # ---- Checkpoint run state for resume -------------------------------
         from pmssm.resume import save_state, capture_rng
         save_state(output_dir, {
+            # Read back by the resume guard above and by external tooling.
+            "target": target,
             "iteration": iteration,
             "X": X, "Y": Y, "X_val": X_val, "Y_val": Y_val,
             "F": F, "F_val": F_val,
@@ -1571,7 +1619,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
     if repr_log:
         _rep_out, _rep_csv = plot_representative_trajectories(
             repr_log, repr_points['Y'], repr_points['cls'], repr_points['labels'],
-            target_value, output_dir, y_transform=y_transform, target='DMRD',
+            target_value, output_dir, y_transform=y_transform, target=target,
         )
         logger.info(f"Representative-points trajectory: {_rep_out}")
         logger.info(f"Representative-points CSV: {_rep_csv}")
@@ -1580,6 +1628,9 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
     summary = {
         "timestamp": timestamp,
         "config": {
+            "target": target,
+            "target_value": target_value,
+            "y_transform": y_transform,
             "n_iterations": n_iterations,
             "n_candidates": n_candidates,
             "n_select": n_select,

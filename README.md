@@ -635,9 +635,109 @@ bash resume_slurm.sh slurm/submit_al_transformer_top_k_20k.sh /ptmp/output/previ
 
 Available job scripts: `submit_al_transformer.sh`, `submit_al_transformer_top_k.sh`, `submit_al_transformer_top_k_20k.sh`, `submit_al_gp_exact.sh`, `submit_al_gp_exact_top_k.sh`, `submit_al_gp_deep.sh`, `submit_al_gp_deep_top_k.sh`, `submit_al_tabpfn.sh`, `submit_al_tabpfn_entropy.sh`. All parameters can be overridden via environment variables (see script headers for details).
 
+## Target axes (`--target`)
+
+The pipeline learns one observable at a time, selected with `--target` on every
+driver and defined once in `TARGET_CONFIG` (`pmssm/config.py`). Two targets are
+in production use:
+
+| `--target` | Observable | Branch | Boundary | Pool |
+|---|---|---|---|---|
+| `DMRD` (default) | dark matter relic density Ω h² | `MO_Omega` | 0.12 | `/ptmp/jwuerzin/data/18387358` |
+| `ExpR` | SModelS best expected r-value (LHC exclusion) | `SModelS_bestExpR_r_expected` | 1.0 | `/ptmp/jwuerzin/data/260804` |
+
+Both boundaries sit at 0 in training space, because `transform_y` computes
+`log(Y / true_value)`. So the acquisition machinery (`--tolerance-sampling 1.0`,
+`--proximity-sampling 0.1`) and the hit-band metric `|Y − v| / v < tol` carry over
+unchanged.
+
+What the registry entry controls, beyond the branch and boundary:
+
+- **`valid_max`** — the ingest upper cut. `DMRD` keeps its historical `Y < 1`
+  (sub-dominant dark matter); `ExpR` has **none**, because `r > 1` is the
+  excluded region and is the whole point. Run3ModelGen writes `-1.` when a
+  quantity was not computed, so `Y > 0` is exactly the "we have a value" cut.
+- **`gen_require_neutralino_lsp`** — whether `load_generated_data` vetoes
+  non-neutralino LSPs. True for `DMRD` (a relic density needs a dark matter
+  candidate), false for `ExpR` (a collider limit does not care). This governs
+  **newly generated** data only; pool ingest has never applied the veto by
+  default and still does not.
+- **`gen_steps`** — the Run3ModelGen steps the AL loop runs to label a selected
+  candidate. `ExpR` adds a `SModelS` step, kept **last** among the SPheno
+  consumers, and retains `micromegas` so generated points still carry
+  `MO_Omega`.
+- **`has_mcmc_reference`** — only `DMRD` has an emcee posterior reference, so
+  `load_mcmc_data` and `--use-mcmc-loader` refuse any other target rather than
+  applying an Ω-shaped window to a different observable. Use `--no-mcmc-eval`
+  to run without a reference set; it is the only way to override the
+  `--mcmc-data-dir` the per-model submit scripts always pass (two of them
+  hardcode it, and an empty value cannot beat a shell `:-` default).
+
+`--target-value` defaults to the target's registry value, so it normally needs no
+setting. `--y-transform zscore` is rejected for non-`DMRD` targets: its threshold
+comes from raw-Y statistics, which are meaningless for a quantity spanning nine
+decades.
+
+### SModelS prerequisite
+
+The `ExpR` step list needs the SModelS results database, and compute nodes have
+no internet. `Run3ModelGen/build/setup.sh` points `SMODELS_CACHEDIR` at the repo
+checkout when `/eos` is absent, and that directory holds no database, so every
+`slurm/submit_al_*.sh` now exports
+
+```bash
+export SMODELS_CACHEDIR="${SMODELS_CACHEDIR:-/ptmp/jwuerzin/cache/smodels}"
+```
+
+which `setup.sh` honours. **Both** files must be present there: the
+`official<ver>.pcl` pickle *and* its `https___..._database_<ver>` descriptor;
+with only the pickle SModelS still tries to reach the server and fails.
+`pmssm/model_generation.py` checks for both before spawning any worker, so a
+missing database is one clear error instead of twenty stack traces. That cache
+lives on `/ptmp` (`~/.cache` is a symlink to it) and is therefore purge-eligible;
+a backup sits at `/viper/u2/jwuerzin/pmssm-archive/smodels-cache/`.
+
+### Smoke-testing a target end to end
+
+The SModelS path cannot be verified offline, so:
+
+```bash
+source slurm/cluster.conf
+AL_TARGET=ExpR AL_DRIVER=transformer \
+  sbatch --partition="${CLUSTER_PARTITION}" --gres="${CLUSTER_GPU_GRES_1}" \
+         --export=ALL slurm/test_al_target.sh
+```
+
+It runs a short AL loop *with* generation and prints the per-iteration
+generation cost, which is what decides whether 40 iterations fit the 24 h limit.
+
 ## Multi-Seed Strategy Sweep
 
 For multi-seed comparisons of `(model × selection_strategy × warm/cold)` configurations, use `slurm/submit_strategy_sweep.sh`. This meta-launcher submits one `sbatch` per `(config, seed)`, appends a row to a manifest CSV at submit time, and produces collision-free output directory names that encode the config.
+
+### Sweeping a non-default target
+
+The launcher needs no new flags: the target rides in on `EXTRA_AL_ARGS`, which is
+spliced last into every per-model command line so Click's last-wins parsing
+overrides even the GP scripts' hardcoded flag lists. Keep the r-target runs in
+their own manifest so the relic-density one is untouched:
+
+```bash
+OUTPUT_TAG=expr \
+MANIFEST=/ptmp/jwuerzin/analysis/expr_runs/sweep_manifest.csv \
+BUNDLE_SEEDS=1 \
+EXTRA_AL_ARGS="--target ExpR --data-dir /ptmp/jwuerzin/data/260804 --no-mcmc-eval" \
+bash slurm/submit_strategy_sweep.sh
+```
+
+`OUTPUT_TAG=expr` suffixes the manifest `model` column and the run directory
+(`active_learning_transformer_expr_...`) while leaving the `AL_MODEL` dispatch
+key alone. Downstream, `plot_hit_rate_trajectories_multiseed.py` strips `_expr`
+before dispatching on model type, and its colour/label tables fall back to the
+bare model name, so no per-variant palette entries are needed. Pass
+`--target ExpR --baseline-data-dir /ptmp/jwuerzin/data/260804` when plotting, and
+note `--baseline-require-neutralino-lsp` defaults on: turn it off for `ExpR`,
+whose population deliberately keeps non-neutralino LSPs.
 
 ### Selection strategies
 

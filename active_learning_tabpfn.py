@@ -67,7 +67,7 @@ from pmssm.accuracy import binary_accuracy, write_iter_accuracies
 # visualization, logging) are now imported from the unified pmssm package
 
 
-def fit_tabpfn(X_train, Y_train, device="cuda:0"):
+def fit_tabpfn(X_train, Y_train, device="cuda:0", target="DMRD"):
     """Fit a TabPFN model on training data.
 
     Args:
@@ -77,7 +77,7 @@ def fit_tabpfn(X_train, Y_train, device="cuda:0"):
         model: Fitted TabPFNRegressor
         y_train_t: log-transformed training targets (numpy, 1D)
     """
-    y_train_t = transform_y(Y_train, target="DMRD").squeeze().numpy()
+    y_train_t = transform_y(Y_train, target=target).squeeze().numpy()
     model = TabPFNRegressor(device=device)
     model.fit(X_train.numpy(), y_train_t)
     return model, y_train_t
@@ -126,13 +126,14 @@ def tabpfn_predict_with_variance(model, X, batch_size=10_000):
     return np.concatenate(all_means), np.concatenate(all_vars)
 
 
-def tabpfn_ensemble_predictions(X_train, Y_train, X_candidates, n_samples, device, logger):
+def tabpfn_ensemble_predictions(X_train, Y_train, X_candidates, n_samples, device, logger,
+                                target="DMRD"):
     """Generate T diverse prediction sets by varying TabPFN's random_state.
 
     Returns pred_mean, pred_var, and a (T, N, 1) predictions tensor
     suitable for select_entropy_batch_mc.
     """
-    y_train_t = transform_y(Y_train, target="DMRD").squeeze().numpy()
+    y_train_t = transform_y(Y_train, target=target).squeeze().numpy()
     X_cand_np = X_candidates.numpy()
     X_train_np = X_train.numpy()
 
@@ -213,7 +214,7 @@ def _tabpfn_eval_worker(gpu_id, X_train, Y_train, eval_sets, candidates,
     """
     device = f"cuda:{gpu_id}" if torch.cuda.is_available() else "cpu"
     t0 = time.time()
-    model, _ = fit_tabpfn(X_train, Y_train, device=device)
+    model, _ = fit_tabpfn(X_train, Y_train, device=device, target=target)
     fit_time = time.time() - t0
 
     result = {
@@ -317,7 +318,14 @@ def load_config_with_sweep(config_file, sweep_index=None):
               help="Gaussian proximity weighting width around target value (0 to disable, default: 0.1).")
 @click.option('--tolerance-sampling', default=1.0, type=float,
               help="Hard cut: keep only candidates within ±tolerance of threshold in transformed space (0 to disable, default: 1.0).")
-@click.option('--target-value', default=0.12, type=float,
+@click.option('--target', 'target', default='DMRD',
+              type=click.Choice(sorted(TARGET_CONFIG)),
+              help="Observable the surrogate learns and the AL loop targets "
+                   "(default: DMRD). See active_learning.py for details.")
+@click.option('--no-mcmc-eval', is_flag=True, default=False,
+              help="Ignore --mcmc-data-dir and run without an MCMC reference "
+                   "set, for targets that have no posterior reference.")
+@click.option('--target-value', default=None, type=float,
               help="Target relic density value for proximity weighting (default: 0.12).")
 @click.option('--config-file', default=None, type=str,
               help="YAML config file (overrides CLI args). Supports parameter sweeps.")
@@ -343,7 +351,7 @@ def load_config_with_sweep(config_file, sweep_index=None):
                    "--gpu-id is kept as an alias for backward compatibility.")
 @click.option('--seed', default=42, type=int,
               help="Master random seed propagated to torch / numpy / candidate pool (default: 42).")
-def main(testing, n_iterations, n_candidates, n_select, n_ensemble_samples, n_datasets, n_samples, val_fraction, output_dir, generate_data, min_gen_fraction, max_gen_attempts, gen_workers, selection_strategy, entropy_blur, entropy_beta, entropy_pool_size, candidate_generation, proximity_sampling, tolerance_sampling, target_value, config_file, sweep_index, mcmc_data_dir, mcmc_max_samples, static_eval_size, data_dir, resume_from, n_additional_iterations, gpu_id, seed):
+def main(testing, n_iterations, n_candidates, n_select, n_ensemble_samples, n_datasets, n_samples, val_fraction, output_dir, generate_data, min_gen_fraction, max_gen_attempts, gen_workers, selection_strategy, entropy_blur, entropy_beta, entropy_pool_size, candidate_generation, proximity_sampling, tolerance_sampling, target, target_value, no_mcmc_eval, config_file, sweep_index, mcmc_data_dir, mcmc_max_samples, static_eval_size, data_dir, resume_from, n_additional_iterations, gpu_id, seed):
     """
     Active learning pipeline for pMSSM relic density prediction using TabPFN.
 
@@ -365,6 +373,7 @@ def main(testing, n_iterations, n_candidates, n_select, n_ensemble_samples, n_da
             'entropy_pool_size': 'entropy_pool_size',
             'candidate_generation': 'candidate_generation',
             'proximity_sampling': 'proximity_sampling',
+            'target': 'target',
             'target_value': 'target_value',
         }
 
@@ -387,7 +396,17 @@ def main(testing, n_iterations, n_candidates, n_select, n_ensemble_samples, n_da
         entropy_pool_size = locals().get('entropy_pool_size', entropy_pool_size)
         candidate_generation = locals().get('candidate_generation', candidate_generation)
         proximity_sampling = locals().get('proximity_sampling', proximity_sampling)
+        target = locals().get('target', target)
         target_value = locals().get('target_value', target_value)
+
+    # ---- Resolve the target's physical value ---------------------------------
+    # After the config-file block, before the banner and any resume check.
+    # TabPFN is log-transform-only, so there is no zscore branch to guard.
+    if target_value is None:
+        target_value = float(TARGET_CONFIG[target]["true_value"])
+
+    if no_mcmc_eval and mcmc_data_dir is not None:
+        mcmc_data_dir = None
 
     # Propagate master seed to torch / numpy / python-random
     torch.manual_seed(seed)
@@ -448,6 +467,7 @@ def main(testing, n_iterations, n_candidates, n_select, n_ensemble_samples, n_da
         logger.info(f"  entropy_pool_size: {entropy_pool_size}")
     logger.info(f"  candidate_generation: {candidate_generation}")
     logger.info(f"  proximity_sampling: {proximity_sampling}")
+    logger.info(f"  target: {target}")
     logger.info(f"  target_value: {target_value}")
     logger.info(f"  generate_data: {generate_data}")
     if generate_data:
@@ -486,7 +506,7 @@ def main(testing, n_iterations, n_candidates, n_select, n_ensemble_samples, n_da
     plots_dir.mkdir(parents=True, exist_ok=True)
     X, Y, F = load_pmssm_data(n_datasets=n_datasets, logger=logger,
                               plot_dir=str(plots_dir), data_dir=data_dir,
-                              return_lsp_fracs=True)
+                              target=target, return_lsp_fracs=True)
 
     # Shuffle once up-front: loaders concatenate ROOT files (= MCMC chains)
     # in file order, so X[:n_samples] would otherwise draw from a single chain.
@@ -500,6 +520,7 @@ def main(testing, n_iterations, n_candidates, n_select, n_ensemble_samples, n_da
     X_mcmc, Y_mcmc, F_mcmc = None, None, None
     if mcmc_data_dir is not None:
         X_mcmc, Y_mcmc, F_mcmc = load_mcmc_data(data_dir=mcmc_data_dir, logger=logger,
+                                                target=target,
                                                 return_lsp_fracs=True,
                                                 max_samples=mcmc_max_samples or None)
         logger.info(f"MCMC evaluation dataset: {len(X_mcmc)} samples from {mcmc_data_dir}")
@@ -520,7 +541,7 @@ def main(testing, n_iterations, n_candidates, n_select, n_ensemble_samples, n_da
     else:
         _repr_pool_X, _repr_pool_Y, _repr_pool_F = X_full, Y_full, F_full
         _repr_pool_source = "X_full"
-    _target_value = TARGET_CONFIG["DMRD"]["true_value"]
+    _target_value = target_value
     repr_points = pick_representative_points(
         _repr_pool_X, _repr_pool_Y, _repr_pool_F, _target_value, seed=seed
     )
@@ -649,6 +670,16 @@ def main(testing, n_iterations, n_candidates, n_select, n_ensemble_samples, n_da
         if saved is None:
             raise click.UsageError(f"No state.pt found in {resume_from}")
         logger.info(f"Resuming from {resume_from} (last completed iteration: {saved['iteration']})")
+        # A resume that changes the target would append labels of one observable
+        # to a dataset of another. state.pt written before --target was persisted
+        # has no key, so treat that as the historical DMRD default.
+        _saved_target = saved.get("target", "DMRD")
+        if _saved_target != target:
+            raise click.UsageError(
+                f"Refusing to resume: this run was trained on target "
+                f"{_saved_target!r} but --target is {target!r}. Pass "
+                f"--target {_saved_target} to continue it."
+            )
         X, Y = saved["X"], saved["Y"]
         X_val, Y_val = saved["X_val"], saved["Y_val"]
         F = saved.get("F", torch.full((len(X), 3), float('nan')))
@@ -805,7 +836,7 @@ def main(testing, n_iterations, n_candidates, n_select, n_ensemble_samples, n_da
         candidates = generate_candidate_pool(n_candidates, method=candidate_generation, seed=seed * 10_000 + iteration)
 
         if proximity_sampling > 0 or tolerance_sampling > 0:
-            threshold_transformed = transform_y(torch.tensor([target_value]), target="DMRD").item()
+            threshold_transformed = transform_y(torch.tensor([target_value]), target=target).item()
         else:
             threshold_transformed = 0.0
 
@@ -840,25 +871,25 @@ def main(testing, n_iterations, n_candidates, n_select, n_ensemble_samples, n_da
             with ThreadPoolExecutor(max_workers=2) as ex:
                 al_fut = ex.submit(
                     _tabpfn_eval_worker,
-                    AL_GPU_ID, X, Y, al_eval_sets, al_candidates, 'DMRD', 'AL',
+                    AL_GPU_ID, X, Y, al_eval_sets, al_candidates, target, 'AL',
                     repr_X=repr_points['X'],
                 )
                 base_fut = ex.submit(
                     _tabpfn_eval_worker,
                     BASELINE_GPU_ID, X_baseline_train, Y_baseline_train, base_eval_sets,
-                    candidates, 'DMRD', 'Baseline',
+                    candidates, target, 'Baseline',
                 )
                 al_res = al_fut.result()
                 base_res = base_fut.result()
         else:
             logger.info(f"Fitting+evaluating TabPFN AL then Baseline sequentially on {device}...")
             al_res = _tabpfn_eval_worker(
-                AL_GPU_ID, X, Y, al_eval_sets, al_candidates, 'DMRD', 'AL',
+                AL_GPU_ID, X, Y, al_eval_sets, al_candidates, target, 'AL',
                 repr_X=repr_points['X'],
             )
             base_res = _tabpfn_eval_worker(
                 BASELINE_GPU_ID, X_baseline_train, Y_baseline_train, base_eval_sets,
-                candidates, 'DMRD', 'Baseline',
+                candidates, target, 'Baseline',
             )
 
         # Representative-points capture from this iteration's AL fit.
@@ -1013,7 +1044,8 @@ def main(testing, n_iterations, n_candidates, n_select, n_ensemble_samples, n_da
         # candidate predictions — no re-fit, no extra inference in main.
         if selection_strategy == 'entropy_batch':
             pred_mean, pred_var, predictions = tabpfn_ensemble_predictions(
-                X, Y, candidates, n_ensemble_samples, device, logger
+                X, Y, candidates, n_ensemble_samples, device, logger,
+                target=target
             )
             top_indices = select_entropy_batch_mc(
                 candidates, predictions, pred_mean, pred_var,
@@ -1105,7 +1137,8 @@ def main(testing, n_iterations, n_candidates, n_select, n_ensemble_samples, n_da
 
                     if selection_strategy == 'entropy_batch':
                         attempt_mean, attempt_pred_var, attempt_preds = tabpfn_ensemble_predictions(
-                            X, Y, attempt_candidates, n_ensemble_samples, device, logger
+                            X, Y, attempt_candidates, n_ensemble_samples, device, logger,
+                            target=target
                         )
                         attempt_indices = select_entropy_batch_mc(
                             attempt_candidates, attempt_preds, attempt_mean, attempt_pred_var,
@@ -1151,11 +1184,11 @@ def main(testing, n_iterations, n_candidates, n_select, n_ensemble_samples, n_da
                     df.to_csv(attempt_csv, index=False)
 
                 logger.info(f"Generation attempt {attempt + 1}/{max_gen_attempts} ({len(attempt_indices)} points)...")
-                ntuple_paths = generate_models_from_csv(attempt_csv, attempt_dir, logger, n_workers=gen_workers)
+                ntuple_paths = generate_models_from_csv(attempt_csv, attempt_dir, logger, n_workers=gen_workers, target=target)
 
                 for ntuple_path in ntuple_paths:
                     batch_X, batch_Y, batch_F = load_generated_data(
-                        ntuple_path, logger, return_lsp_fracs=True)
+                        ntuple_path, logger, return_lsp_fracs=True, target=target)
                     if batch_X is not None and len(batch_X) > 0:
                         collected_X.append(batch_X)
                         collected_Y.append(batch_Y)
@@ -1236,6 +1269,7 @@ def main(testing, n_iterations, n_candidates, n_select, n_ensemble_samples, n_da
         # ---- Checkpoint run state for resume -------------------------------
         from pmssm.resume import save_state, capture_rng
         save_state(output_dir, {
+            "target": target,
             "iteration": iteration,
             "X": X, "Y": Y, "X_val": X_val, "Y_val": Y_val,
             "F": F, "F_val": F_val,
@@ -1313,7 +1347,7 @@ def main(testing, n_iterations, n_candidates, n_select, n_ensemble_samples, n_da
         try:
             _rep_out, _rep_csv = plot_representative_trajectories(
                 repr_log, repr_points['Y'], repr_points['cls'], repr_points['labels'],
-                _target_value, output_dir, y_transform='log', target='DMRD',
+                _target_value, output_dir, y_transform='log', target=target,
             )
             logger.info(f"Representative-points trajectory: {_rep_out}")
             logger.info(f"Representative-points CSV: {_rep_csv}")
@@ -1324,6 +1358,8 @@ def main(testing, n_iterations, n_candidates, n_select, n_ensemble_samples, n_da
     summary = {
         "timestamp": timestamp,
         "config": {
+            "target": target,
+            "target_value": target_value,
             "model": "TabPFN",
             "n_iterations": n_iterations,
             "n_candidates": n_candidates,

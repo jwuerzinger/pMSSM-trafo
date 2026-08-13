@@ -73,9 +73,39 @@ _N_SELECT_DEFAULT = 500
 # initial 2000 valid samples are a free pass that biases iter-1 hits/desired
 # upward by ~1/p_valid and only fully dilutes by iter ~40.
 _DESIRED_P_VALID: float | None = None
+# Physical-target glyph for axis labels and the in-band panel tag. Set from
+# --target in main() so figures name the observable they actually show; the
+# default keeps the relic density's wording for every existing call path.
+_TARGET_LABEL: str = "Ωh²"
+# Short form used inside the |x - v| / v band tag, where the h² reads as clutter.
+_TARGET_LABEL_MATH: str = "Ω"
 
 
-MODEL_COLORS = {
+# Manifest model names carry an OUTPUT_TAG suffix for variant sweeps
+# ("transformer_oracle", "transformer_expr", ...). Rather than enumerating every
+# tag in every lookup table, these dicts fall back to the bare model name, so a
+# new tag renders in the parent's colour and label instead of silently going
+# gray with a raw key as its legend entry. Tags that DO deserve their own colour
+# (oracle, laplace) still list explicit entries below and take precedence.
+_MODEL_TAG_SUFFIXES = ("_expr",)
+
+
+class _TagFallbackDict(dict):
+    """dict whose .get() retries after stripping a known variant tag suffix."""
+
+    def get(self, key, default=None):
+        if key in self:
+            return dict.get(self, key)
+        if isinstance(key, str):
+            for suffix in _MODEL_TAG_SUFFIXES:
+                if key.endswith(suffix):
+                    base = key[: -len(suffix)]
+                    if base in self:
+                        return dict.get(self, base)
+        return default
+
+
+MODEL_COLORS = _TagFallbackDict({
     "transformer": "tab:blue",
     "exact_gp":    "tab:orange",
     "deep_gp":     "tab:green",
@@ -92,7 +122,7 @@ MODEL_COLORS = {
     "transformer_laplace":     "navy",
     "dnn_laplace":             "indigo",
     "dnn_match_trafo_laplace": "mediumvioletred",
-}
+})
 # Linestyle override for *_oracle model rows (dotted, regardless of warm/cold).
 ORACLE_LS = ":"
 # Laplace-acquisition variants reuse their parent model's colour so a per-model
@@ -101,7 +131,7 @@ ORACLE_LS = ":"
 LAPLACE_LS = (0, (3, 1, 1, 1))     # dash-dot-dot: distinct from "-" and "--"
 LAPLACE_MARKER = "^"               # distinct from WARM_MARKER's o/s/x
 # Friendly display labels used in legends.
-MODEL_DISPLAY = {
+MODEL_DISPLAY = _TagFallbackDict({
     "transformer":         "Transformer",
     "exact_gp":            "Exact GP",
     "deep_gp":             "Deep GP",
@@ -113,7 +143,7 @@ MODEL_DISPLAY = {
     "transformer_laplace":     "Transformer (Laplace)",
     "dnn_laplace":             "DNN (Laplace)",
     "dnn_match_trafo_laplace": "DNN matched (Laplace)",
-}
+})
 STRATEGY_COLORS = {
     "top_k":          "tab:blue",
     "top_k_tol_only": "tab:orange",
@@ -295,7 +325,7 @@ def _load_y_full(data_dir: str, target: str, cache_dir: Path) -> np.ndarray:
     return Y
 
 
-def _load_pool_neutralino_mask(data_dir: str, cache_dir: Path,
+def _load_pool_neutralino_mask(data_dir: str, cache_dir: Path, target: str = "DMRD",
                                n_expected: int | None = None) -> np.ndarray | None:
     """Boolean mask over the unfiltered pool: is the LSP a neutralino?
 
@@ -316,7 +346,7 @@ def _load_pool_neutralino_mask(data_dir: str, cache_dir: Path,
     the cached pool, so callers can fall back rather than mis-align a mask.
     """
     safe = data_dir.replace("/", "_").strip("_")
-    cache = cache_dir / f"lspneut_full_{safe}.npy"
+    cache = cache_dir / f"lspneut_full_{safe}_{target}.npy"
     if cache.exists():
         m = np.load(cache)
         if n_expected is None or len(m) == n_expected:
@@ -333,14 +363,14 @@ def _load_pool_neutralino_mask(data_dir: str, cache_dir: Path,
         # here is what aligns the two: without it the mask spans every attempted
         # row (3.0e6) against the pool's valid ones (1.34e6) and the length guard
         # below rejects it, which is how this silently did nothing until now.
-        from pmssm.data import TARGET_CONFIG  # noqa: PLC0415
-        tb = TARGET_CONFIG["DMRD"]["branch"]
+        from pmssm.data import TARGET_CONFIG, target_validity_mask  # noqa: PLC0415
+        tb = TARGET_CONFIG[target]["branch"]
         parts = []
         for f in files:
             t = uproot.open(f)["susy"]
             y = t[tb].array(library="np")
             mh = t["SP_m_h"].array(library="np")
-            valid = (y > 0) & (y < 1.0) & (mh != -1)
+            valid, _ = target_validity_mask(y, mh, target=target)
             neut = np.isin(t["SP_LSP_type"].array(library="np"), (1, 2, 3))
             parts.append(neut[valid])
         m = np.concatenate(parts)
@@ -966,7 +996,10 @@ def _classification_accuracy_trajectory(run, run_dir: str, seed: int,
     # manifest entries so they plot as their own curves, but on disk they are
     # ordinary per-model checkpoints, so the dispatch must see the bare name.
     # Without this the accuracy pass cannot build a model for them at all.
-    for _suffix in ("_oracle", "_laplace"):
+    # _expr: the second target axis is submitted with OUTPUT_TAG=expr, and its
+    # checkpoints are ordinary per-model files, so the dispatch needs the bare
+    # name here too.
+    for _suffix in ("_oracle", "_laplace", "_expr"):
         if model_type.endswith(_suffix):
             model_type = model_type[: -len(_suffix)]
             break
@@ -1263,7 +1296,7 @@ def plot_classification_accuracy_oracle_comparison(traj_acc: dict, picks,
     for ds in ACC_DATASETS:
         fig, ax = plt.subplots(1, 1, figsize=(7.5, 5))
         ax.set_xlabel("Iteration")
-        ax.set_ylabel("Accuracy (Ωh² ≷ 0.12)")
+        ax.set_ylabel(f"Accuracy ({_TARGET_LABEL} ≷ {true_val:g})")
         ax.grid(alpha=0.3)
 
         any_data = False
@@ -1389,7 +1422,7 @@ def plot_classification_accuracy_best_per_model(traj_acc: dict, picks, out_dir: 
     for ds in ACC_DATASETS:
         fig, ax = plt.subplots(1, 1, figsize=(7.5, 5))
         ax.set_xlabel("Iteration")
-        ax.set_ylabel("Accuracy (Ωh² ≷ 0.12)")
+        ax.set_ylabel(f"Accuracy ({_TARGET_LABEL} ≷ {true_val:g})")
         ax.grid(alpha=0.3)
 
         any_data = False
@@ -1660,7 +1693,8 @@ def _setup_axes(axes, tols, true_val, title_word, ylabel):
     for ax, tol in zip(axes, tols):
         # Tolerance tag replaces the old per-panel title (paper figures carry
         # captions; only the panel-identifying tolerance stays, inside the axes).
-        ax.text(0.02, 0.98, f"|Ω − {true_val}| / {true_val} < {int(tol*100)}%",
+        ax.text(0.02, 0.98,
+                f"|{_TARGET_LABEL_MATH} − {true_val:g}| / {true_val:g} < {int(tol*100)}%",
                 transform=ax.transAxes, ha="left", va="top", fontsize=12,
                 bbox=dict(boxstyle="round,pad=0.25", fc="white", ec="0.8", alpha=0.8))
         ax.set_xlabel("Iteration", fontsize=14)
@@ -2310,6 +2344,13 @@ def main(manifest, sweep_id, output_dir, uncertainty, target, tolerances,
     tols = [float(t) for t in tolerances.split(",")]
     true_val = TARGET_CONFIG[target]["true_value"]
 
+    # Name the observable the figures actually show. Defaults keep the relic
+    # density's wording, so DMRD output is unchanged.
+    global _TARGET_LABEL, _TARGET_LABEL_MATH
+    if target != "DMRD":
+        _TARGET_LABEL = TARGET_CONFIG[target].get("label") or target
+        _TARGET_LABEL_MATH = _TARGET_LABEL
+
     out_dir = Path(output_dir)
 
     Y_full = None
@@ -2329,6 +2370,7 @@ def main(manifest, sweep_id, output_dir, uncertainty, target, tolerances,
             veto_stats = None
             if baseline_require_neutralino_lsp:
                 m = _load_pool_neutralino_mask(baseline_data_dir, out_dir,
+                                               target=target,
                                                n_expected=len(Y_full))
                 if m is not None:
                     n_before = len(Y_full)

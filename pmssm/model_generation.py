@@ -7,6 +7,9 @@ This module provides functions to:
 - Save selected candidate points to CSV
 """
 
+import glob
+import os
+import signal
 import subprocess
 import shutil
 import numpy as np
@@ -16,18 +19,73 @@ import yaml
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 
-from .config import PARAM_ORDER, CSV_TO_MODELGEN
+from .config import PARAM_ORDER, CSV_TO_MODELGEN, MODELGEN_STEP_DEFS, TARGET_CONFIG
 
 
-def _run_modelgen(df, output_dir, logger, label=""):
+# Default cache holding the SModelS results database. Run3ModelGen's
+# build/setup.sh points SMODELS_CACHEDIR at the repo checkout when /eos is not
+# mounted, and that directory has no database, so SModelS would try to download
+# one — which cannot work on a compute node with no internet. setup.sh honours a
+# pre-set value, so exporting this into the subprocess is the fix.
+DEFAULT_SMODELS_CACHEDIR = "/ptmp/jwuerzin/cache/smodels"
+
+# Per-worker subprocess wall-clock budget, seconds. SModelS has no internal
+# timeout (neither run_SModelS nor the pythia8 wrapper takes one), so a
+# pathological point can wedge a worker indefinitely; since
+# generate_models_from_csv waits for every worker, one hang stalls the whole
+# iteration. Losing a single worker's chunk is already handled by the caller.
+#
+# The SModelS budget scales with the chunk, because that step is ~6.8 s/model
+# (measured: 20 models through the ExpR step list took 167 s wall including
+# ~30 s of pixi/snakemake startup). At the production 500 points / 20 workers
+# that is 25 models/worker, so the floor below leaves roughly 5x headroom for
+# CPU contention while still bounding a hang.
+DEFAULT_MODELGEN_TIMEOUT = 3600
+SMODELS_TIMEOUT_FLOOR = 900
+SMODELS_TIMEOUT_PER_MODEL = 60
+
+
+def _smodels_cachedir():
+    """Resolve the SModelS cache dir, preferring an explicit environment value."""
+    return os.environ.get("SMODELS_CACHEDIR") or DEFAULT_SMODELS_CACHEDIR
+
+
+def _check_smodels_database(cachedir, logger, prefix=""):
+    """True when `cachedir` holds a usable offline SModelS results database.
+
+    SModelS needs BOTH the pickled database and its descriptor file: given only
+    the pickle it still tries to reach the server and raises. Checking here turns
+    one clear message into the failure mode instead of an identical stack trace
+    from all 20 workers.
+    """
+    pcl = glob.glob(os.path.join(cachedir, "*.pcl"))
+    desc = glob.glob(os.path.join(cachedir, "https___*database_*"))
+    if pcl and desc:
+        return True
+    logger.error(
+        f"{prefix}SModelS results database not cached in {cachedir}: "
+        f"found {len(pcl)} *.pcl and {len(desc)} descriptor file(s), need both. "
+        f"Compute nodes have no internet, so SModelS cannot download it. "
+        f"Export SMODELS_CACHEDIR to a directory holding official<ver>.pcl and "
+        f"its https___..._database_<ver> descriptor."
+    )
+    return False
+
+
+def _run_modelgen(df, output_dir, logger, label="", target="DMRD"):
     """
     Run genModels.py for a DataFrame of candidates in output_dir.
+
+    The pipeline steps come from the target's registry entry, so a target whose
+    label needs an extra tool (e.g. SModelS for the exclusion r-value) gets it
+    without changing this function.
 
     Args:
         df: DataFrame with parameter columns
         output_dir: Directory to save generated models
         logger: Logger instance
         label: Optional label for logging (e.g., "worker 0")
+        target: Target name; selects the Run3ModelGen step list
 
     Returns:
         Path to the generated ROOT ntuple, or None on failure
@@ -38,17 +96,21 @@ def _run_modelgen(df, output_dir, logger, label=""):
     prefix = f"[{label}] " if label else ""
     n_models = len(df)
 
+    step_names = TARGET_CONFIG[target]["gen_steps"]
+    needs_smodels = "SModelS" in step_names
+
+    # Fail before spawning anything if the offline database is missing.
+    smodels_cachedir = _smodels_cachedir()
+    if needs_smodels and not _check_smodels_database(smodels_cachedir, logger, prefix):
+        return None
+
     # Build Run3ModelGen config
     config = {
         "prior": "fixed",
         "num_models": n_models,
         "isGMSB": False,
         "parameters": {},
-        "steps": [
-            {"name": "prep_input", "output_dir": "input", "prefix": "IN"},
-            {"name": "SPheno", "input_dir": "input", "output_dir": "SPheno", "log_dir": "SPheno_log", "prefix": "SP"},
-            {"name": "micromegas", "input_dir": "SPheno", "output_dir": "micromegas", "prefix": "MO"},
-        ],
+        "steps": [dict(MODELGEN_STEP_DEFS[s]) for s in step_names],
     }
 
     for csv_col, modelgen_param in CSV_TO_MODELGEN.items():
@@ -85,28 +147,57 @@ def _run_modelgen(df, output_dir, logger, label=""):
     # Use relative paths to avoid exceeding SPheno's Fortran CHARACTER buffer
     # limit (~120 chars). Absolute paths for retry directories can exceed this.
     cmd = f"source {setup_script} && cd {output_dir} && genModels.py --config_file modelgen_config.yaml --scan_dir scan"
-    logger.info(f"{prefix}Starting model generation ({n_models} models) in {scan_dir}...")
+    logger.info(f"{prefix}Starting model generation ({n_models} models, steps: "
+                f"{', '.join(step_names)}) in {scan_dir}...")
+
+    # Pass SMODELS_CACHEDIR explicitly rather than relying on the launcher's
+    # environment, so a run is correct however it was started. setup.sh only sets
+    # its own (wrong, for this cluster) default when the variable is unset.
+    env = dict(os.environ)
+    if needs_smodels:
+        env["SMODELS_CACHEDIR"] = smodels_cachedir
+
+    if needs_smodels:
+        timeout_default = max(SMODELS_TIMEOUT_FLOOR,
+                              SMODELS_TIMEOUT_PER_MODEL * n_models)
+    else:
+        timeout_default = DEFAULT_MODELGEN_TIMEOUT
+    timeout_s = int(os.environ.get("AL_MODELGEN_TIMEOUT") or timeout_default)
+    logger.info(f"{prefix}Generation timeout: {timeout_s}s for {n_models} models")
 
     try:
-        result = subprocess.run(
+        # start_new_session puts the child in its own process group so a timeout
+        # can kill the whole tree. Without it, only `pixi` is signalled and
+        # bash / snakemake / pythia8 survive as orphans holding CPU.
+        proc = subprocess.Popen(
             [pixi_path, "run", "bash", "-c", cmd],
             cwd=str(run3modelgen_dir),
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=3600,
+            env=env,
+            start_new_session=True,
         )
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout_s)
+        except subprocess.TimeoutExpired:
+            logger.error(f"{prefix}Model generation timed out after {timeout_s}s; "
+                         f"killing the process group")
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError) as kill_err:
+                logger.warning(f"{prefix}Could not kill process group: {kill_err}")
+            proc.wait()
+            return None
 
-        if result.returncode != 0:
-            logger.error(f"{prefix}genModels.py failed with return code {result.returncode}")
-            logger.error(f"{prefix}stderr: {result.stderr[-500:]}")
+        if proc.returncode != 0:
+            logger.error(f"{prefix}genModels.py failed with return code {proc.returncode}")
+            logger.error(f"{prefix}stderr: {stderr[-500:]}")
             return None
 
         logger.info(f"{prefix}Model generation complete")
-        logger.info(result.stdout[-2000:] if len(result.stdout) > 2000 else result.stdout)
+        logger.info(stdout[-2000:] if len(stdout) > 2000 else stdout)
 
-    except subprocess.TimeoutExpired:
-        logger.error(f"{prefix}Model generation timed out after 1 hour")
-        return None
     except Exception as e:
         logger.error(f"{prefix}Model generation failed: {e}")
         import traceback
@@ -122,7 +213,8 @@ def _run_modelgen(df, output_dir, logger, label=""):
         return None
 
 
-def generate_models_from_csv(csv_path, output_dir, logger, n_workers=1):
+def generate_models_from_csv(csv_path, output_dir, logger, n_workers=1,
+                             target="DMRD"):
     """
     Generate pMSSM models using Run3ModelGen from selected points CSV.
 
@@ -134,6 +226,7 @@ def generate_models_from_csv(csv_path, output_dir, logger, n_workers=1):
         output_dir: Directory to save generated models (iteration_XXX)
         logger: Logger instance
         n_workers: Number of parallel genModels.py processes (default: 1)
+        target: Target name; selects the Run3ModelGen step list
 
     Returns:
         List of Paths to generated ROOT ntuples (empty list on total failure)
@@ -144,7 +237,7 @@ def generate_models_from_csv(csv_path, output_dir, logger, n_workers=1):
     output_dir = Path(output_dir).resolve()
 
     if n_workers <= 1:
-        ntuple = _run_modelgen(df, output_dir, logger)
+        ntuple = _run_modelgen(df, output_dir, logger, target=target)
         return [ntuple] if ntuple is not None else []
 
     # Split candidates evenly across workers
@@ -158,7 +251,8 @@ def generate_models_from_csv(csv_path, output_dir, logger, n_workers=1):
     def run_worker(args):
         i, chunk = args
         worker_dir = output_dir / f"worker_{i:02d}"
-        return _run_modelgen(chunk, worker_dir, logger, label=f"worker {i}")
+        return _run_modelgen(chunk, worker_dir, logger, label=f"worker {i}",
+                             target=target)
 
     with ThreadPoolExecutor(max_workers=n_actual) as executor:
         results = list(executor.map(run_worker, enumerate(chunks)))
@@ -171,7 +265,8 @@ def generate_models_from_csv(csv_path, output_dir, logger, n_workers=1):
     return ntuple_paths
 
 
-def load_generated_data(ntuple_path, logger, return_lsp_fracs=False):
+def load_generated_data(ntuple_path, logger, return_lsp_fracs=False,
+                        target="DMRD"):
     """
     Load newly generated data from ROOT ntuple.
 
@@ -181,37 +276,51 @@ def load_generated_data(ntuple_path, logger, return_lsp_fracs=False):
         return_lsp_fracs: If True, also return (N, 3) tensor of neutralino
             [bino, wino, higgsino] fractions; NaN rows when LSP is not a
             neutralino or fraction branches are missing.
+        target: Target name; selects the target branch, the validity mask and
+            whether the neutralino-LSP veto applies.
 
     Returns:
         (X, Y) tensors — or (X, Y, lsp_fracs) when return_lsp_fracs=True.
         Returns (None, None[, None]) if loading failed.
     """
     import uproot
+    from .data import target_validity_mask
 
     def _none_return():
         return (None, None, None) if return_lsp_fracs else (None, None)
+
+    target_branch = TARGET_CONFIG[target]["branch"]
 
     try:
         root_file = uproot.open(str(ntuple_path))
         # Run3ModelGen uses 'susy' as tree name
         tree = root_file["susy"]
 
-        # Check if required branches exist (SPheno or micromegas may have failed for all models)
-        for required in ("MO_Omega", "SP_m_h"):
-            if required not in tree.keys():
-                logger.warning(f"{required} not found in ntuple - SPheno or micromegas may have failed for all models")
-                logger.warning("No new training data available from this generation")
-                return _none_return()
+        # The ntupler only creates a branch when at least one model in the batch
+        # produced it, so an absent target branch means "no model in this chunk
+        # got a value" rather than a bug. That is expected occasionally (e.g.
+        # SModelS finds no applicable analysis for any of them); an absent
+        # SP_m_h means SPheno itself produced nothing usable.
+        if "SP_m_h" not in tree.keys():
+            logger.warning("SP_m_h not found in ntuple - SPheno may have failed "
+                           "for all models")
+            logger.warning("No new training data available from this generation")
+            return _none_return()
+        if target_branch not in tree.keys():
+            logger.info(f"{target_branch} absent from ntuple: no model in this "
+                        f"batch produced a value for target '{target}'")
+            return _none_return()
 
         # Extract input parameters (same order as PARAM_ORDER)
         branches = PARAM_ORDER
 
         X = np.column_stack([tree[b].array(library="np") for b in branches])
-        Y = tree["MO_Omega"].array(library="np")
+        Y = tree[target_branch].array(library="np")
         sp_mh = tree["SP_m_h"].array(library="np")
 
-        # Base filter: valid relic density, sub-dominant DM, valid Higgs mass.
-        mask = (Y > 0) & (Y < 1.0) & (sp_mh != -1)
+        # Base filter: usable target value and a valid Higgs mass. The
+        # sub-dominant-DM upper cut applies only to targets that define one.
+        mask, mask_desc = target_validity_mask(Y, sp_mh, target=target)
 
         # Additional filter: require a neutralino LSP (bino/wino/higgsino;
         # SP_LSP_type in {1, 2, 3} per Run3ModelGen's ntupling convention;
@@ -220,25 +329,33 @@ def load_generated_data(ntuple_path, logger, return_lsp_fracs=False):
         # excluded LSP candidates before they enter the AL training set.
         # If the branch is missing we fall back to the base filter and warn
         # once so this remains a soft addition rather than a hard dependency.
-        if "SP_LSP_type" in tree.keys():
-            lsp_type = tree["SP_LSP_type"].array(library="np")
-            neutralino = (lsp_type == 1) | (lsp_type == 2) | (lsp_type == 3)
-            n_before_lsp = int(mask.sum())
-            mask = mask & neutralino
-            n_dropped = n_before_lsp - int(mask.sum())
-            if n_dropped:
-                logger.info(f"Neutralino-LSP filter dropped {n_dropped} non-neutralino points "
-                            f"(sneutrino or other) from {n_before_lsp} otherwise-valid models")
-        else:
-            logger.warning("SP_LSP_type branch missing from ntuple; neutralino-LSP filter "
-                           "skipped (falling back to base filter only)")
+        #
+        # Whether it applies is a per-target choice: a dark matter observable
+        # needs a neutralino LSP to be meaningful, whereas a collider-exclusion
+        # r-value does not care what the LSP is. NOTE this key governs newly
+        # generated data only — pool ingest (load_pmssm_data) has never applied
+        # the veto by default, and coupling the two would shrink the relic
+        # density's training pool and move every published Omega number.
+        if TARGET_CONFIG[target].get("gen_require_neutralino_lsp", True):
+            if "SP_LSP_type" in tree.keys():
+                lsp_type = tree["SP_LSP_type"].array(library="np")
+                neutralino = (lsp_type == 1) | (lsp_type == 2) | (lsp_type == 3)
+                n_before_lsp = int(mask.sum())
+                mask = mask & neutralino
+                n_dropped = n_before_lsp - int(mask.sum())
+                if n_dropped:
+                    logger.info(f"Neutralino-LSP filter dropped {n_dropped} non-neutralino points "
+                                f"(sneutrino or other) from {n_before_lsp} otherwise-valid models")
+                mask_desc += " & SP_LSP_type in {1,2,3}"
+            else:
+                logger.warning("SP_LSP_type branch missing from ntuple; neutralino-LSP filter "
+                               "skipped (falling back to base filter only)")
 
         X_t = torch.from_numpy(X[mask]).float()
         Y_t = torch.from_numpy(Y[mask]).float().unsqueeze(1)
 
         if len(X_t) == 0:
-            logger.warning("No valid models found after filtering "
-                           "(MO_Omega > 0 & < 1 & SP_m_h != -1 & SP_LSP_type in {1,2,3})")
+            logger.warning(f"No valid models found after filtering ({mask_desc})")
             return _none_return()
 
         logger.info(f"Loaded {len(X_t)} valid models from ntuple (filtered from {len(mask)} total)")

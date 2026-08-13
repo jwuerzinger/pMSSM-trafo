@@ -59,13 +59,42 @@ def _load_lsp_fracs(trees, mask, logger=None):
     return torch.from_numpy(fracs).float()
 
 
+def target_validity_mask(Y, sp_mh, target="DMRD"):
+    """Rows whose target value is usable, per the target's registry entry.
+
+    ``Y > 0`` drops Run3ModelGen's ``-1.`` "not filled" sentinel, and
+    ``SP_m_h != -1`` drops spectra SPheno failed to compute. The exclusive upper
+    cut ``Y < valid_max`` is applied only for targets that define one: the relic
+    density caps at 1.0 (sub-dominant dark matter), whereas for an exclusion
+    r-value the ``> 1`` half is the region of interest and must be kept.
+
+    Returns (mask, description) where description is the human-readable filter
+    expression used in log messages.
+    """
+    valid_max = TARGET_CONFIG[target].get("valid_max")
+    branch = TARGET_CONFIG[target]["branch"]
+
+    mask = (Y > 0) & (sp_mh != -1)
+    if valid_max is not None:
+        mask = mask & (Y < valid_max)
+        # Spelled exactly as it has been logged since this filter was
+        # introduced: scripts/plot_hit_rate_trajectories_multiseed.py recovers
+        # p_valid from this line by regex, and a p_valid it cannot parse
+        # silently changes the hits/desired denominator.
+        desc = f"{branch} > 0 & < {valid_max:g} & SP_m_h != -1"
+    else:
+        desc = f"{branch} > 0 & SP_m_h != -1"
+    return mask, desc
+
+
 def load_pmssm_data(n_datasets=-1, logger=None, plot_dir="plots", target="DMRD",
                     data_dir="data/18387358", return_lsp_fracs=False,
                     require_neutralino_lsp=False):
     """
     Load pMSSM ROOT data with combined filter.
 
-    Applies ``(Y > 0) & (Y < 1.0) & (SP_m_h != -1)``:
+    Applies the target's validity mask (see :func:`target_validity_mask`); for
+    the default ``DMRD`` target that is ``(Y > 0) & (Y < 1.0) & (SP_m_h != -1)``:
     - ``Y > 0``: valid target value (positive, non-sentinel)
     - ``Y < 1.0``: sub-dominant dark matter candidates
     - ``SP_m_h != -1``: valid Higgs mass computation (SPheno did not fail)
@@ -117,10 +146,10 @@ def load_pmssm_data(n_datasets=-1, logger=None, plot_dir="plots", target="DMRD",
     sp_mh = np.concatenate([t["SP_m_h"].array(library="np") for t in trees])
 
     # Apply combined filter
-    mask = (Y_raw > 0) & (Y_raw < 1.0) & (sp_mh != -1)
+    mask, mask_desc = target_validity_mask(Y_raw, sp_mh, target=target)
     if logger:
         logger.info(
-            f"Filter ({target_branch} > 0 & < 1 & SP_m_h != -1): "
+            f"Filter ({mask_desc}): "
             f"{mask.sum()} / {len(Y_raw)} samples kept"
         )
 
@@ -139,8 +168,12 @@ def load_pmssm_data(n_datasets=-1, logger=None, plot_dir="plots", target="DMRD",
                 logger.info(f"Neutralino-LSP filter dropped {n_dropped} "
                             f"non-neutralino points ({n_before} → {int(mask.sum())})")
 
-    # Plot target distribution
-    plt.hist(Y_raw[mask], bins=20, range=[0.0, 1.0])
+    # Plot target distribution. Targets with an unbounded upper tail (e.g. the
+    # SModelS r-value, which reaches ~1e3) autoscale instead of clipping to
+    # [0, 1], which would hide the whole excluded region.
+    hist_range = TARGET_CONFIG[target].get("hist_range")
+    plt.hist(Y_raw[mask], bins=20,
+             range=list(hist_range) if hist_range is not None else None)
     if not running_in_notebook():
         plt.savefig(f"{plot_dir}/hist_dataset.png")
         plt.close()
@@ -183,6 +216,20 @@ def load_mcmc_data(data_dir="data/neutralino_v4", target="DMRD", logger=None,
         lsp_fracs: (N, 3) tensor (only if return_lsp_fracs=True)
     """
     import uproot
+
+    # This loader is relic-density-specific by construction: it drops whole
+    # files that do not straddle `true_value` and any file containing a value
+    # below the hardcoded omega_min, and it applies the sub-dominant-DM upper
+    # cut. Those are Omega-shaped priors, so refuse rather than silently apply
+    # them to another observable. Targets without a posterior reference are
+    # marked has_mcmc_reference=False in the registry.
+    if not TARGET_CONFIG[target].get("has_mcmc_reference", False):
+        raise ValueError(
+            f"load_mcmc_data is only valid for targets with an MCMC reference "
+            f"dataset; target={target!r} has none. Its file-level filters "
+            f"(straddle-{TARGET_CONFIG['DMRD']['true_value']}, omega_min) are "
+            f"relic-density-specific and would silently mis-filter this target."
+        )
 
     files = sorted(glob.glob(f"{data_dir}/*.root"))
     if logger:

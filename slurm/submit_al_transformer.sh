@@ -68,6 +68,11 @@ fi
 
 # Flush Python stdout immediately so logs are complete even if the job is killed
 export PYTHONUNBUFFERED=1
+# SModelS results database. Run3ModelGen's build/setup.sh otherwise points
+# SMODELS_CACHEDIR at the repo checkout (no /eos on this cluster), which holds no
+# database, and compute nodes cannot download one. setup.sh honours a pre-set
+# value. Only the r-value target's step list needs this; harmless otherwise.
+export SMODELS_CACHEDIR="${SMODELS_CACHEDIR:-/ptmp/jwuerzin/cache/smodels}"
 export PYTORCH_HIP_ALLOC_CONF=expandable_segments:True
 export PYTHONPATH="${REPO_ROOT}/al_pmssmwithgp/model:${PYTHONPATH:-}"
 
