@@ -107,12 +107,21 @@ def _ratio_with_err(v_lap, v_drop, bins):
 
 
 def plot_overlay_with_ratio(data, names, outpath, nbins=25, ncols=3,
-                            ratio_ylim=(0.5, 1.5), nbins_omega=20):
-    """One panel per quantity: density overlay above, Laplace/dropout ratio below.
+                            ratio_ylim=(0.5, 1.5), nbins_omega=20,
+                            pairs=None, colors=None, labels=None,
+                            ratio_label="Lap./drop."):
+    """One panel per quantity: density overlay above, B/A ratio below.
 
-    data: {model_key: (values (N, n_quantities))} containing both arms of each
-    pair in PAIRS. names: column labels, len == n_quantities.
+    data: {key: values (N, n_quantities)} containing both arms of every pair.
+    pairs: list of (A_key, B_key); defaults to the Laplace PAIRS above. The
+    ratio is always B over A, so the second element is the variant under test.
+    colors/labels: optional overrides keyed like data, for callers whose keys
+    are not model names (e.g. the budget probes, where both arms are the same
+    architecture and only the budget differs).
     """
+    pairs = PAIRS if pairs is None else pairs
+    colors = MODEL_COLORS if colors is None else colors
+    labels = MODEL_DISPLAY if labels is None else labels
     n = len(names)
     nrows = int(np.ceil(n / ncols))
     # constrained_layout with a nested 2-row subgridspec per quantity: a flat
@@ -121,7 +130,7 @@ def plot_overlay_with_ratio(data, names, outpath, nbins=25, ncols=3,
     fig = plt.figure(figsize=(4.9 * ncols, 3.6 * nrows), constrained_layout=True)
     outer = fig.add_gridspec(nrows, ncols)
 
-    present = [(a, b) for a, b in PAIRS if a in data and b in data]
+    present = [(a, b) for a, b in pairs if a in data and b in data]
 
     for j, name in enumerate(names):
         r, c = divmod(j, ncols)
@@ -155,10 +164,10 @@ def plot_overlay_with_ratio(data, names, outpath, nbins=25, ncols=3,
                 v = data[key][:, j]
                 v = v[np.isfinite(v)]
                 ax.hist(v, bins=bins, density=True, histtype="step", lw=1.6,
-                        color=MODEL_COLORS.get(key), linestyle=ls,
-                        label=MODEL_DISPLAY.get(key, key))
+                        color=colors.get(key), linestyle=ls,
+                        label=labels.get(key, key))
             ratio, err = _ratio_with_err(data[lap][:, j], data[base][:, j], bins)
-            col = MODEL_COLORS.get(lap)
+            col = colors.get(lap)
             axr.step(centres, ratio, where="mid", lw=1.4, color=col)
             axr.fill_between(centres, ratio - err, ratio + err, step="mid",
                              color=col, alpha=0.18, lw=0)
@@ -171,18 +180,18 @@ def plot_overlay_with_ratio(data, names, outpath, nbins=25, ncols=3,
         axr.set_xlabel(name)
         axr.grid(alpha=0.3)
         if c == 0:
-            axr.set_ylabel("Lap./drop.", fontsize=9)
+            axr.set_ylabel(ratio_label, fontsize=9)
 
     # Legend handles built to mirror the curves: colour identifies the cell,
     # linestyle identifies the uncertainty. A hardcoded solid marker here would
     # make the two arms of a pair indistinguishable in the legend.
     handles = []
     for base, lap in present:
-        handles.append(Line2D([], [], color=MODEL_COLORS.get(base), ls="-",
-                              lw=1.8, label=MODEL_DISPLAY.get(base, base)))
-        handles.append(Line2D([], [], color=MODEL_COLORS.get(lap),
+        handles.append(Line2D([], [], color=colors.get(base), ls="-",
+                              lw=1.8, label=labels.get(base, base)))
+        handles.append(Line2D([], [], color=colors.get(lap),
                               ls=LAPLACE_LS, lw=1.8,
-                              label=MODEL_DISPLAY.get(lap, lap)))
+                              label=labels.get(lap, lap)))
     fig.legend(handles=handles, loc="outside upper center",
                ncol=min(len(handles), 3), fontsize=10, frameon=True)
     fig.savefig(outpath, dpi=150, bbox_inches="tight")
