@@ -423,8 +423,7 @@ def main(manifest, output_dir, sweep_id, include_status, picks_override, models,
     # per-warm-mode figures just by being registered: those compare
     # architectures under one acquisition rule. Select them explicitly instead.
     all_models = [m for m in MODEL_DISPLAY
-                  if not m.startswith("tabpfn")
-                  and not m.endswith(("_laplace", "_oracle"))]
+                  if not m.endswith(("_laplace", "_oracle"))]
     all_strats = ("entropy_batch", "top_k", "top_k_tol_only")
     for warm_mode in ("warm", "cold"):
         # Same two-panel layout as the best-per-model figure: what the compute
@@ -434,8 +433,21 @@ def main(manifest, output_dir, sweep_id, include_status, picks_override, models,
         models_present, strats_present = set(), set()
         cov_present = False
         for model in all_models:
+            # TabPFN has no warm/cold distinction to make: its weights never
+            # change and the labelled set enters only as context, so every
+            # iteration is a fresh in-context fit that carries nothing forward.
+            # Its runs are tagged warm_start="tabpfn", which matches neither
+            # panel, so it used to drop out of this figure entirely. Show it in
+            # the cold panel, which is the honest analogue of never reusing
+            # state, and only there so it is not drawn twice.
+            if model.startswith("tabpfn"):
+                if warm_mode != "cold":
+                    continue
+                cell_warm = "tabpfn"
+            else:
+                cell_warm = warm_mode
             for strat in all_strats:
-                cell = _collect_cell(model, strat, warm_mode)
+                cell = _collect_cell(model, strat, cell_warm)
                 if cell is None:
                     continue
                 Cm, Lm, _Tm, _Sm, Vm = cell

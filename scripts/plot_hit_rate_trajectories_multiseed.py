@@ -548,8 +548,14 @@ def _pool_prevalence(Y_full: np.ndarray, true_value: float, tols) -> dict:
     return {float(t): float(np.mean(np.abs(Y_full - true_value) / true_value < t)) for t in tols}
 
 
+# Matches the ingest line pmssm.data.load_pmssm_data logs once per run. The
+# branch name is target-dependent and the "& < N" upper cut is present only for
+# targets that define one (the relic density does; an exclusion r-value must not,
+# since its > 1 half is the region of interest), so both are optional here.
+# Groups 1 and 2 stay (kept, total) — keep the optional part non-capturing.
 _VALIDITY_RE = re.compile(
-    r"Filter \(MO_Omega > 0 & < 1 & SP_m_h != -1\):\s*(\d+)\s*/\s*(\d+)\s*samples kept"
+    r"Filter \(\S+ > 0(?: & < [0-9.]+)? & SP_m_h != -1\):"
+    r"\s*(\d+)\s*/\s*(\d+)\s*samples kept"
 )
 
 

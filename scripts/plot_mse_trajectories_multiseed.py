@@ -7,14 +7,17 @@ the AL model's MSE loss (transformed target space) on
 
     static_random  (``al_on_static_random_losses``)
     mcmc           (``al_on_mcmc_losses``)
-    train          (``al_train_losses``)
-    val            (``al_val_losses``, the AL model's own validation split)
+    own_val        (``al_val_losses`` vs ``baseline_val_losses``: each model on
+                   its own split, so different datasets, trends only)
+    val_cross      (``al_val_losses`` vs ``base_on_al_val_losses``: both models
+                   on the AL run's split, so a like-for-like comparison)
 
 is aggregated across seeds (mean +- SEM band, same convention and model
 colours as the hit-rate plots) and drawn over global AL iteration: a 2x2
 grid of dataset panels (AL model solid, the same-architecture random
 baseline dashed), each with its own AL/baseline MSE-ratio subpanel
-beneath (per-seed ratios, colour = model). Note:
+beneath (the quotient of the two curves drawn above it, colour = model,
+band by error propagation). Note:
 losses are the run-time values, so no post-hoc sneutrino veto can be
 applied here (unlike the hit-rate plots). No in-figure titles beyond the
 panel labels (paper figures carry captions instead).
@@ -44,21 +47,26 @@ from mcmc_diagnostics import DEFAULT_AL_PICKS, MODEL_DISPLAY  # noqa: E402
 DATASET_KEYS = {
     "static_random": "al_on_static_random_losses",
     "mcmc": "al_on_mcmc_losses",
-    "train": "al_train_losses",
-    "val": "al_val_losses",
+    "own_val": "al_val_losses",
+    "val_cross": "al_val_losses",
 }
 BASELINE_KEYS = {
     "static_random": "baseline_on_static_random_losses",
     "mcmc": "baseline_on_mcmc_losses",
-    "train": "baseline_train_losses",
-    "val": "baseline_val_losses",
+    # own_val: each model on ITS OWN validation split, so the two curves are on
+    # different datasets and report each loop's own difficulty, not a like-for-
+    # like comparison (the AL split is harder by construction).
+    "own_val": "baseline_val_losses",
+    # val_cross: BOTH models on the AL run's validation split, so the two curves
+    # describe the same dataset and may be read against each other.
+    "val_cross": "base_on_al_val_losses",
 }
-DATASET_LINESTYLES = {"static_random": "-", "mcmc": "--", "train": ":", "val": "-."}
+DATASET_LINESTYLES = {"static_random": "-", "mcmc": "--", "own_val": ":", "val_cross": "-."}
 DATASET_TITLES = {
     "static_random": "static random eval set",
     "mcmc": "MCMC eval set",
-    "train": "training set",
-    "val": "own validation set",
+    "own_val": "own validation set (each model on its own split)",
+    "val_cross": "AL validation set (both models)",
 }
 
 
@@ -105,7 +113,7 @@ def main(manifest, output_dir, sweep_id, include_status, models, min_seeds, logy
     for model, (strat, warm) in picks.items():
         sel = [r for r in rows
                if (r["model"], r["strategy"], r["warm_start"]) == (model, strat, warm)]
-        per_ds: dict = {ds: {"al": [], "base": [], "ratio": []} for ds in DATASET_KEYS}
+        per_ds: dict = {ds: {"al": [], "base": []} for ds in DATASET_KEYS}
         seen_dirs = set()
         for r in sel:
             d = r["expected_run_dir"]
@@ -127,10 +135,6 @@ def main(manifest, output_dir, sweep_id, include_status, models, min_seeds, logy
                     per_ds[ds]["al"].append(al)
                 if ba.size and np.isfinite(ba).any():
                     per_ds[ds]["base"].append(ba)
-                    L = min(len(al), len(ba))
-                    if L and np.isfinite(al[:L]).any():
-                        with np.errstate(divide="ignore", invalid="ignore"):
-                            per_ds[ds]["ratio"].append(al[:L] / ba[:L])
         kept = {ds: t for ds, t in per_ds.items() if len(t["al"]) >= min_seeds}
         if kept:
             traj[model] = kept
@@ -175,14 +179,29 @@ def main(manifest, output_dir, sweep_id, include_status, models, min_seeds, logy
             ax.plot(x, mu, color=c, lw=1.6, label=MODEL_DISPLAY.get(model, model))
             ax.fill_between(x, mu - sem, mu + sem, color=c, alpha=0.2, lw=0)
             if per_ds[ds]["base"]:
-                xb, mub, _ = _band(per_ds[ds]["base"])
+                xb, mub, semb = _band(per_ds[ds]["base"])
                 ax.plot(xb, mub, color=c, lw=1.1, ls="--", alpha=0.7)
-            if per_ds[ds]["ratio"]:
-                xr, mur, semr = _band(per_ds[ds]["ratio"])
-                axr.plot(xr, mur, color=c, lw=1.2)
-                axr.fill_between(xr, mur - semr, mur + semr, color=c, alpha=0.15, lw=0)
-                ratio_tops.append(np.nanmax(mur[xr >= 5]) if (xr >= 5).any()
-                                  else np.nanmax(mur))
+                # The strip is the quotient of the two curves drawn above it, so
+                # the two halves of a panel cannot disagree. Averaging per-seed
+                # ratios instead reports mean(AL/base), which is not
+                # mean(AL)/mean(base): with n=5 and one outlying Exact-GP
+                # baseline run (MCMC MSE 4.31 against ~1.7-2.2 elsewhere) the two
+                # differed in sign, the curves showing AL ahead at 0.914 while
+                # the strip sat at 1.076.
+                common, ia, ib = np.intersect1d(x, xb, return_indices=True)
+                if common.size:
+                    with np.errstate(divide="ignore", invalid="ignore"):
+                        ratio = mu[ia] / mub[ib]
+                        # Propagated, treating the two means as independent; the
+                        # AL/baseline pairing within a seed makes that mildly
+                        # conservative.
+                        semr = np.abs(ratio) * np.sqrt((sem[ia] / mu[ia]) ** 2
+                                                       + (semb[ib] / mub[ib]) ** 2)
+                    axr.plot(common, ratio, color=c, lw=1.2)
+                    axr.fill_between(common, ratio - semr, ratio + semr,
+                                     color=c, alpha=0.15, lw=0)
+                    ratio_tops.append(np.nanmax(ratio[common >= 5])
+                                      if (common >= 5).any() else np.nanmax(ratio))
         if logy:
             ax.set_yscale("log")
         ax.set_title(DATASET_TITLES[ds], fontsize=11)
