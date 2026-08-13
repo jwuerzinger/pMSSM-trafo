@@ -34,7 +34,10 @@ for _p in (str(_REPO_ROOT), str(_REPO_ROOT / "scripts")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from analyse_runs import FREE_PARAM_NAMES                    # noqa: E402
+from analyse_runs import (  # noqa: E402
+    FREE_PARAM_INDICES,
+    FREE_PARAM_NAMES,
+)
 from plot_hit_rate_trajectories_multiseed import (            # noqa: E402
     MODEL_COLORS,
     MODEL_DISPLAY,
@@ -78,6 +81,25 @@ def _cells(manifest, sweep_prefix=None):
     return out
 
 
+REF_KEY = "__reference"
+
+
+def _load_reference(mcmc_data_dir, require_neutralino_lsp, max_samples):
+    """The emcee reference's free parameters and Omega, or (None, None).
+
+    Ratios against this answer "how far is each arm from the posterior we are
+    trying to reproduce?", which is the question the composition table raises
+    and which a probe/benchmark ratio cannot address.
+    """
+    from pmssm.data import load_mcmc_data                      # noqa: PLC0415
+    Xm, Ym = load_mcmc_data(data_dir=mcmc_data_dir,
+                            require_neutralino_lsp=require_neutralino_lsp,
+                            max_samples=max_samples or None)
+    Xm = Xm.numpy() if hasattr(Xm, "numpy") else np.asarray(Xm)
+    Ym = (Ym.numpy() if hasattr(Ym, "numpy") else np.asarray(Ym)).ravel()
+    return Xm[:, FREE_PARAM_INDICES], Ym
+
+
 @click.command()
 @click.option("--probe", type=click.Choice(["extended", "20k", "both"]),
               default="both", show_default=True)
@@ -86,10 +108,23 @@ def _cells(manifest, sweep_prefix=None):
 @click.option("--require-neutralino-lsp/--no-require-neutralino-lsp",
               default=True, show_default=True)
 @click.option("--nbins", default=25, show_default=True)
-def main(probe, main_manifest, tolerance, require_neutralino_lsp, nbins):
+@click.option("--mcmc-data-dir", default="/ptmp/jwuerzin/data/neutralino_v4",
+              show_default=True,
+              help="emcee reference; the ratio panels divide by it. Empty "
+                   "string falls back to probe/benchmark ratios.")
+@click.option("--mcmc-max-samples", default=500_000, show_default=True)
+def main(probe, main_manifest, tolerance, require_neutralino_lsp, nbins,
+         mcmc_data_dir, mcmc_max_samples):
     bench = _cells(main_manifest, sweep_prefix=BENCH_SWEEP_PREFIX)
     names = list(FREE_PARAM_NAMES) + [OMEGA_LABEL]
     which = list(PROBES) if probe == "both" else [probe]
+
+    ref_X = ref_om = None
+    if mcmc_data_dir:
+        click.echo(f"[probe-overlay] loading reference from {mcmc_data_dir} ...")
+        ref_X, ref_om = _load_reference(mcmc_data_dir, require_neutralino_lsp,
+                                        mcmc_max_samples)
+        click.echo(f"[probe-overlay] reference: {len(ref_X)} samples")
 
     for pname in which:
         spec = PROBES[pname]
@@ -129,6 +164,14 @@ def main(probe, main_manifest, tolerance, require_neutralino_lsp, nbins):
         out.mkdir(parents=True, exist_ok=True)
         for tag, restrict in (("inband", True), ("all", False)):
             data = {}
+            if ref_X is not None:
+                if restrict:
+                    k = np.abs(ref_om - TRUE_VALUE) / TRUE_VALUE < tolerance
+                    data[REF_KEY] = np.column_stack([ref_X[k], ref_om[k]])
+                else:
+                    data[REF_KEY] = np.column_stack([ref_X, ref_om])
+                labels[REF_KEY] = "emcee reference"
+
             for key, (X, om) in pooled.items():
                 if restrict:
                     keep = np.abs(om - TRUE_VALUE) / TRUE_VALUE < tolerance
@@ -145,7 +188,9 @@ def main(probe, main_manifest, tolerance, require_neutralino_lsp, nbins):
             path = out / f"probe_input_overlay_{tag}.png"
             plot_overlay_with_ratio(
                 data, names, str(path), nbins=nbins, pairs=usable,
-                colors=colors, labels=labels, ratio_label="probe/bench")
+                colors=colors, labels=labels,
+                ratio_label=("arm/ref" if ref_X is not None else "probe/bench"),
+                ratio_ref=(REF_KEY if ref_X is not None else None))
             click.echo(f"[probe-overlay] wrote {path}")
 
 

@@ -109,7 +109,7 @@ def _ratio_with_err(v_lap, v_drop, bins):
 def plot_overlay_with_ratio(data, names, outpath, nbins=25, ncols=3,
                             ratio_ylim=(0.5, 1.5), nbins_omega=20,
                             pairs=None, colors=None, labels=None,
-                            ratio_label="Lap./drop."):
+                            ratio_label="Lap./drop.", ratio_ref=None):
     """One panel per quantity: density overlay above, B/A ratio below.
 
     data: {key: values (N, n_quantities)} containing both arms of every pair.
@@ -122,6 +122,11 @@ def plot_overlay_with_ratio(data, names, outpath, nbins=25, ncols=3,
     pairs = PAIRS if pairs is None else pairs
     colors = MODEL_COLORS if colors is None else colors
     labels = MODEL_DISPLAY if labels is None else labels
+    # With a reference series, the ratio panel compares every arm against it
+    # instead of pairing arms with each other. That answers "how far is each
+    # from the truth?" rather than "did the budget change anything?", and the
+    # reference is drawn in the overlay too so the panels can be read together.
+    ref = data.get(ratio_ref) if ratio_ref else None
     n = len(names)
     nrows = int(np.ceil(n / ncols))
     # constrained_layout with a nested 2-row subgridspec per quantity: a flat
@@ -159,6 +164,10 @@ def plot_overlay_with_ratio(data, names, outpath, nbins=25, ncols=3,
             bins = np.linspace(lo, hi, nb + 1)
         centres = 0.5 * (bins[:-1] + bins[1:])
 
+        if ref is not None:
+            rv = ref[:, j]
+            ax.hist(rv[np.isfinite(rv)], bins=bins, density=True,
+                    histtype="step", lw=2.2, color="black", zorder=5)
         for base, lap in present:
             for key, ls in ((base, "-"), (lap, LAPLACE_LS)):
                 v = data[key][:, j]
@@ -166,11 +175,19 @@ def plot_overlay_with_ratio(data, names, outpath, nbins=25, ncols=3,
                 ax.hist(v, bins=bins, density=True, histtype="step", lw=1.6,
                         color=colors.get(key), linestyle=ls,
                         label=labels.get(key, key))
-            ratio, err = _ratio_with_err(data[lap][:, j], data[base][:, j], bins)
-            col = colors.get(lap)
-            axr.step(centres, ratio, where="mid", lw=1.4, color=col)
-            axr.fill_between(centres, ratio - err, ratio + err, step="mid",
-                             color=col, alpha=0.18, lw=0)
+                if ref is not None:
+                    ratio, err = _ratio_with_err(v, ref[:, j], bins)
+                    axr.step(centres, ratio, where="mid", lw=1.3,
+                             color=colors.get(key), ls=ls)
+                    axr.fill_between(centres, ratio - err, ratio + err,
+                                     step="mid", color=colors.get(key),
+                                     alpha=0.12, lw=0)
+            if ref is None:
+                ratio, err = _ratio_with_err(data[lap][:, j], data[base][:, j], bins)
+                col = colors.get(lap)
+                axr.step(centres, ratio, where="mid", lw=1.4, color=col)
+                axr.fill_between(centres, ratio - err, ratio + err, step="mid",
+                                 color=col, alpha=0.18, lw=0)
 
         ax.set_yticks([])
         ax.tick_params(labelbottom=False)
@@ -192,6 +209,9 @@ def plot_overlay_with_ratio(data, names, outpath, nbins=25, ncols=3,
         handles.append(Line2D([], [], color=colors.get(lap),
                               ls=LAPLACE_LS, lw=1.8,
                               label=labels.get(lap, lap)))
+    if ref is not None:
+        handles.append(Line2D([], [], color="black", lw=2.2,
+                              label=labels.get(ratio_ref, "emcee reference")))
     fig.legend(handles=handles, loc="outside upper center",
                ncol=min(len(handles), 3), fontsize=10, frameon=True)
     fig.savefig(outpath, dpi=150, bbox_inches="tight")
