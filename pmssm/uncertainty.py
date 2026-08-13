@@ -255,7 +255,8 @@ def _penultimate_features(model, X_norm, device, layer, batch_size=8192):
 def compute_uncertainty_laplace(model, X_candidates, X_fit, y_fit_t, stats,
                                 n_samples, device, logger,
                                 X_noise=None, y_noise_t=None,
-                                prior_precision=1.0, return_predictions=False):
+                                prior_precision=1.0, return_predictions=False,
+                                draw_seed=None):
     """Predictive uncertainty from a last-layer linearised Laplace posterior.
 
     Mirrors ``compute_uncertainty_mc_dropout``'s return contract so it is a
@@ -375,7 +376,15 @@ def compute_uncertainty_laplace(model, X_candidates, X_fit, y_fit_t, stats,
 
     # Draws for callers needing a covariance: w_s = w_MAP + L^-T z_s has
     # covariance L^-T L^-1 = A^-1 = Sigma, exactly.
-    g = torch.Generator().manual_seed(0)
+    #
+    # draw_seed must be threaded through from the run's seed (and iteration).
+    # A fixed constant here, which is what the published runs used, gives every
+    # replica of a cell the identical z at every iteration, so the arms' draws
+    # are common random numbers rather than independent samples. The analytic
+    # mean and variance above are unaffected -- they never touch z -- but the
+    # entropy_batch covariance is built from these draws, so seed-to-seed
+    # spread on any batch-selected quantity is understated.
+    g = torch.Generator().manual_seed(0 if draw_seed is None else int(draw_seed))
     z = torch.randn(d, int(n_samples), generator=g, dtype=torch.float64)
     W = w_map.reshape(-1, 1) + torch.linalg.solve_triangular(L.T, z, upper=True)
     predictions = (Phi_c @ W).T.unsqueeze(-1).float()      # (n_samples, N, 1)

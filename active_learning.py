@@ -1072,12 +1072,18 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
                     _ens_models, cands, stats, device, logger,
                     return_predictions=return_predictions)
             if acq_uncertainty == 'laplace':
-                # Draw count is chosen to exceed the feature dimension
-                # (dim_feedforward//2 + 1, so 257 at the production width), or
-                # the candidate covariance would be needlessly rank-limited and
-                # we would reproduce the very defect this replaces. The draws
-                # are matmuls on the features, not forward passes, so the cost
-                # of asking for many is negligible.
+                # Draw count is chosen to exceed the read-out's feature
+                # dimension, which is dim_feedforward//2 + 1 = 257 for this
+                # architecture (the feedforward surrogates read out directly on
+                # dim_feedforward, so theirs is wider: see active_learning_dnn).
+                # Below d the candidate covariance would be needlessly
+                # rank-limited and we would reproduce the very defect this
+                # replaces. The draws are matmuls on the features, not forward
+                # passes, so the cost of asking for many is negligible.
+                #
+                # draw_seed varies the posterior draws by replica AND iteration.
+                # It was a fixed constant for the published runs, which made the
+                # draws common random numbers across a cell's seeds.
                 return compute_uncertainty_laplace(
                     model, cands,
                     X_combined[idx_train_al],
@@ -1086,7 +1092,8 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
                     X_noise=X_combined[idx_val_al],
                     y_noise_t=_to_model_space(Y_combined[idx_val_al]),
                     prior_precision=laplace_prior_precision,
-                    return_predictions=return_predictions)
+                    return_predictions=return_predictions,
+                    draw_seed=int(seed) * 100_003 + int(iteration))
             return compute_uncertainty_mc_dropout(
                 model, cands, stats, mc_samples, device, logger,
                 return_predictions=return_predictions)
