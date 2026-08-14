@@ -46,7 +46,7 @@ from analyse_runs import (  # noqa: E402
 from pmssm.config import PARAM_ORDER, TARGET_CONFIG  # noqa: E402
 
 
-def _load_mcmc_no_file_cut(data_dir: str | Path):
+def _load_mcmc_no_file_cut(data_dir: str | Path, target: str = "DMRD"):
     """Mirror of `pmssm.data.load_mcmc_data` minus the file-level rejection.
 
     Keeps only the per-sample physical filter ``(Y > 0) & (Y < 1) & (SP_m_h != -1)``.
@@ -58,7 +58,7 @@ def _load_mcmc_no_file_cut(data_dir: str | Path):
     import uproot
 
     files = sorted(glob.glob(f"{data_dir}/*.root"))
-    target_branch = TARGET_CONFIG["DMRD"]["branch"]
+    target_branch = TARGET_CONFIG[target]["branch"]
     trees = [uproot.open(f)["susy"] for f in files]
     X_raw = np.column_stack([
         np.concatenate([t[b].array(library="np") for t in trees])

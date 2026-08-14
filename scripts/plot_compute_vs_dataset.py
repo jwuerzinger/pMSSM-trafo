@@ -36,7 +36,9 @@ for _p in (str(_REPO_ROOT), str(_REPO_ROOT / "scripts")):
         sys.path.insert(0, _p)
 
 from coverage_saturation import _support_axis  # noqa: E402
-from mcmc_diagnostics import DEFAULT_AL_PICKS, MODEL_DISPLAY, PARAM_ORDER  # noqa: E402
+from pmssm.config import TARGET_CONFIG as TARGET_CONFIG_  # noqa: E402
+from mcmc_diagnostics import (  # noqa: E402
+    DEFAULT_AL_PICKS, MODEL_DISPLAY, PARAM_ORDER, picks_with_tag)
 from coverage_saturation import (  # noqa: E402
     AXES as COV_AXES,
     _cells,
@@ -198,15 +200,24 @@ def _selection_seconds(main_log: Path) -> dict[int, float]:
 @click.option("--coverage/--no-coverage", default=True, show_default=True,
               help="Also plot covered in-band support versus cumulative compute.")
 @click.option("--mcmc-data-dir", default="/ptmp/jwuerzin/data/neutralino_v4",
-              show_default=True, help="Reference defining the target support.")
+              show_default=True, help="Emcee reference defining one support.")
+@click.option("--baseline-data-dir", default="/ptmp/jwuerzin/data/18387358",
+              show_default=True,
+              help="Random-scan pool defining the second support. Same axes, "
+                   "bins, tolerance and min_cell as the emcee one; only the "
+                   "reference population differs. Pass '' to omit that panel.")
+@click.option("--model-tag", default="", show_default=True,
+              help="OUTPUT_TAG of a variant sweep (e.g. 'expr'); re-keys the\n                   default per-model picks so tagged manifest rows resolve.")
 @click.option("--tolerance", default=0.10, show_default=True)
+@click.option("--target", default="DMRD", show_default=True,
+              help="TARGET_CONFIG key; sets the value the in-band test is taken around.")
 @click.option("--n-bins", default=12, show_default=True)
 @click.option("--min-cell", default=20, show_default=True)
 @click.option("--mcmc-max-samples", default=500_000, show_default=True)
 @click.option("--require-neutralino-lsp/--no-require-neutralino-lsp",
               default=False, show_default=True)
 def main(manifest, output_dir, sweep_id, include_status, picks_override, models, min_seeds, min_iters,
-         coverage, mcmc_data_dir, tolerance, n_bins, min_cell, mcmc_max_samples,
+         coverage, mcmc_data_dir, baseline_data_dir, tolerance, target, model_tag, n_bins, min_cell, mcmc_max_samples,
          require_neutralino_lsp):
     import torch
     import matplotlib
@@ -215,7 +226,7 @@ def main(manifest, output_dir, sweep_id, include_status, picks_override, models,
     import plot_hit_rate_trajectories_multiseed as phr
 
     statuses = {s.strip() for s in include_status.split(",")}
-    picks = dict(DEFAULT_AL_PICKS)
+    picks = picks_with_tag(model_tag)
     if picks_override:
         parsed = {}
         for tok in picks_override.split(","):
@@ -237,20 +248,43 @@ def main(manifest, output_dir, sweep_id, include_status, picks_override, models,
             and (sweep_id is None or r.get("sweep_id", "").startswith(sweep_id))]
 
     cov_ctx = None
+    # One coverage panel per support source. The emcee posterior exists only for
+    # the relic density, whereas the random-scan pool exists for every target, so
+    # Omega gets both panels and any other target gets the pool one. Binning,
+    # tolerance, half-split and min_cell are shared, so the panels differ only in
+    # which population defines the target region — but note their support sizes
+    # differ a lot (a flat scan barely samples the Omega band), so a coverage
+    # value is comparable ACROSS MODELS within a panel, not across panels.
+    cov_sources: list[tuple[str, str]] = []
+    if coverage:
+        if TARGET_CONFIG_[target].get("has_mcmc_reference", False) and mcmc_data_dir:
+            cov_sources.append(("mcmc", "emcee reference"))
+        if baseline_data_dir:
+            cov_sources.append(("pool", "random scan"))
+        if not cov_sources:
+            click.echo(f"[compute] no support source available for target "
+                       f"{target!r}; coverage panels disabled.", err=True)
+            coverage = False
+    cov_ctxs: list[tuple] = []
     if coverage:
         from analyse_runs import filter_run_neutralino_lsp, load_run
         ax_idx = [PARAM_ORDER.index(a) for a in COV_AXES]
-        rng = np.random.default_rng(20260807)
-        edges, tmap, n_target, _held = build_target(
-            mcmc_data_dir, ax_idx, n_bins, min_cell, tolerance,
-            mcmc_max_samples, require_neutralino_lsp, rng)
-        cov_ctx = (ax_idx, edges, tmap, n_target, load_run,
-                   filter_run_neutralino_lsp)
-        click.echo(f"[compute] coverage target: {n_target} cells")
+        for src, src_label in cov_sources:
+            rng = np.random.default_rng(20260807)
+            edges, tmap, n_target, _held = build_target(
+                mcmc_data_dir, ax_idx, n_bins, min_cell, tolerance,
+                mcmc_max_samples, require_neutralino_lsp, rng, true_val=None,
+                target=target, support_source=src,
+                pool_data_dir=baseline_data_dir)
+            cov_ctxs.append((src, src_label, ax_idx, edges, tmap, n_target,
+                             load_run, filter_run_neutralino_lsp))
+            click.echo(f"[compute] {src_label} support: {n_target} cells "
+                       f"({n_bins}^{len(COV_AXES)} grid, min_cell={min_cell})")
+        cov_ctx = cov_ctxs[0]
 
-    def _cov_trajectory(run_dir: str) -> list[float] | None:
-        """Covered fraction of the target support after each iteration."""
-        ax_idx, edges, tmap, n_target, load_run, veto_fn = cov_ctx
+    def _cov_trajectory(run_dir: str, ctx=None) -> list[float] | None:
+        """Covered fraction of one support after each iteration."""
+        _src, _lbl, ax_idx, edges, tmap, n_target, load_run, veto_fn = ctx or cov_ctx
         try:
             run = load_run(run_dir)
             if require_neutralino_lsp:
@@ -258,7 +292,9 @@ def main(manifest, output_dir, sweep_id, include_status, picks_override, models,
         except Exception:
             return None
         Y = np.asarray(run.Y).ravel()
-        inb = np.abs(Y - 0.12) / 0.12 < tolerance
+        from pmssm.config import TARGET_CONFIG  # noqa: PLC0415
+        _tv = TARGET_CONFIG[target]["true_value"]
+        inb = np.abs(Y - _tv) / _tv < tolerance
         cells = np.where(inb, _cells(np.asarray(run.X)[:, ax_idx], edges), -1)
         nt = list(run.n_train_per_iter)
         return [coverage_of(cells[:min(int(n), len(cells))], tmap, n_target)
@@ -269,7 +305,7 @@ def main(manifest, output_dir, sweep_id, include_status, picks_override, models,
         sel = [r for r in rows
                if (r["model"], r["strategy"], r["warm_start"]) == (model, strat, warm)]
         per_seed_C, per_seed_L, per_seed_T, per_seed_S = [], [], [], []
-        per_seed_V: list[np.ndarray] = []
+        per_seed_V: list[list[np.ndarray]] = [[] for _ in cov_ctxs]
         seen = set()
         for r in sel:
             d = Path(r["expected_run_dir"])
@@ -315,14 +351,18 @@ def main(manifest, output_dir, sweep_id, include_status, picks_override, models,
                 per_seed_T.append(np.asarray(T))
                 per_seed_S.append(np.asarray(S))
                 if cov_ctx is not None:
-                    cv = _cov_trajectory(str(d))
-                    per_seed_V.append(np.asarray(cv, dtype=float)
-                                      if cv else np.full(len(C), np.nan))
+                    for _k, _ctx in enumerate(cov_ctxs):
+                        _cv = _cov_trajectory(str(d), _ctx)
+                        if _cv is not None:
+                            per_seed_V[_k].append(np.asarray(_cv, dtype=float))
+
         if len(per_seed_C) < min_seeds:
             return None
         n_it = min(len(c) for c in per_seed_C)
-        V = (np.stack([v[:n_it] for v in per_seed_V])
-             if len(per_seed_V) == len(per_seed_C) and per_seed_V else None)
+        # One coverage matrix per support source; None where a source produced
+        # nothing for every seed of this cell.
+        V = [np.stack([v[:n_it] for v in per_src]) if len(per_src) == len(per_seed_C)
+             and per_src else None for per_src in per_seed_V] or None
         return (np.stack([c[:n_it] for c in per_seed_C]),
                 np.stack([l[:n_it] for l in per_seed_L]),
                 np.stack([t[:n_it] for t in per_seed_T]),
@@ -333,7 +373,15 @@ def main(manifest, output_dir, sweep_id, include_status, picks_override, models,
     STRAT_LS = {"top_k": "--", "top_k_tol_only": ":", "entropy_batch": "-"}
 
     cell_summary: dict = {}
-    fig, (ax, ax3) = plt.subplots(1, 2, figsize=(12.5, 5.2))
+    # One coverage axis per support source, and none at all when coverage is not
+    # computable: an empty panel still labelled with a quantity we cannot define
+    # is worse than no panel.
+    n_cov = len(cov_ctxs) if coverage else 0
+    fig, _axs = plt.subplots(1, 1 + n_cov,
+                             figsize=(7.0 + 5.5 * n_cov, 5.2), squeeze=False)
+    ax = _axs[0, 0]
+    cov_axes = list(_axs[0, 1:])
+    ax3 = cov_axes[0] if cov_axes else None
     fig2, axes2 = plt.subplots(2, 2, figsize=(11.5, 8.6))
     (ax_l, ax_c), (ax_t, ax_s) = axes2
     summary = {}
@@ -356,11 +404,14 @@ def main(manifest, output_dir, sweep_id, include_status, picks_override, models,
                 label=pick_label)
         ax.fill_betweenx(l_mu, c_mu - c_sem, c_mu + c_sem, color=col, alpha=0.2, lw=0)
 
-        if Vm is not None and np.isfinite(Vm).any():
-            v_mu = np.nanmean(Vm, axis=0)
-            v_sem = np.nanstd(Vm, axis=0, ddof=1) / np.sqrt(len(Vm))
-            ax3.plot(c_mu, v_mu, "o-", ms=2.5, lw=1.6, color=col, label=pick_label)
-            ax3.fill_between(c_mu, v_mu - v_sem, v_mu + v_sem, color=col,
+        # Vm is one coverage matrix per support source, aligned with cov_axes.
+        for _ax, _Vm in zip(cov_axes, Vm if isinstance(Vm, list) else [Vm]):
+            if _Vm is None or not np.isfinite(_Vm).any():
+                continue
+            v_mu = np.nanmean(_Vm, axis=0)
+            v_sem = np.nanstd(_Vm, axis=0, ddof=1) / np.sqrt(len(_Vm))
+            _ax.plot(c_mu, v_mu, "o-", ms=2.5, lw=1.6, color=col, label=pick_label)
+            _ax.fill_between(c_mu, v_mu - v_sem, v_mu + v_sem, color=col,
                              alpha=0.2, lw=0)
 
         # companion figure: |L| vs iteration, per-iteration compute vs iteration
@@ -388,11 +439,16 @@ def main(manifest, output_dir, sweep_id, include_status, picks_override, models,
     ax.set_ylabel(r"labeled-set size $|L|$")
     ax.grid(alpha=0.3, which="both")
     ax.legend(fontsize=8)
-    ax3.set_xscale("log")
-    ax3.set_xlabel("cumulative surrogate compute [GPU h] (training + selection)")
-    ax3.set_ylabel("fraction of reference in-band support covered")
-    _support_axis(ax3, full_range=False)
-    ax3.grid(alpha=0.3, which="both")
+    # Name the population that defined each support, and its cell count: the
+    # supports differ a lot in resolution (a flat scan barely samples the relic
+    # band), so a coverage value compares models WITHIN a panel, not across them.
+    for _ax, _ctx in zip(cov_axes, cov_ctxs):
+        _lbl, _n = _ctx[1], _ctx[5]
+        _ax.set_xscale("log")
+        _ax.set_xlabel("cumulative surrogate compute [GPU h] (training + selection)")
+        _ax.set_ylabel(f"fraction of {_lbl} in-band support covered\n({_n} cells)")
+        _support_axis(_ax, full_range=False)
+        _ax.grid(alpha=0.3, which="both")
     fig.tight_layout()
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -451,6 +507,11 @@ def main(manifest, output_dir, sweep_id, include_status, picks_override, models,
                 if cell is None:
                     continue
                 Cm, Lm, _Tm, _Sm, Vm = cell
+                # This companion figure has a single coverage axis, so it shows
+                # the FIRST support source only (emcee where one exists, the
+                # random pool otherwise); the axis label below records which.
+                Vm = (Vm[0] if isinstance(Vm, list) and Vm
+                      else (None if isinstance(Vm, list) else Vm))
                 col = phr.MODEL_COLORS.get(model, "gray")
                 axw.plot(Cm.mean(0), Lm.mean(0), lw=1.5, ls=STRAT_LS[strat],
                          color=col)
@@ -477,7 +538,10 @@ def main(manifest, output_dir, sweep_id, include_status, picks_override, models,
             click.echo(f"[compute] {warm_mode}: no usable cells — skipped")
             continue
         for ax_i, lab in ((axw, r"labeled-set size $|L|$"),
-                          (axw2, "fraction of reference in-band support covered")):
+                          (axw2, f"fraction of {cov_ctxs[0][1]} in-band support "
+                                 f"covered ({cov_ctxs[0][5]} cells)"
+                                 if cov_ctxs else
+                                 "fraction of in-band support covered")):
             ax_i.set_xscale("log")
             ax_i.set_xlabel("cumulative surrogate compute [GPU h] "
                             "(training + selection)")

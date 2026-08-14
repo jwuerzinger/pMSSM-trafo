@@ -174,9 +174,11 @@ def al_yields(manifest: str, tol: float, require_neutralino_lsp: bool,
                    "unrestricted pool credits random scanning with in-band "
                    "points the AL loops cannot reach, since their generation "
                    "config assigns Omega = -1 to slepton-LSP candidates.")
+@click.option("--target", default="DMRD", show_default=True,
+              help="TARGET_CONFIG key. Selects which branch the pool is read from and the band centre; a literal here silently loads relic-density data.")
 @click.option("--require-neutralino-lsp/--no-require-neutralino-lsp",
               default=False, show_default=True)
-def main(manifest, mcmc_data_dir, baseline_data_dir, output_dir, tolerance,
+def main(manifest, mcmc_data_dir, baseline_data_dir, output_dir, tolerance, target,
          mcmc_tolerances, baseline_require_neutralino_lsp,
          require_neutralino_lsp):
     out_dir = Path(output_dir)
@@ -194,7 +196,9 @@ def main(manifest, mcmc_data_dir, baseline_data_dir, output_dir, tolerance,
     # credits it with hits no loop could produce. They are only 0.6% of the
     # valid pool but 2% of its in-band points, being enriched on the relic
     # shell, so the correction is small and one-directional.
-    Y_full = phr._load_y_full(baseline_data_dir, "DMRD", out_dir)
+    # target, NOT "DMRD": a hardcoded key silently substitutes relic-density
+    # values for whatever target was requested.
+    Y_full = phr._load_y_full(baseline_data_dir, target, out_dir)
     n_pool_raw = len(Y_full)
     inband_raw = int((np.abs(Y_full - true_value) / true_value < tolerance).sum())
     neut_mask = None

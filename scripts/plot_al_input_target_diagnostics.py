@@ -36,6 +36,7 @@ for _p in (str(_REPO_ROOT), str(_REPO_ROOT / "scripts")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+from pmssm.config import TARGET_CONFIG  # noqa: E402
 from analyse_runs import (  # noqa: E402
     FREE_PARAM_INDICES,
     FREE_PARAM_NAMES,
@@ -45,6 +46,7 @@ from analyse_runs import (  # noqa: E402
 from mcmc_diagnostics import (  # noqa: E402
     DEFAULT_AL_PICKS,
     _picks_from_manifest,
+    picks_with_tag,
 )
 
 # Cap on points fed to corner.corner / the scatter panels (matches the
@@ -186,6 +188,11 @@ def plot_corner(flat_chain, params, outpath, target_vals=None, target_name=None)
     plt.close(fig)
 
 
+# Non-model arms only. Model colours come from the hit-rate figures' table so
+# every figure in the document uses ONE convention; looking them up here by bare
+# name silently missed the OUTPUT_TAG'd names ("deep_gp_expr"), and matplotlib's
+# default cycle then recoloured the curves (deep GP orange, DNN green) so the
+# same model wore different colours in different figures.
 OVERLAY_COLORS = {
     "random pool":   "dimgray",
     "emcee MCMC":    "black",
@@ -198,15 +205,28 @@ OVERLAY_COLORS = {
 }
 
 
+def _arm_color(label: str):
+    """Colour for one overlay arm, matching the hit-rate figures' convention.
+
+    MODEL_COLORS is tag-aware, so "deep_gp_expr" resolves to the deep GP's
+    colour; the reference arms fall back to OVERLAY_COLORS.
+    """
+    if label in OVERLAY_COLORS:
+        return OVERLAY_COLORS[label]
+    import plot_hit_rate_trajectories_multiseed as _phr  # noqa: PLC0415
+    return _phr.MODEL_COLORS.get(label, "gray")
+
+
 def plot_omega_overlay(samples: dict, outpath: str, true_value: float = 0.12,
-                       tol: float = 0.10):
+                       tol: float = 0.10, label: str = r"$\Omega_\chi h^2$",
+                       bin_range: tuple = (-4, 0)):
     """Overlay the Ω marginals of several samples on shared log-log axes.
 
     samples: {label: 1-D array of Ω values}. Densities are normalised so
     sample sizes (500k MCMC vs ~100k AL pools) are directly comparable.
     """
     fig, ax = plt.subplots(figsize=(7.2, 4.6))
-    bins = np.logspace(-4, 0, 81)
+    bins = np.logspace(bin_range[0], bin_range[1], 81)
     ax.axvspan(true_value * (1 - tol), true_value * (1 + tol),
                color="gold", alpha=0.25, lw=0,
                label=f"target ±{int(tol*100)}%")
@@ -216,7 +236,7 @@ def plot_omega_overlay(samples: dict, outpath: str, true_value: float = 0.12,
         y = y[np.isfinite(y) & (y > 0)]
         dens, _ = np.histogram(np.clip(y, bins[0], bins[-1]), bins=bins,
                                density=True)
-        ax.stairs(dens, bins, lw=1.8, color=OVERLAY_COLORS.get(label),
+        ax.stairs(dens, bins, lw=1.8, color=_arm_color(label),
                   label=f"{label} (N={len(y):,})")
         pos = dens[dens > 0]
         if len(pos):
@@ -228,7 +248,7 @@ def plot_omega_overlay(samples: dict, outpath: str, true_value: float = 0.12,
     # Pad so every curve's smallest and largest nonzero bin stays visible.
     if np.isfinite(vmin) and vmax > 0:
         ax.set_ylim(vmin * 0.5, vmax * 3.0)
-    ax.set_xlabel(r"$\Omega_\chi h^2$")
+    ax.set_xlabel(label)
     ax.set_ylabel("density")
     ax.grid(alpha=0.3, which="both")
     ax.legend(fontsize=9, loc="lower left")
@@ -258,7 +278,7 @@ def plot_input_overlays(x_samples: dict, param_names, outpath: str):
             x = np.asarray(X[:, j], dtype=float)
             x = x[np.isfinite(x)]
             ax.hist(x, bins=bins, density=True, histtype="step", lw=1.6,
-                    color=OVERLAY_COLORS.get(label), label=label)
+                    color=_arm_color(label), label=label)
         ax.set_xlabel(name)
         ax.set_yticks([])
         ax.grid(alpha=0.3)
@@ -325,16 +345,27 @@ def _pooled_cell_data(run_dirs, require_neutralino_lsp):
               default=False, show_default=True,
               help="Drop non-neutralino (sneutrino) rows from AL training sets "
                    "before plotting.")
+@click.option("--target", default="DMRD", show_default=True,
+              help="TARGET_CONFIG key: sets the branch, the band centre, the "
+                   "axis label and the log-bin range of the target overlay.")
+@click.option("--model-tag", default="", show_default=True,
+              help="OUTPUT_TAG of a variant sweep (e.g. 'expr'); re-keys the\n                   default per-model picks so tagged manifest rows resolve.")
 @click.option("--skip-joint-plots", is_flag=True, default=False,
               help="Only render the corner plots (skip the 9 per-parameter "
                    "input-vs-Omega figures per cell).")
-def main(manifest, output_dir, models, mcmc_data_dir, baseline_data_dir,
-         cache_dir, mcmc_max_samples, require_neutralino_lsp, skip_joint_plots):
+def main(manifest, output_dir, models, mcmc_data_dir, baseline_data_dir, target,
+         cache_dir, mcmc_max_samples, require_neutralino_lsp, model_tag, skip_joint_plots):
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(42)
 
-    picks = dict(DEFAULT_AL_PICKS)
+    # Filename/panel tag and log-bin span for the target-marginal overlay.
+    # DMRD keeps its historical "Omega" tag and [1e-4, 1] span; an exclusion
+    # r-value spans ~9 decades and must not be clipped to that window.
+    _tname = "Omega" if target == "DMRD" else target
+    _bin_range = (-4, 0) if target == "DMRD" else (-6, 3)
+
+    picks = picks_with_tag(model_tag)
     if models == "none":
         picks = {}
     elif models:
@@ -368,17 +399,23 @@ def main(manifest, output_dir, models, mcmc_data_dir, baseline_data_dir,
             corner_X, corner_y = corner_X[idx], corner_y[idx]
         plot_corner(corner_X, FREE_PARAM_NAMES,
                     str(out_dir / f"corner_{model}.png"),
-                    target_vals=corner_y, target_name="Omega")
+                    target_vals=corner_y, target_name=_tname)
         click.echo(f"[al-diag] wrote corner_{model}.png")
         if not skip_joint_plots:
+            # _tname is both the filename tag and the y-axis label, so a
+            # hardcoded "Omega" would mislabel every non-DMRD scatter.
             plot_inputs_vs_target_data(X_free, omega, None, FREE_PARAM_NAMES,
-                                       "Omega", str(out_dir), model)
+                                       _tname, str(out_dir), model)
 
     # ── Random-scan baseline corner ─────────────────────────────────────────
     if baseline_data_dir:
         import plot_hit_rate_trajectories_multiseed as phr  # noqa: PLC0415
         click.echo(f"[al-diag] loading random pool from {baseline_data_dir} ...")
-        Xb, Yb = phr._load_xy_full(baseline_data_dir, "DMRD", Path(cache_dir))
+        # target, NOT "DMRD": with the key hardcoded this loaded MO_Omega from
+        # whatever pool was given, so the in-band overlay below cut on relic
+        # density while claiming to show the r band (it selected the slepton
+        # coannihilation strip, a sharp spike at meR ~ 220).
+        Xb, Yb = phr._load_xy_full(baseline_data_dir, target, Path(cache_dir))
         Xb_free = np.asarray(Xb)[:, FREE_PARAM_INDICES]
         omega_samples["random pool"] = np.asarray(Yb).ravel()
         x_samples["random pool"] = Xb_free
@@ -388,12 +425,16 @@ def main(manifest, output_dir, models, mcmc_data_dir, baseline_data_dir,
             Xb_free, Yb = Xb_free[idx], Yb[idx]
         plot_corner(Xb_free, FREE_PARAM_NAMES,
                     str(out_dir / "corner_random.png"),
-                    target_vals=Yb, target_name="Omega")
+                    target_vals=Yb, target_name=_tname)
         click.echo("[al-diag] wrote corner_random.png")
 
     # ── MCMC reference corner ────────────────────────────────────────────────
     if mcmc_data_dir:
         from pmssm.data import load_mcmc_data  # noqa: PLC0415
+        if not TARGET_CONFIG[target].get("has_mcmc_reference", False):
+            raise click.ClickException(
+                f"target {target!r} has no MCMC reference; pass "
+                f"--mcmc-data-dir '' to skip that overlay arm")
         click.echo(f"[al-diag] loading MCMC reference from {mcmc_data_dir} ...")
         Xm, Ym = load_mcmc_data(data_dir=mcmc_data_dir,
                                 require_neutralino_lsp=require_neutralino_lsp,
@@ -408,12 +449,16 @@ def main(manifest, output_dir, models, mcmc_data_dir, baseline_data_dir,
             Xm_free, Ym = Xm_free[idx], Ym[idx]
         plot_corner(Xm_free, FREE_PARAM_NAMES,
                     str(out_dir / "corner_mcmc.png"),
-                    target_vals=Ym, target_name="Omega")
+                    target_vals=Ym, target_name=_tname)
         click.echo("[al-diag] wrote corner_mcmc.png")
 
     # ── Ω-marginal overlay (all loaded samples, shared log-log axes) ────────
     if len(omega_samples) >= 2:
-        plot_omega_overlay(omega_samples, str(out_dir / "omega_overlay.png"))
+        plot_omega_overlay(
+            omega_samples, str(out_dir / f"{_tname.lower()}_overlay.png"),
+            true_value=TARGET_CONFIG[target]["true_value"],
+            label=TARGET_CONFIG[target].get("label") or _tname,
+            bin_range=_bin_range)
         click.echo(f"[al-diag] wrote omega_overlay.png "
                    f"({', '.join(omega_samples)})")
     if len(x_samples) >= 2:
@@ -429,7 +474,7 @@ def main(manifest, output_dir, models, mcmc_data_dir, baseline_data_dir,
         # answer?"). Restricting every dataset to the band makes the marginals
         # directly comparable, which is what licenses reading a model's
         # agreement with the reference off this figure.
-        tol, true_value = 0.1, 0.12
+        tol, true_value = 0.1, TARGET_CONFIG[target]["true_value"]
         inband = {}
         for label, X in x_samples.items():
             Y = np.asarray(omega_samples.get(label, ()), dtype=float).ravel()

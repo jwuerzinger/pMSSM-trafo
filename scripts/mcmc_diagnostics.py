@@ -76,6 +76,20 @@ DEFAULT_AL_PICKS = {
     "tabpfn":          ("top_k",          "tabpfn"),
 }
 
+
+def picks_with_tag(tag, base=None):
+    """DEFAULT_AL_PICKS re-keyed for an OUTPUT_TAG variant sweep.
+
+    slurm/submit_strategy_sweep.sh's OUTPUT_TAG suffixes the manifest's model
+    column ("transformer" -> "transformer_expr"), so a variant sweep matches
+    none of the default keys. Re-keying keeps each model's canonical
+    (strategy, warm) pick while letting the manifest rows resolve.
+    """
+    base = dict(DEFAULT_AL_PICKS if base is None else base)
+    if not tag:
+        return base
+    return {f"{m}_{tag}": v for m, v in base.items()}
+
 # Full 19-parameter ordering saved to state.pt's X tensor. Only 9 are free.
 PARAM_ORDER = [
     "IN_meL", "IN_meR", "IN_mtauL", "IN_mtauR",

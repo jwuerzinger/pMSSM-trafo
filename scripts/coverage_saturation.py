@@ -42,7 +42,8 @@ for _p in (str(_REPO_ROOT), str(_REPO_ROOT / "scripts")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from mcmc_diagnostics import DEFAULT_AL_PICKS, MODEL_DISPLAY, PARAM_ORDER  # noqa: E402
+from mcmc_diagnostics import (  # noqa: E402
+    DEFAULT_AL_PICKS, MODEL_DISPLAY, PARAM_ORDER, picks_with_tag)
 
 AXES = ["IN_M_1", "IN_M_2", "IN_mu"]   # the axes carrying the constraint's information
 RNG_SEED = 20260807
@@ -60,15 +61,54 @@ def _cells(X: np.ndarray, edges: list[np.ndarray]) -> np.ndarray:
 
 
 def build_target(mcmc_data_dir: str, ax_idx: list[int], n_bins: int, min_cell: int,
-                 tolerance: float, max_samples: int, veto: bool, rng, true_val=0.12):
+                 tolerance: float, max_samples: int, veto: bool, rng, true_val=0.12,
+                 target: str = "DMRD", support_source: str = "mcmc",
+                 pool_data_dir: str = ""):
     """Target support from half the reference: (edges, tmap, n_target, held_out).
 
     Shared with ``plot_compute_vs_dataset.py`` so both figures score coverage
     against the identical support definition.
+
+    ``support_source`` selects the reference population that defines the
+    support: "mcmc" (the emcee posterior, the paper's original definition) or
+    "pool" (the random-scan dataset, available for every target). Binning,
+    tolerance, half-split and ``min_cell`` are shared, so the two are
+    like-for-like and differ only in what they call the target region.
+
+    With "mcmc" the support only exists for a target that HAS a posterior. Passing another target used to be silently accepted
+    because this call hardcoded "DMRD": the cells then came from the relic
+    density's posterior while the run points were selected by the other
+    target's band, producing a covered-fraction that mixes two unrelated
+    observables. Refuse instead.
     """
-    from pmssm.data import load_mcmc_data
-    Xm, Ym = load_mcmc_data(data_dir=mcmc_data_dir, target="DMRD",
-                            require_neutralino_lsp=veto, max_samples=max_samples)
+    from pmssm.config import TARGET_CONFIG
+    from pmssm.data import load_mcmc_data, load_pmssm_data
+    if true_val is None:
+        true_val = float(TARGET_CONFIG[target]["true_value"])
+
+    if support_source == "pool":
+        # Support from the random-scan pool instead of a posterior. Everything
+        # downstream (in-band cut, half split, quantile edges, min_cell) is
+        # identical, so a pool-sourced panel is directly comparable to the
+        # MCMC-sourced one: only the reference population differs. This is the
+        # only support definition available for a target with no posterior.
+        if not pool_data_dir:
+            raise ValueError("support_source='pool' requires pool_data_dir")
+        Xm, Ym = load_pmssm_data(n_datasets=-1, data_dir=pool_data_dir,
+                                 target=target, plot_dir="/tmp",
+                                 require_neutralino_lsp=veto)
+    elif support_source == "mcmc":
+        if not TARGET_CONFIG[target].get("has_mcmc_reference", False):
+            raise ValueError(
+                f"in-band support from an emcee reference requires a target "
+                f"that has one; {target!r} does not. Use "
+                f"support_source='pool'."
+            )
+        Xm, Ym = load_mcmc_data(data_dir=mcmc_data_dir, target=target,
+                                require_neutralino_lsp=veto,
+                                max_samples=max_samples)
+    else:
+        raise ValueError(f"unknown support_source {support_source!r}")
     Xm = np.asarray(Xm.numpy() if hasattr(Xm, "numpy") else Xm)[:, ax_idx]
     Ym = np.asarray(Ym.numpy() if hasattr(Ym, "numpy") else Ym).ravel()
     perm = rng.permutation(len(Xm))
@@ -129,6 +169,8 @@ def coverage_of(cells: np.ndarray, tmap: np.ndarray, n_target: int) -> float:
 @click.option("--include-status", default="completed,running,timeout,submitted",
               show_default=True)
 @click.option("--models", default=None, help="Comma list of picks (default: all).")
+@click.option("--model-tag", default="", show_default=True,
+              help="OUTPUT_TAG of a variant sweep (e.g. 'expr'), so its tagged manifest rows resolve against the default per-model picks.")
 @click.option("--tolerance", default=0.10, show_default=True)
 @click.option("--n-bins", default=12, show_default=True,
               help="Equal-occupancy bins per axis (n_bins^3 cells).")
@@ -143,9 +185,22 @@ def coverage_of(cells: np.ndarray, tmap: np.ndarray, n_target: int) -> float:
               help="Random subsets averaged per (k, budget) point.")
 @click.option("--require-neutralino-lsp/--no-require-neutralino-lsp",
               default=False, show_default=True)
+@click.option("--target", default="DMRD", show_default=True,
+              help="TARGET_CONFIG key: sets the branch and the band centre.")
+@click.option("--support-source", default="mcmc",
+              type=click.Choice(["mcmc", "pool"]), show_default=True,
+              help="Population defining the in-band support. 'mcmc' is the "
+                   "emcee posterior (the paper's original definition, relic "
+                   "density only); 'pool' is the random-scan dataset, which "
+                   "exists for every target. Axes, bins, tolerance, half-split "
+                   "and min_cell are identical either way, so the two are "
+                   "like-for-like and differ only in the reference population. "
+                   "The output filename carries the source, so running twice "
+                   "gives both figures side by side.")
 def main(manifest, baseline_data_dir, mcmc_data_dir, cache_dir, output_dir,
          sweep_id, include_status, models, tolerance, n_bins, min_cell,
-         mcmc_max_samples, mcmc_total_rows, n_repeats, require_neutralino_lsp):
+         mcmc_max_samples, mcmc_total_rows, n_repeats, require_neutralino_lsp,
+         target, support_source, model_tag):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -155,31 +210,66 @@ def main(manifest, baseline_data_dir, mcmc_data_dir, cache_dir, output_dir,
 
     rng = np.random.default_rng(RNG_SEED)
     ax_idx = [PARAM_ORDER.index(a) for a in AXES]
-    true_val = 0.12
+    from pmssm.config import TARGET_CONFIG as _TC
+    # NB `target` is reassigned below to the support cell indices (a numpy
+    # array), so the registry key has to be captured before that happens.
+    target_key = target
+    true_val = float(_TC[target_key]["true_value"])
 
     # ── target support from the first half of the reference ───────────────────
-    Xm, Ym = load_mcmc_data(data_dir=mcmc_data_dir, target="DMRD",
-                            require_neutralino_lsp=require_neutralino_lsp,
-                            max_samples=mcmc_max_samples)
-    Xm = np.asarray(Xm.numpy() if hasattr(Xm, "numpy") else Xm)[:, ax_idx]
-    Ym = np.asarray(Ym.numpy() if hasattr(Ym, "numpy") else Ym).ravel()
+    # A target with no posterior has nothing to load here, and its support must
+    # come from the pool instead. Refuse the incoherent combination rather than
+    # scoring one observable against another's reference, and stand in an empty
+    # array so the emcee-derived curves below simply produce nothing.
+    _has_ref = _TC[target_key].get("has_mcmc_reference", False)
+    if not _has_ref:
+        if support_source != "pool":
+            raise click.UsageError(
+                f"target {target_key!r} has no emcee reference; pass "
+                f"--support-source pool")
+        Xm = np.empty((0, len(ax_idx)))
+        Ym = np.empty(0)
+    else:
+        Xm, Ym = load_mcmc_data(data_dir=mcmc_data_dir, target=target_key,
+                                require_neutralino_lsp=require_neutralino_lsp,
+                                max_samples=mcmc_max_samples)
+        Xm = np.asarray(Xm.numpy() if hasattr(Xm, "numpy") else Xm)[:, ax_idx]
+        Ym = np.asarray(Ym.numpy() if hasattr(Ym, "numpy") else Ym).ravel()
     perm = rng.permutation(len(Xm))
     half = len(perm) // 2
     X_a, Y_a = Xm[perm[:half]], Ym[perm[:half]]      # defines the target support
     X_b, Y_b = Xm[perm[half:]], Ym[perm[half:]]      # supplies the MCMC curve
     X_def = X_a[np.abs(Y_a - true_val) / true_val < tolerance]
 
-    edges = [np.quantile(X_def[:, j], np.linspace(0, 1, n_bins + 1)) for j in range(3)]
-    for e in edges:                      # guard against duplicate quantiles
-        e[0], e[-1] = -np.inf, np.inf
-    c_def = _cells(X_def, edges)
-    counts = np.bincount(c_def, minlength=n_bins ** 3)
-    target = np.where(counts >= min_cell)[0]
-    tmap = -np.ones(n_bins ** 3, dtype=np.int64)
-    tmap[target] = np.arange(len(target))
-    n_target = len(target)
-    click.echo(f"[cov] target support: {n_target} cells of {n_bins**3} "
-               f"(>= {min_cell} in-band reference points), from {half} defining points")
+    if _has_ref:
+        edges = [np.quantile(X_def[:, j], np.linspace(0, 1, n_bins + 1)) for j in range(3)]
+        for e in edges:                  # guard against duplicate quantiles
+            e[0], e[-1] = -np.inf, np.inf
+        c_def = _cells(X_def, edges)
+        counts = np.bincount(c_def, minlength=n_bins ** 3)
+        target = np.where(counts >= min_cell)[0]
+        tmap = -np.ones(n_bins ** 3, dtype=np.int64)
+        tmap[target] = np.arange(len(target))
+        n_target = len(target)
+        click.echo(f"[cov] target support: {n_target} cells of {n_bins**3} "
+                   f"(>= {min_cell} in-band reference points), from {half} defining points")
+    else:
+        edges, tmap, n_target = None, None, 0
+
+    # Optionally REPLACE the support with one defined from the random-scan pool.
+    # Everything downstream is untouched, so the two figures differ only in what
+    # they call the target region. The held-out MCMC half still supplies its
+    # curve, which against a pool-defined support answers a genuinely useful
+    # question: how much of the flat scan's in-band region does the posterior
+    # itself reach?
+    if support_source == "pool":
+        rng_pool = np.random.default_rng(RNG_SEED)
+        edges, tmap, n_target, _held_pool = build_target(
+            mcmc_data_dir, ax_idx, n_bins, min_cell, tolerance,
+            mcmc_max_samples, require_neutralino_lsp, rng_pool, true_val=None,
+            target=target_key, support_source="pool", pool_data_dir=baseline_data_dir)
+        click.echo(f"[cov] REPLACED with random-scan support: {n_target} cells "
+                   f"of {n_bins**3} (>= {min_cell} in-band pool points)")
 
     def cover_frac(cells: np.ndarray) -> float:
         cells = cells[cells >= 0]                 # drop out-of-band entries
@@ -189,7 +279,7 @@ def main(manifest, baseline_data_dir, mcmc_data_dir, cache_dir, output_dir,
 
     # ── AL cells: per-seed in-band points in acquisition order ───────────────
     statuses = {s.strip() for s in include_status.split(",")}
-    picks = dict(DEFAULT_AL_PICKS)
+    picks = picks_with_tag(model_tag)
     if models:
         want = {m.strip() for m in models.split(",")}
         picks = {m: v for m, v in picks.items() if m in want}
@@ -226,7 +316,7 @@ def main(manifest, baseline_data_dir, mcmc_data_dir, cache_dir, output_dir,
                        f"in-band {[int((s >= 0).sum()) for s in seqs]}")
 
     # ── baselines: pool and held-out reference, as cell sequences ────────────
-    Xp, Yp = phr._load_xy_full(baseline_data_dir, "DMRD", Path(cache_dir))
+    Xp, Yp = phr._load_xy_full(baseline_data_dir, target_key, Path(cache_dir))
     Yp = np.asarray(Yp).ravel()
     pool_cells = np.where(np.abs(Yp - true_val) / true_val < tolerance,
                           _cells(np.asarray(Xp)[:, ax_idx], edges), -1)
@@ -347,15 +437,17 @@ def main(manifest, baseline_data_dir, mcmc_data_dir, cache_dir, output_dir,
     ax.plot(out["baselines"]["random_scan"]["budget"],
             out["baselines"]["random_scan"]["coverage"], ":", color="black", lw=1.6,
             label="random scan")
-    ax.plot(out["baselines"]["mcmc"]["budget"], out["baselines"]["mcmc"]["coverage"],
-            "-.", color="0.45", lw=1.6, label="MCMC (held-out half)")
+    if _has_ref:
+        ax.plot(out["baselines"]["mcmc"]["budget"], out["baselines"]["mcmc"]["coverage"],
+                "-.", color="0.45", lw=1.6, label="MCMC (held-out half)")
     ax.axvline(common_calls, color="0.6", ls=(0, (1, 3)), lw=1.0, zorder=0)
     ax.annotate("budget all models reach", xy=(common_calls, 0.02),
                 xytext=(-4, 0), textcoords="offset points", rotation=90,
                 ha="right", va="bottom", fontsize=6.5, color="0.4")
     ax.set_xscale("log")
     ax.set_xlabel("simulator calls (valid models evaluated, total across replicas)")
-    ax.set_ylabel("fraction of reference in-band support covered")
+    _srclbl = "emcee reference" if support_source == "mcmc" else "random scan"
+    ax.set_ylabel(f"fraction of {_srclbl} in-band support covered\n({n_target} cells)")
     _support_axis(ax)
     ax.grid(alpha=0.3, which="both")
     ax.legend(fontsize=8, loc="upper left",
@@ -370,14 +462,15 @@ def main(manifest, baseline_data_dir, mcmc_data_dir, cache_dir, output_dir,
     ax2.axvline(inb_common, color="0.6", ls=(0, (1, 3)), lw=1.0, zorder=0)
     ax2.set_xscale("log")
     ax2.set_xlabel("in-band points spent (total across replicas)")
-    ax2.set_ylabel("fraction of reference in-band support covered")
+    ax2.set_ylabel(f"fraction of {_srclbl} in-band support covered\n({n_target} cells)")
     _support_axis(ax2)
     ax2.grid(alpha=0.3, which="both")
     ax2.legend(fontsize=8, loc="upper left")
     fig.tight_layout()
-    p_png = Path(output_dir) / "coverage_saturation.png"
+    _sfx = "" if support_source == "mcmc" else f"_{support_source}"
+    p_png = Path(output_dir) / f"coverage_saturation{_sfx}.png"
     fig.savefig(p_png, dpi=200)
-    p_json = Path(output_dir) / "coverage_saturation.json"
+    p_json = Path(output_dir) / f"coverage_saturation{_sfx}.json"
     p_json.write_text(json.dumps(out, indent=1))
     click.echo(f"[cov] wrote {p_png} and {p_json}")
 

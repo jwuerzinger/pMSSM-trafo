@@ -79,6 +79,9 @@ _DESIRED_P_VALID: float | None = None
 _TARGET_LABEL: str = "Ωh²"
 # Short form used inside the |x - v| / v band tag, where the h² reads as clutter.
 _TARGET_LABEL_MATH: str = "Ω"
+# Physical boundary value, for axis labels in helpers that do not receive it as
+# an argument (the two classification-accuracy plotters).
+_TARGET_TRUE_VALUE: float = 0.12
 
 
 # Manifest model names carry an OUTPUT_TAG suffix for variant sweeps
@@ -305,6 +308,36 @@ def _hits_per_desired_trajectory(run, true_value, tol):
     return iters, rates
 
 
+def _assert_pool_target(data_dir: str, target: str) -> None:
+    """Refuse a pool/target pair whose target branch the pool does not carry.
+
+    Five separate figures shipped wrong numbers because a caller passed a
+    literal "DMRD" here instead of its own target: the loader happily returned
+    relic-density values for a run that asked for something else, the figure
+    rendered, and only a band-derived cut made the error visible. Checking the
+    branch exists converts that silent substitution into an immediate error.
+
+    Cheap: reads one ROOT file's key list, no arrays.
+    """
+    import glob  # noqa: PLC0415
+    from pmssm.config import TARGET_CONFIG  # noqa: PLC0415
+    branch = TARGET_CONFIG[target]["branch"]
+    files = sorted(glob.glob(f"{data_dir}/*.root"))
+    if not files:
+        return                      # nothing to check against; loader will complain
+    try:
+        import uproot  # noqa: PLC0415
+        keys = set(uproot.open(files[0])["susy"].keys())
+    except Exception:
+        return                      # never fail a plot over the guard itself
+    if branch not in keys:
+        raise ValueError(
+            f"pool {data_dir} has no branch {branch!r}, so it cannot supply "
+            f"target {target!r}. This is almost always a hardcoded target at "
+            f"the call site: pass the caller's own target through."
+        )
+
+
 def _load_y_full(data_dir: str, target: str, cache_dir: Path) -> np.ndarray:
     """Load (or read from .npy cache) the full unshuffled Y pool used by AL runs.
 
@@ -316,6 +349,7 @@ def _load_y_full(data_dir: str, target: str, cache_dir: Path) -> np.ndarray:
     cache = cache_dir / f"y_full_{safe}_{target}.npy"
     if cache.exists():
         return np.load(cache)
+    _assert_pool_target(data_dir, target)
     from pmssm.data import load_pmssm_data  # noqa: PLC0415
     _X, Y = load_pmssm_data(n_datasets=-1, target=target, data_dir=data_dir,
                              plot_dir=str(cache_dir))
@@ -400,6 +434,7 @@ def _load_xy_full(data_dir: str, target: str, cache_dir: Path) -> tuple[np.ndarr
     if x_cache.exists():
         X_full = np.load(x_cache, mmap_mode="r")
         return X_full, Y_full
+    _assert_pool_target(data_dir, target)
     from pmssm.data import load_pmssm_data  # noqa: PLC0415
     X, _Y = load_pmssm_data(n_datasets=-1, target=target, data_dir=data_dir,
                              plot_dir=str(cache_dir))
@@ -1296,7 +1331,7 @@ def plot_classification_accuracy_oracle_comparison(traj_acc: dict, picks,
     for ds in ACC_DATASETS:
         fig, ax = plt.subplots(1, 1, figsize=(7.5, 5))
         ax.set_xlabel("Iteration")
-        ax.set_ylabel(f"Accuracy ({_TARGET_LABEL} ≷ {true_val:g})")
+        ax.set_ylabel(f"Accuracy ({_TARGET_LABEL} ≷ {_TARGET_TRUE_VALUE:g})")
         ax.grid(alpha=0.3)
 
         any_data = False
@@ -1422,7 +1457,7 @@ def plot_classification_accuracy_best_per_model(traj_acc: dict, picks, out_dir: 
     for ds in ACC_DATASETS:
         fig, ax = plt.subplots(1, 1, figsize=(7.5, 5))
         ax.set_xlabel("Iteration")
-        ax.set_ylabel(f"Accuracy ({_TARGET_LABEL} ≷ {true_val:g})")
+        ax.set_ylabel(f"Accuracy ({_TARGET_LABEL} ≷ {_TARGET_TRUE_VALUE:g})")
         ax.grid(alpha=0.3)
 
         any_data = False
@@ -2346,7 +2381,8 @@ def main(manifest, sweep_id, output_dir, uncertainty, target, tolerances,
 
     # Name the observable the figures actually show. Defaults keep the relic
     # density's wording, so DMRD output is unchanged.
-    global _TARGET_LABEL, _TARGET_LABEL_MATH
+    global _TARGET_LABEL, _TARGET_LABEL_MATH, _TARGET_TRUE_VALUE
+    _TARGET_TRUE_VALUE = float(true_val)
     if target != "DMRD":
         _TARGET_LABEL = TARGET_CONFIG[target].get("label") or target
         _TARGET_LABEL_MATH = _TARGET_LABEL

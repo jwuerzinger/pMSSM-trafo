@@ -56,9 +56,11 @@ M1_COL = PARAM_ORDER.index("IN_M_1")
 @click.option("--n-mchi-files", default=40, show_default=True,
               help="Number of pool ntuples scanned for the m_chi quantiles "
                    "(branch not in the .npy cache).")
+@click.option("--target", default="DMRD", show_default=True,
+              help="TARGET_CONFIG key. Selects which branch the pool is read from and the band centre; a literal here silently loads relic-density data.")
 @click.option("--require-neutralino-lsp/--no-require-neutralino-lsp",
               default=False, show_default=True)
-def main(manifest, baseline_data_dir, mcmc_data_dir, cache_dir, output_dir,
+def main(manifest, baseline_data_dir, mcmc_data_dir, cache_dir, output_dir, target,
          m1_cut, tolerance, n_mchi_files, require_neutralino_lsp):
     import torch
     import uproot
@@ -69,7 +71,8 @@ def main(manifest, baseline_data_dir, mcmc_data_dir, cache_dir, output_dir,
     out: dict = {"m1_cut": m1_cut, "tolerance": tolerance}
 
     # ── random pool ──────────────────────────────────────────────────────────
-    X, Y = phr._load_xy_full(baseline_data_dir, "DMRD", Path(cache_dir))
+    # target, NOT "DMRD" (see compute_yield_comparison).
+    X, Y = phr._load_xy_full(baseline_data_dir, target, Path(cache_dir))
     M1 = np.asarray(X[:, M1_COL]); om = np.asarray(Y).ravel()
     inband = np.abs(om - true_value) / true_value < tolerance
     low = np.abs(M1) < m1_cut

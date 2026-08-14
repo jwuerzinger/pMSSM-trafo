@@ -114,11 +114,31 @@ fi
 
 DATA_DIR="${CLUSTER_DATA_DIR:-/ptmp/jwuerzin/data}"
 
+# Target axis. Defaults reproduce the relic-density behaviour exactly: same
+# pool, same MCMC reference, no --target flag added. AL_TARGET=ExpR switches to
+# the SModelS exclusion boundary, whose pool differs and which has NO emcee
+# reference at all (so both the reference set and the Omega-derived yield lines
+# must be suppressed, not merely repointed).
+AL_TARGET="${AL_TARGET:-DMRD}"
+if [[ "${AL_TARGET}" != "DMRD" ]]; then
+    case "${AL_TARGET}" in
+        ExpR) TARGET_POOL="${AL_POOL:-${DATA_DIR}/260804}";;
+        *)    TARGET_POOL="${AL_POOL:?AL_POOL must be set for target ${AL_TARGET}}";;
+    esac
+    EXTRA_FLAGS+=(--target "${AL_TARGET}"
+                  --baseline-data-dir "${TARGET_POOL}"
+                  --mcmc-data-dir ""
+                  --mcmc-yield-json ""
+                  --no-baseline-require-neutralino-lsp)
+    echo "[opt] target: ${AL_TARGET} (pool ${TARGET_POOL}, no MCMC reference)"
+fi
+
 "${PYTHON}" scripts/plot_hit_rate_trajectories_multiseed.py \
     --compute-accuracy \
     --accuracy-device "${ACC_DEVICE}" \
-    --baseline-data-dir "${DATA_DIR}/18387358" \
-    --mcmc-data-dir "${DATA_DIR}/neutralino_v4" \
+    $( [[ "${AL_TARGET}" == "DMRD" ]] && printf '%s %s %s %s' \
+        --baseline-data-dir "${DATA_DIR}/18387358" \
+        --mcmc-data-dir "${DATA_DIR}/neutralino_v4" ) \
     "${EXTRA_FLAGS[@]}"
 
 echo "=========================================="

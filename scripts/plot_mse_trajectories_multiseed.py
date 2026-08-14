@@ -42,7 +42,7 @@ for _p in (str(_REPO_ROOT), str(_REPO_ROOT / "scripts")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from mcmc_diagnostics import DEFAULT_AL_PICKS, MODEL_DISPLAY  # noqa: E402
+from mcmc_diagnostics import DEFAULT_AL_PICKS, MODEL_DISPLAY, picks_with_tag  # noqa: E402
 
 DATASET_KEYS = {
     "static_random": "al_on_static_random_losses",
@@ -87,11 +87,13 @@ def _to_floats(v) -> list[float]:
 @click.option("--sweep-id", default=None,
               help="Only manifest rows whose sweep_id starts with this prefix.")
 @click.option("--include-status", default="completed,running,timeout", show_default=True)
+@click.option("--model-tag", default="", show_default=True,
+              help="OUTPUT_TAG of a variant sweep (e.g. 'expr'); re-keys the\n                   default per-model picks so tagged manifest rows resolve.")
 @click.option("--models", default=None,
               help="Comma list of picks to include (default: all DEFAULT_AL_PICKS).")
 @click.option("--min-seeds", default=2, show_default=True)
 @click.option("--logy/--no-logy", default=True, show_default=True)
-def main(manifest, output_dir, sweep_id, include_status, models, min_seeds, logy):
+def main(manifest, output_dir, sweep_id, include_status, models, min_seeds, logy, model_tag):
     import torch
     import matplotlib
     matplotlib.use("Agg")
@@ -99,7 +101,7 @@ def main(manifest, output_dir, sweep_id, include_status, models, min_seeds, logy
     import plot_hit_rate_trajectories_multiseed as phr
 
     statuses = {s.strip() for s in include_status.split(",")}
-    picks = dict(DEFAULT_AL_PICKS)
+    picks = picks_with_tag(model_tag)
     if models:
         wanted = {m.strip() for m in models.split(",")}
         picks = {m: sw for m, sw in picks.items() if m in wanted}

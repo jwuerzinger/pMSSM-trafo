@@ -220,6 +220,8 @@ def _al_cell_from_ntuples(run_dirs, max_iter=None):
               default=True, show_default=True,
               help="Check the recomputed fractions against the pool's stored "
                    "SPheno branches and report label agreement.")
+@click.option("--target-name", default="DMRD", show_default=True,
+              help="TARGET_CONFIG key for reading the pool. Distinct from --target, which is the numeric band centre.")
 @click.option("--require-neutralino-lsp", is_flag=True, default=False)
 @click.option("--max-iter", default=0, type=int, show_default=True,
               help="Read only the first N AL iterations' ntuples (0 = all). "
@@ -235,7 +237,7 @@ def _al_cell_from_ntuples(run_dirs, max_iter=None):
               help="Skip the AL cells entirely (pool/reference rows only). "
                    "Lets the slow per-model ntuple reads run in parallel, "
                    "one process per model, and be merged afterwards.")
-def main(manifest, output_dir, baseline_data_dir, mcmc_data_dir,
+def main(manifest, output_dir, baseline_data_dir, mcmc_data_dir, target_name,
          mcmc_max_samples, cache_dir, tolerance, target,
          higgsino_window, validate_against_spheno, require_neutralino_lsp,
          max_iter, picks_override, models, skip_al):
@@ -323,7 +325,10 @@ def main(manifest, output_dir, baseline_data_dir, mcmc_data_dir,
     if baseline_data_dir:
         import uproot                                       # noqa: PLC0415
         import plot_hit_rate_trajectories_multiseed as phr   # noqa: PLC0415
-        Xb, Yb = phr._load_xy_full(baseline_data_dir, "DMRD", Path(cache_dir))
+        # target_name, NOT "DMRD" (see compute_yield_comparison). Note this
+        # script's --target is a FLOAT (the band centre), so the registry key
+        # travels separately as --target-name.
+        Xb, Yb = phr._load_xy_full(baseline_data_dir, target_name, Path(cache_dir))
         Xb_free = np.asarray(Xb)[:, FREE_PARAM_INDICES]
         oms, frs, mhs = [], [], []
         for p in sorted(Path(baseline_data_dir).glob("ntuple.*.root")):

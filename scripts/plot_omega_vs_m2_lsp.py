@@ -48,18 +48,30 @@ from pmssm.visualization import (  # noqa: E402
               help="Mass parameter on the x axis (ntuple branch IN_<param>).")
 @click.option("--cut", default=300.0, show_default=True,
               help="|param| window (GeV).")
-@click.option("--true-value", default=0.12, show_default=True)
-def main(baseline_data_dir, output_dir, param, cut, true_value):
+@click.option("--true-value", default=None, type=float,
+              help="Band centre; defaults to the target's registry value.")
+@click.option("--target", default="DMRD", show_default=True,
+              help="TARGET_CONFIG key: sets the branch, band centre and labels.")
+def main(baseline_data_dir, output_dir, param, cut, true_value, target):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
+    from pmssm.config import TARGET_CONFIG
+    tcfg = TARGET_CONFIG[target]
+    if true_value is None:
+        true_value = float(tcfg["true_value"])
+    tbranch = tcfg["branch"]
+    tlabel = tcfg.get("label") or target
+    # Only cut the upper side for targets that define one: an exclusion
+    # r-value's > 1 half is the region of interest.
+    vmax = tcfg.get("valid_max")
     branch = f"IN_{param}"
     om_l, x_l, fr_l = [], [], []
     for fn in sorted(glob.glob(f"{baseline_data_dir}/ntuple.*.root")):
         import uproot
         t = uproot.open(fn)["susy"]
-        o = t["MO_Omega"].array(library="np")
+        o = t[tbranch].array(library="np")
         mh = t["SP_m_h"].array(library="np")
         x = t[branch].array(library="np")
         fr = np.stack([t[b].array(library="np") for b in LSP_FRAC_BRANCHES],
@@ -72,7 +84,9 @@ def main(baseline_data_dir, output_dir, param, cut, true_value):
         # "mixed" class is dominated by sneutrino/stau LSPs, which are 86% of
         # in-band pool rows, rather than by well-tempered neutralinos.
         fr[(fr < 0).any(axis=1)] = np.nan
-        m = (o > 0) & (o < 1) & (mh != -1) & (np.abs(x) < cut)
+        m = (o > 0) & (mh != -1) & (np.abs(x) < cut)
+        if vmax is not None:
+            m &= (o < vmax)
         om_l.append(o[m])
         x_l.append(x[m])
         fr_l.append(fr[m])
@@ -94,20 +108,21 @@ def main(baseline_data_dir, output_dir, param, cut, true_value):
         axes[1].scatter(x[m], np.log(om[m] / true_value), s=2, alpha=0.4,
                         color=LSP_TYPE_COLORS[k], label=LSP_TYPE_NAMES[k])
     axes[0].axhline(true_value, color="black", ls="--", lw=1,
-                    label=rf"$\Omega h^2={true_value}$")
+                    label=rf"{tlabel}$={true_value:g}$")
     axes[0].axhspan(true_value * 0.9, true_value * 1.1, color="gray", alpha=0.15)
     axes[0].set_ylim(-0.03, 1.02)
-    axes[0].set_ylabel(r"$\Omega h^2$")
+    axes[0].set_ylabel(tlabel)
     axes[0].legend(fontsize=9, markerscale=3)
     axes[1].axhline(0, color="black", ls="--", lw=1)
     axes[1].axhspan(np.log(0.9), np.log(1.1), color="gray", alpha=0.15)
-    axes[1].set_ylabel(rf"log($\Omega h^2$/{true_value})")
+    axes[1].set_ylabel(rf"log({tlabel}/{true_value:g})")
     axes[1].legend(fontsize=9, markerscale=3, loc="lower left")
     for ax in axes:
         ax.set_xlim(-cut, cut)
         ax.set_xlabel(param)
     fig.tight_layout()
-    out = Path(output_dir) / f"omega_vs_{param}_lsp_type.png"
+    tag = "omega" if target == "DMRD" else target.lower()
+    out = Path(output_dir) / f"{tag}_vs_{param}_lsp_type.png"
     fig.savefig(out, dpi=150)
     click.echo(f"[lsp] wrote {out}")
 
