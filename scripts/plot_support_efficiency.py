@@ -363,24 +363,57 @@ def main(manifest, output_dir, cache_dir, baseline_data_dir, mcmc_data_dir,
                       "budget_unit": "valid models simulated (AL: train+val)"},
            "panels": {}}
 
-    fig, axes = plt.subplots(1, len(sources), figsize=(6.6 * len(sources), 5.2),
-                             squeeze=False)
-    for ax, src in zip(axes[0], sources):
+    fig, axes = plt.subplots(2, len(sources), squeeze=False, sharex="col",
+                             figsize=(6.6 * len(sources), 6.9),
+                             gridspec_kw={"height_ratios": [3.0, 1.2],
+                                          "hspace": 0.06})
+
+    def _ratio_to_own(f, c, own_f, own_c, floor):
+        """(f, c / own_c(f)) over the budgets where the reference is defined.
+
+        Interpolated in log budget, and restricted to the reference's own
+        support in x: extrapolating np.interp would clamp to the reference's
+        first value and manufacture a ratio far from 1 where the reference has
+        no measurement at all. ``floor`` drops the leftmost budgets, where the
+        reference has found only a cell or two and the ratio is dominated by
+        the denominator's own discreteness rather than by either method.
+        """
+        f, c = np.asarray(f, float), np.asarray(c, float)
+        ok = (f >= own_f[0]) & (f <= own_f[-1])
+        den = np.interp(np.log(f[ok]), np.log(own_f), own_c)
+        good = den > floor
+        return f[ok][good], c[ok][good] / den[good]
+
+    for col_i, src in enumerate(sources):
+        ax, axr = axes[0][col_i], axes[1][col_i]
         S = supports[src]
         rec = {"n_target_cells": int(S["n_target"]),
                "dataset_rows": int(S["n_rows"]),
                "dataset_calls": int(S["n_total"]), "al": {}, "reference": {}}
+        # Only guard against dividing by an essentially empty denominator. A
+        # floor of a cell or two reads as harmless but on the coarse 27-cell
+        # support it is 4 to 7% coverage, which clips the reference ratios over
+        # their whole first decade; the curves are means over --n-repeats
+        # subsets, so they are smooth well below that.
+        r_floor = 0.25 / max(1, S["n_target"])
 
         # Reference curves. Every static dataset appears in every panel; each is
         # scored on its held-out half, so the panel's own dataset is never
         # scored against the cells it defined.
+        ref_curves = {}
         for rsrc in sources:
             R = supports[rsrc]
             rcells = np.where(
                 np.abs(R["held_Y"] - true_val) / true_val < tolerance,
                 _cells(R["held_X"], S["edges"]), -1)
+            # The grid's floor is set in CALLS, not rows, so a subsampled
+            # reference still starts at the same budget as everything else.
+            # Otherwise the emcee curve begins 35x further right than the pool's
+            # and the ratio panel loses the AL curves' first decade.
             f, c = _ref_curve(rcells, S["tmap"], S["n_target"], S["n_total"],
-                              R["per_entry"], n_repeats, rng, n_points, 200)
+                              R["per_entry"], n_repeats, rng, n_points,
+                              max(4, int(round(200 / R["per_entry"]))))
+            ref_curves[rsrc] = (f, c)
             ls, col = SOURCE_STYLE[rsrc]
             ax.plot(f, c, ls, color=col, lw=1.7,
                     label=f"{SOURCE_CURVE[rsrc]} (held-out half)")
@@ -388,6 +421,16 @@ def main(manifest, output_dir, cache_dir, baseline_data_dir, mcmc_data_dir,
                                       "coverage": c.tolist()}
             if rsrc == src:
                 own_f, own_c = f, c
+        # The panel's own dataset is the unity line by construction, so only the
+        # other dataset's ratio is worth a curve here.
+        for rsrc, (f, c) in ref_curves.items():
+            if rsrc == src:
+                continue
+            ls, col = SOURCE_STYLE[rsrc]
+            rf, rr = _ratio_to_own(f, c, own_f, own_c, r_floor)
+            axr.plot(rf, rr, ls, color=col, lw=1.6)
+            rec["reference"][rsrc]["ratio_fraction"] = rf.tolist()
+            rec["reference"][rsrc]["ratio_to_own"] = rr.tolist()
 
         # AL curves. Computed first, plotted second: the cross-model summary is
         # read at the coverage EVERY curve in the panel reaches, which is not
@@ -434,11 +477,20 @@ def main(manifest, output_dir, cache_dir, baseline_data_dir, mcmc_data_dir,
             ax.plot(f, mu, "-", color=col, lw=1.9, label=lbl + tag)
             if len(runs[key]) > 1:
                 ax.fill_between(f, lo_b, hi_b, color=col, alpha=0.15, lw=0)
+            rf, rr = _ratio_to_own(f, mu, own_f, own_c, r_floor)
+            axr.plot(rf, rr, "-", color=col, lw=1.8)
+            if len(runs[key]) > 1:
+                _, rlo = _ratio_to_own(f, lo_b, own_f, own_c, r_floor)
+                _, rhi = _ratio_to_own(f, hi_b, own_f, own_c, r_floor)
+                axr.fill_between(rf, rlo, rhi, color=col, alpha=0.15, lw=0)
             ref_at_al = float(np.interp(f[-1], own_f, own_c))
             rec["al"]["/".join(key)] = {
                 "n_replicas": len(runs[key]), "fraction": f.tolist(),
                 "coverage": mu.tolist(), "coverage_min": lo_b.tolist(),
                 "coverage_max": hi_b.tolist(),
+                "ratio_fraction": rf.tolist(), "ratio_to_own": rr.tolist(),
+                "ratio_at_common_budget": float(np.interp(f_common, rf, rr))
+                if len(rf) else float("nan"),
                 "final_fraction": float(f[-1]), "final_coverage": float(mu[-1]),
                 "final_calls": int(round(f[-1] * S["n_total"])),
                 "reference_coverage_at_final_fraction": ref_at_al,
@@ -481,27 +533,49 @@ def main(manifest, output_dir, cache_dir, baseline_data_dir, mcmc_data_dir,
         for xv, txt in ((0.5, "own held-out half"), (1.0, "whole dataset")):
             if not (x_lo < xv < x_hi):
                 continue
-            ax.axvline(xv, color="0.75", ls=(0, (1, 3)), lw=1.0, zorder=0)
+            for a in (ax, axr):
+                a.axvline(xv, color="0.75", ls=(0, (1, 3)), lw=1.0, zorder=0)
             ax.annotate(txt, xy=(xv, 0.015), xytext=(-4, 0),
                         textcoords="offset points", rotation=90, ha="right",
                         va="bottom", fontsize=6.5, color="0.45")
-        ax.set_xlabel(f"points spent / size of the {SOURCE_LABEL[src]}\n"
-                      f"({S['n_total']:,} valid models simulated)")
         ax.set_ylabel(f"fraction of the {SOURCE_LABEL[src]}'s in-band support "
                       f"covered\n({S['n_target']} cells)")
         _support_axis(ax)
         ax.grid(alpha=0.3, which="both")
+        ax.tick_params(axis="x", labelbottom=False)
         ax.legend(fontsize=7.5, loc="upper left",
                   title=f"×N: the {SOURCE_LABEL[src]} needs N times the\nbudget "
                         f"for the same coverage, read at the\ncommon budget of "
                         f"{f_common:.2%} of the dataset",
                   title_fontsize=6.5)
+
+        # ── ratio panel: coverage relative to the dataset's own curve ─────────
+        # Read at equal budget, so >1 means this method covers more of the
+        # support per simulator call than the process that produced the dataset,
+        # and <1 means generating more of the dataset would have been the better
+        # spend. The dataset's own curve is 1 by construction.
+        axr.axhline(1.0, color=SOURCE_STYLE[src][1], lw=1.4,
+                    ls=SOURCE_STYLE[src][0], zorder=1)
+        axr.grid(alpha=0.3, which="both")
+        axr.set_xlabel(f"points spent / size of the {SOURCE_LABEL[src]}\n"
+                       f"({S['n_total']:,} valid models simulated)")
+        axr.set_ylabel(f"/ {SOURCE_CURVE[src]}", fontsize=8.5)
+        # Only data inside the zoom sets the range: the other dataset's ratio
+        # runs well past the right edge and would otherwise dictate the scale.
+        vis = [v for ln in axr.get_lines()
+               for x, v in zip(np.atleast_1d(ln.get_xdata()),
+                               np.atleast_1d(ln.get_ydata()))
+               if np.isfinite(v) and x_lo <= x <= x_hi]
+        v_lo, v_hi = (min(vis + [1.0]), max(vis + [1.0])) if vis else (0.5, 1.5)
+        pad = 0.06 * max(v_hi - v_lo, 0.2)
+        axr.set_ylim(max(0.0, v_lo - pad), v_hi + pad)
+        axr.tick_params(axis="y", labelsize=8)
         out["panels"][src] = rec
         click.echo(f"[eff] panel {src}: {S['n_target']} cells")
         for t in rows_txt:
             click.echo(t)
 
-    fig.tight_layout()
+    fig.tight_layout(h_pad=0.4)
     stem = f"support_efficiency_{run_set_label}"
     p_png = Path(output_dir) / f"{stem}.png"
     Path(output_dir).mkdir(parents=True, exist_ok=True)

@@ -34,6 +34,11 @@ PAPER_INVENTORY = [
     ("mcmc_diagnostics_comparison.png",        "", "no emcee reference exists for this target"),
     ("input_overlay_inband.png",               "input_overlay_inband.png", ""),
     ("coverage_saturation.png",                "", "coverage support is built from the emcee reference"),
+    ("coverage_saturation_pool.png",           "coverage_saturation_pool.png", ""),
+    ("support_efficiency_40iter.png",          "support_efficiency_40iter.png", ""),
+    ("support_efficiency_ext160.png",          "",
+     "160-iteration probes submitted but still queued"),
+    ("support_efficiency_probe20k.png",        "", "20k-batch probe sweep not submitted"),
     ("hit_rate_model_deep_gp.png",             "hit_rate_model_deep_gp_expr.png", ""),
     ("hit_rate_model_transformer.png",         "hit_rate_model_transformer_expr.png", ""),
     ("hit_rate_model_exact_gp.png",            "hit_rate_model_exact_gp_expr.png",
@@ -160,6 +165,20 @@ CAPTION_NOTES = {
         "point count, so invalid simulator returns are charged to the method. "
         "The random-scan reference is deflated by $p_{\\mathrm{valid}}=0.584$ "
         "to put both sides on a per-attempt footing.",
+    "support_efficiency_40iter.png":
+        "Budget is divided by the size of the dataset defining the support, so "
+        "the horizontal gap between a curve and the random-scan curve is the "
+        "factor by which generating more random points would cost more for the "
+        "same coverage; the lower panel is the same comparison read vertically, "
+        "as the ratio of each curve to the random scan's at equal budget, so "
+        "above one means more support covered per simulator call than random "
+        "generation buys. The AL budget counts training AND validation points, "
+        "both of which were simulated; both axes count valid models, not "
+        "attempts. The support is the 639 cells of the 12-bin quantile grid in "
+        "$(M_1, M_2, \\mu)$ holding at least 20 in-band points of the pool half "
+        "not used for any curve, in-band meaning $|r-1| < 0.1$. The random-scan "
+        "curve is that held-out half, so no arm is scored against cells it "
+        "defined. Model colours follow the hit-rate figures.",
     "compute_vs_dataset.png":
         "Coverage is the fraction of in-band support cells reached, on the "
         "12-bin quantile grid in $(M_1, M_2, \\mu)$ built from the random-scan "
