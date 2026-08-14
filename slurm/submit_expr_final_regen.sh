@@ -94,6 +94,12 @@ step "5/10 R2 / MSE / compute / coverage / inputs"
 "${PY}" scripts/coverage_saturation.py --manifest "${M}" --output-dir "${O}" \
     --cache-dir "${O}" --baseline-data-dir "${POOL}" \
     --target ExpR --support-source pool --model-tag expr 2>&1 | tail -4
+# Same support as coverage_saturation, budget axis divided by the pool's own
+# size, so the gap to the random-scan curve is the cost ratio. The support build
+# is a full pool ingest but it is cached in ${O}, so this is fast on a re-run.
+"${PY}" scripts/plot_support_efficiency.py --manifest "${M}" --output-dir "${O}" \
+    --cache-dir "${O}" --baseline-data-dir "${POOL}" \
+    --target ExpR --model-tag expr --run-set-label 40iter 2>&1 | tail -8
 "${PY}" scripts/plot_al_input_target_diagnostics.py --manifest "${M}" --output-dir "${O}" \
     --model-tag expr --target ExpR --mcmc-data-dir "" \
     --baseline-data-dir "${POOL}" --cache-dir "${O}" 2>&1 | tail -5
