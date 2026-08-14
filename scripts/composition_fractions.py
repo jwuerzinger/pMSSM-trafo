@@ -48,7 +48,8 @@ for _p in (str(_REPO_ROOT), str(_REPO_ROOT / "scripts")):
         sys.path.insert(0, _p)
 
 from analyse_runs import FREE_PARAM_INDICES, FREE_PARAM_NAMES  # noqa: E402
-from mcmc_diagnostics import DEFAULT_AL_PICKS, _picks_from_manifest  # noqa: E402
+from mcmc_diagnostics import (  # noqa: E402
+    DEFAULT_AL_PICKS, _picks_from_manifest, picks_with_tag)
 from plot_al_input_target_diagnostics import _pooled_cell_data  # noqa: E402
 from pmssm.visualization import (  # noqa: E402
     LSP_PURITY_MIN,
@@ -232,12 +233,14 @@ def _al_cell_from_ntuples(run_dirs, max_iter=None):
                    "manifests need this: the large-batch runs use top_k, so "
                    "against DEFAULT_AL_PICKS they would match no rows and the "
                    "cells would be silently absent from the output.")
+@click.option("--model-tag", default="", show_default=True,
+              help="OUTPUT_TAG of a variant sweep (e.g. 'expr'), so its tagged manifest rows resolve against the default per-model picks.")
 @click.option("--models", default="", help="Comma-separated subset of models.")
 @click.option("--skip-al", is_flag=True, default=False,
               help="Skip the AL cells entirely (pool/reference rows only). "
                    "Lets the slow per-model ntuple reads run in parallel, "
                    "one process per model, and be merged afterwards.")
-def main(manifest, output_dir, baseline_data_dir, mcmc_data_dir, target_name,
+def main(manifest, output_dir, baseline_data_dir, mcmc_data_dir, target_name, model_tag,
          mcmc_max_samples, cache_dir, tolerance, target,
          higgsino_window, validate_against_spheno, require_neutralino_lsp,
          max_iter, picks_override, models, skip_al):
@@ -279,7 +282,7 @@ def main(manifest, output_dir, baseline_data_dir, mcmc_data_dir, target_name,
                    f"{rec.get('higgsino_target_window', float('nan')):.3f}")
 
     # ── AL cells: SPheno fractions from the per-iteration worker ntuples ─────
-    picks = {} if skip_al else dict(DEFAULT_AL_PICKS)
+    picks = {} if skip_al else picks_with_tag(model_tag)
     for ent in (e.strip() for e in picks_override.split(",")):
         if not ent:
             continue

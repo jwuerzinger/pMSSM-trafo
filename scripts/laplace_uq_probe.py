@@ -76,9 +76,17 @@ def _resolve_picks(manifest: Path, models: list[str]) -> dict:
     rows = list(csv.DictReader(manifest.open()))
     out = {}
     for model in models:
-        if model not in DEFAULT_AL_PICKS:
+        # An OUTPUT_TAG'd variant ("transformer_expr") has no entry of its own;
+        # fall back to the parent model's canonical cell.
+        key = model
+        if key not in DEFAULT_AL_PICKS:
+            for _sfx in ("_expr",):
+                if key.endswith(_sfx):
+                    key = key[: -len(_sfx)]
+                    break
+        if key not in DEFAULT_AL_PICKS:
             raise click.ClickException(f"no canonical pick for {model!r}")
-        strategy, warm = DEFAULT_AL_PICKS[model]
+        strategy, warm = DEFAULT_AL_PICKS[key]
         dirs = [r["expected_run_dir"] for r in rows
                 if r["model"] == model and r["strategy"] == strategy
                 and r["warm_start"] == warm

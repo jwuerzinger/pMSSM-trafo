@@ -50,6 +50,7 @@ except ImportError:        # --export-only runs in the torch env instead
 
 from mcmc_diagnostics import (  # noqa: E402
     DEFAULT_AL_PICKS,
+    picks_with_tag,
     MODEL_DISPLAY,
     PARAM_ORDER,
 )
@@ -157,6 +158,8 @@ def _al_ensembles(run_dirs, veto: bool, cache: Path) -> list[np.ndarray]:
               show_default=True)
 @click.option("--output-dir", default="/ptmp/jwuerzin/analysis/all_runs/rank",
               show_default=True)
+@click.option("--model-tag", default="", show_default=True,
+              help="OUTPUT_TAG of a variant sweep (e.g. 'expr'), so its tagged manifest rows resolve against the default per-model picks.")
 @click.option("--models", default=None,
               help="Comma list of picks (default: all DEFAULT_AL_PICKS).")
 @click.option("--discard", default=0, show_default=True,
@@ -182,8 +185,8 @@ def _al_ensembles(run_dirs, veto: bool, cache: Path) -> list[np.ndarray]:
 @click.option("--export-only", is_flag=True, default=False,
               help="Only build the chain caches (run this with the torch env).")
 def main(manifest, output_dir, models, discard, fold_signs, require_neutralino_lsp,
-         sweep_id, include_status, cache_dir, export_only):
-    picks = dict(DEFAULT_AL_PICKS)
+         sweep_id, include_status, cache_dir, export_only, model_tag):
+    picks = picks_with_tag(model_tag)
     if models:
         wanted = {m.strip() for m in models.split(",")}
         picks = {m: sw for m, sw in picks.items() if m in wanted}

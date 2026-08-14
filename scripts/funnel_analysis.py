@@ -34,7 +34,7 @@ for _p in (str(_REPO_ROOT), str(_REPO_ROOT / "scripts")):
         sys.path.insert(0, _p)
 
 from analyse_runs import PARAM_ORDER  # noqa: E402
-from mcmc_diagnostics import DEFAULT_AL_PICKS  # noqa: E402
+from mcmc_diagnostics import DEFAULT_AL_PICKS, picks_with_tag  # noqa: E402
 
 M1_COL = PARAM_ORDER.index("IN_M_1")
 
@@ -56,11 +56,13 @@ M1_COL = PARAM_ORDER.index("IN_M_1")
 @click.option("--n-mchi-files", default=40, show_default=True,
               help="Number of pool ntuples scanned for the m_chi quantiles "
                    "(branch not in the .npy cache).")
+@click.option("--model-tag", default="", show_default=True,
+              help="OUTPUT_TAG of a variant sweep (e.g. 'expr'), so its tagged manifest rows resolve against the default per-model picks.")
 @click.option("--target", default="DMRD", show_default=True,
               help="TARGET_CONFIG key. Selects which branch the pool is read from and the band centre; a literal here silently loads relic-density data.")
 @click.option("--require-neutralino-lsp/--no-require-neutralino-lsp",
               default=False, show_default=True)
-def main(manifest, baseline_data_dir, mcmc_data_dir, cache_dir, output_dir, target,
+def main(manifest, baseline_data_dir, mcmc_data_dir, cache_dir, output_dir, target, model_tag,
          m1_cut, tolerance, n_mchi_files, require_neutralino_lsp):
     import torch
     import uproot
@@ -116,7 +118,7 @@ def main(manifest, baseline_data_dir, mcmc_data_dir, cache_dir, output_dir, targ
     # ── AL cells ─────────────────────────────────────────────────────────────
     rows = [r for r in csv.DictReader(open(manifest)) if r["status"] == "completed"]
     out["al"] = {}
-    for model, (strat, warm) in DEFAULT_AL_PICKS.items():
+    for model, (strat, warm) in picks_with_tag(model_tag).items():
         m1s, oms, trajs = [], [], []
         for r in rows:
             if (r["model"], r["strategy"], r["warm_start"]) != (model, strat, warm):

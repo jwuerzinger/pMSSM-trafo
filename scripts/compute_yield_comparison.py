@@ -47,7 +47,7 @@ from analyse_runs import (  # noqa: E402
     filter_run_neutralino_lsp,
     load_run,
 )
-from mcmc_diagnostics import DEFAULT_AL_PICKS  # noqa: E402
+from mcmc_diagnostics import DEFAULT_AL_PICKS, picks_with_tag  # noqa: E402
 import plot_hit_rate_trajectories_multiseed as phr  # noqa: E402
 
 _DIAG_ITER_RE = re.compile(r"iterations=(\d+)\s+nwalkers=(\d+)")
@@ -119,7 +119,7 @@ def al_yields(manifest: str, tol: float, require_neutralino_lsp: bool,
     rows = [r for r in csv.DictReader(open(manifest))
             if r["status"] in set(include_status)]
     out = {}
-    for model, (strat, warm) in DEFAULT_AL_PICKS.items():
+    for model, (strat, warm) in picks_with_tag(model_tag).items():
         finals, finals_valid = [], []
         for r in rows:
             if (r["model"], r["strategy"], r["warm_start"]) != (model, strat, warm):
@@ -174,11 +174,13 @@ def al_yields(manifest: str, tol: float, require_neutralino_lsp: bool,
                    "unrestricted pool credits random scanning with in-band "
                    "points the AL loops cannot reach, since their generation "
                    "config assigns Omega = -1 to slepton-LSP candidates.")
+@click.option("--model-tag", default="", show_default=True,
+              help="OUTPUT_TAG of a variant sweep (e.g. 'expr'), so its tagged manifest rows resolve against the default per-model picks.")
 @click.option("--target", default="DMRD", show_default=True,
               help="TARGET_CONFIG key. Selects which branch the pool is read from and the band centre; a literal here silently loads relic-density data.")
 @click.option("--require-neutralino-lsp/--no-require-neutralino-lsp",
               default=False, show_default=True)
-def main(manifest, mcmc_data_dir, baseline_data_dir, output_dir, tolerance, target,
+def main(manifest, mcmc_data_dir, baseline_data_dir, output_dir, tolerance, target, model_tag,
          mcmc_tolerances, baseline_require_neutralino_lsp,
          require_neutralino_lsp):
     out_dir = Path(output_dir)

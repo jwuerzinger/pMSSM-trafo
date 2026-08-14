@@ -56,7 +56,8 @@ for _p in (str(_REPO_ROOT), str(_REPO_ROOT / "scripts")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from mcmc_diagnostics import DEFAULT_AL_PICKS, MODEL_DISPLAY  # noqa: E402
+from mcmc_diagnostics import (  # noqa: E402
+    DEFAULT_AL_PICKS, MODEL_DISPLAY, picks_with_tag)
 
 COVERAGE_LEVELS = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95)
 SPARS_FRACS = np.linspace(0.0, 0.95, 20)
@@ -605,6 +606,8 @@ def _make_plots(results: dict, out_dir: Path, T_default: int) -> None:
               help="Comma list of dropout pass counts (T ablation), e.g. '30,100'.")
 @click.option("--dropout", default=0.1, show_default=True)
 @click.option("--target", default="DMRD", show_default=True)
+@click.option("--model-tag", default="", show_default=True,
+              help="OUTPUT_TAG of a variant sweep (e.g. 'expr'), so its tagged manifest rows resolve against the default per-model picks.")
 @click.option("--device", default=None, help="cuda/cpu (default: auto).")
 @click.option("--require-neutralino-lsp/--no-require-neutralino-lsp",
               default=False, show_default=True)
@@ -623,7 +626,7 @@ def main(manifest, baseline_data_dir, mcmc_data_dir, cache_dir, output_dir,
         device = "cuda" if torch.cuda.is_available() else "cpu"
     T_list = [int(t) for t in str(mc_samples).split(",") if t.strip()]
     T_default = T_list[0]
-    picks = dict(DEFAULT_AL_PICKS)
+    picks = picks_with_tag(model_tag)
     if models:
         wanted = {m.strip() for m in models.split(",")}
         picks = {m: sw for m, sw in picks.items() if m in wanted}
@@ -639,10 +642,21 @@ def main(manifest, baseline_data_dir, mcmc_data_dir, cache_dir, output_dir,
     static_idx = phr._static_random_indices(len(Y_full), 2000, static_eval_size=eval_size)
     X_static = torch.from_numpy(np.asarray(X_full)[static_idx].astype(np.float32))
     Y_static = torch.from_numpy(np.asarray(Y_full)[static_idx].astype(np.float32))
-    Xm, Ym = load_mcmc_data(data_dir=mcmc_data_dir, target=target,
-                            require_neutralino_lsp=require_neutralino_lsp,
-                            max_samples=eval_size)
-    X_mcmc, Y_mcmc = Xm.float(), Ym.float().view(-1)
+    # The emcee eval set exists only for a target with a posterior; for any
+    # other target the static random slice is the whole story, and loading the
+    # relic density's chains here would score one observable against another's
+    # reference.
+    from pmssm.config import TARGET_CONFIG as _TC  # noqa: PLC0415
+    if _TC[target].get("has_mcmc_reference", False) and mcmc_data_dir:
+        Xm, Ym = load_mcmc_data(data_dir=mcmc_data_dir, target=target,
+                                require_neutralino_lsp=require_neutralino_lsp,
+                                max_samples=eval_size)
+        X_mcmc, Y_mcmc = Xm.float(), Ym.float().view(-1)
+    else:
+        X_mcmc = torch.empty((0, X_static.shape[1]), dtype=torch.float32)
+        Y_mcmc = torch.empty(0, dtype=torch.float32)
+        click.echo(f"[uq] target {target!r} has no emcee reference; "
+                   f"scoring on the static random slice only")
     click.echo(f"[uq] eval sets: static n={len(X_static)}, mcmc n={len(X_mcmc)}, "
                f"device={device}, T={T_list}, iter_step={iter_step}")
 

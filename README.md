@@ -697,6 +697,64 @@ missing database is one clear error instead of twenty stack traces. That cache
 lives on `/ptmp` (`~/.cache` is a symlink to it) and is therefore purge-eligible;
 a backup sits at `/viper/u2/jwuerzin/pmssm-archive/smodels-cache/`.
 
+### Analysing a non-default target
+
+Every analysis script that reads the pool or the reference now takes the target
+explicitly, because a hardcoded key silently substitutes relic-density data and
+the figure still renders. `_load_y_full` / `_load_xy_full` additionally refuse a
+pool that does not carry the requested target's branch, so a mismatch raises
+instead of producing a plausible wrong number.
+
+Flags added for a variant sweep:
+
+| flag | scripts | purpose |
+|---|---|---|
+| `--target` | `compute_yield_comparison`, `funnel_analysis`, `plot_compute_vs_dataset`, `plot_al_input_target_diagnostics`, `plot_omega_vs_m2_lsp`, `coverage_saturation` | registry key: branch, band centre, validity cuts |
+| `--target-name` | `composition_fractions` | same, where `--target` is already a numeric band centre |
+| `--model-tag` | `plot_compute_vs_dataset`, `plot_mse_trajectories_multiseed`, `plot_al_input_target_diagnostics`, `coverage_saturation`, `evaluate_uq` | resolves `OUTPUT_TAG`'d manifest rows (`transformer_expr`) against the per-model picks |
+| `--support-source mcmc\|pool` | `coverage_saturation` | population defining the in-band support |
+| `--mcmc-yield-json ""` | `plot_hit_rate_trajectories_multiseed` | suppress the relic-density MCMC yield reference lines |
+
+A representative r-target invocation:
+
+```bash
+python scripts/plot_hit_rate_trajectories_multiseed.py \
+    --manifest /ptmp/jwuerzin/analysis/expr_runs/sweep_manifest.csv \
+    --output-dir /ptmp/jwuerzin/analysis/expr_runs \
+    --target ExpR --baseline-data-dir /ptmp/jwuerzin/data/260804 \
+    --no-baseline-require-neutralino-lsp --mcmc-yield-json ""
+```
+
+### The in-band support, and its two sources
+
+`coverage_saturation.build_target` defines the support by binning a reference
+population's in-band half on a 12-bin equal-occupancy quantile grid in
+(`IN_M_1`, `IN_M_2`, `IN_mu`) and keeping cells with at least `--min-cell`
+points. `coverage_of` then scores a run by the fraction of those cells it
+reaches with in-band points (the run needs one point per cell; the `min_cell`
+threshold applies to the *reference*).
+
+`--support-source` selects the reference: `mcmc` (the emcee posterior, the
+paper's original definition) or `pool` (the random-scan dataset). Axes, bins,
+tolerance, half-split and `min_cell` are identical, so the two differ only in
+which population defines the target region. The relic density can use both; a
+target with no posterior must use `pool`.
+
+The supports differ greatly in resolution, so a coverage value compares models
+*within* a panel and not across panels: a flat scan puts only 0.9% of its points
+in the relic band, giving 27 support cells, against 942 from the posterior and
+639 from the r-value pool. Measured across the completed cells the coarse pool
+support still discriminates at least as well (spread 0.80 vs 0.42), and the
+held-out reference half reaches coverage 1.000 in every case, so no support cell
+is unreachable.
+
+Empirically the three axes are the right ones for **both** targets: ranked by
+mutual information with band membership, the top three for the r-value are
+`M_2`, `M_1`, `mu` (0.0066 / 0.0065 / 0.0051 bits), with a 4.5x gap to `meL`, and
+the trilinears and `tanb` carry essentially none. No single parameter comes close
+to determining band membership (the best is 3% of the band entropy), which is why
+the support is joint and why per-dimension marginal coverage saturates at 1.0.
+
 ### Smoke-testing a target end to end
 
 The SModelS path cannot be verified offline, so:
