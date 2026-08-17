@@ -24,7 +24,7 @@
 # job would silently only run seed 1.
 #
 # Required env vars:
-#   AL_MODEL       : transformer | deep_gp | exact_gp | tabpfn
+#   AL_MODEL       : transformer | dnn | dnn_match_trafo | deep_gp | exact_gp | tabpfn
 #   AL_STRATEGY    : top_k | top_k_tol_only | entropy_batch
 #   AL_WARM        : warm | cold | tabpfn
 #   AL_SEEDS       : comma-separated integers, one per allocated node
@@ -58,6 +58,7 @@ done
 case "${AL_MODEL}" in
     transformer) PER_MODEL_SCRIPT=slurm/submit_al_transformer.sh;;
     dnn)         PER_MODEL_SCRIPT=slurm/submit_al_dnn.sh;;
+    dnn_match_trafo) PER_MODEL_SCRIPT=slurm/submit_al_dnn.sh;;
     deep_gp)     PER_MODEL_SCRIPT=slurm/submit_al_gp_deep.sh;;
     exact_gp)    PER_MODEL_SCRIPT=slurm/submit_al_gp_exact.sh;;
     tabpfn)      PER_MODEL_SCRIPT=slurm/submit_al_tabpfn.sh;;

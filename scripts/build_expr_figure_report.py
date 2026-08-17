@@ -59,11 +59,15 @@ PAPER_INVENTORY = [
     ("corner_mcmc.png",                        "", "no emcee reference exists for this target"),
     ("corner_deep_gp.png",                     "corner_deep_gp_expr.png", ""),
     ("corner_transformer.png",                 "corner_transformer_expr.png", ""),
-    ("probe_extended_yield.png",               "", "extended-iteration probe sweep not submitted"),
-    ("probe_extended_hitrate.png",             "", "extended-iteration probe sweep not submitted"),
-    ("mse_extended.png",                       "", "extended-iteration probe sweep not submitted"),
-    ("probe_extended_inputs.png",              "", "extended-iteration probe sweep not submitted"),
-    ("probe_extended_compute.png",             "", "extended-iteration probe sweep not submitted"),
+    # The extension resumed the seed-1 runs in place, so these are single-seed
+    # and were produced against the probe manifest built by
+    # build_probe_manifest.py --from-manifest. They are placed by
+    # GROUPED_SECTIONS, not here, so the two budgets stay side by side.
+    ("probe_extended_yield.png",               "probe_extended_yield.png", ""),
+    ("probe_extended_hitrate.png",             "probe_extended_hitrate.png", ""),
+    ("mse_extended.png",                       "mse_extended.png", ""),
+    ("probe_extended_inputs.png",              "probe_extended_inputs.png", ""),
+    ("probe_extended_compute.png",             "probe_extended_compute.png", ""),
     ("probe_20k_yield.png",                    "", "20k-batch probe sweep not submitted"),
     ("probe_20k_hitrate.png",                  "", "20k-batch probe sweep not submitted"),
     ("probe_20k_inputs.png",                   "", "20k-batch probe sweep not submitted"),
@@ -75,6 +79,44 @@ PAPER_INVENTORY = [
     ("laplace_accuracy.png",                   "", "Laplace-acquisition variant sweep not submitted"),
     ("laplace_inputs_all.png",                 "", "Laplace-acquisition variant sweep not submitted"),
     ("laplace_inputs_inband.png",              "", "Laplace-acquisition variant sweep not submitted"),
+]
+
+# Figures pulled out of the counterpart flow into their own subsection, in this
+# order, because they only mean anything read against each other: the same
+# quantity at the standard 40-iteration budget and at the 160-iteration
+# extension. Each group is fenced with \clearpage and \FloatBarrier so LaTeX
+# cannot float a member of one group into the middle of the other. \clearpage is
+# the load-bearing one: placeins' \FloatBarrier does not hold back full-width
+# figure* floats, which most of these are.
+GROUPED_SECTIONS = [
+    ("Budget comparison: 40 iterations against the 160-iteration extension", [
+        ("support_efficiency_40iter.png",
+         "In-band support covered against budget, 40-iteration runs, five "
+         "seeds. Budget is divided by the random scan's own size, so the "
+         "horizontal gap to its curve is the cost ratio for equal coverage; "
+         "the lower panel is that ratio read vertically at equal budget."),
+        ("support_efficiency_ext160.png",
+         "As above for the 160-iteration extension (single seed, resumed in "
+         "place from the seed-1 runs), i.e. the same axes at roughly three "
+         "times the labelled-set size."),
+        ("probe_extended_hitrate.png",
+         "Hit rate over the extension. Hits are acquired points with "
+         "$|r-1| < \\mathrm{tol}$; the reference line is the random-scan "
+         "prevalence."),
+        ("probe_extended_yield.png",
+         "Hits per requested point over the extension, so invalid simulator "
+         "returns are charged to the method."),
+        ("mse_extended.png",
+         "Transformed-space MSE over the extension. Physical-space $R^2$ is "
+         "not shown: $r$ reaches $\\sim 10^3$, so a cold-start prediction can "
+         "overflow float32 on inversion."),
+        ("probe_extended_compute.png",
+         "Compute against labelled-set size over the extension, with the "
+         "support-coverage panel built from the random-scan pool."),
+        ("probe_extended_inputs.png",
+         "Input-space marginals of the extended runs' in-band points against "
+         "the random pool, $|r-1| < 0.1$ applied per arm."),
+    ]),
 ]
 
 # Extra families the paper shows only for selected cells but that are worth
@@ -119,6 +161,7 @@ TEX_HEAD = r"""\RequirePackage{fix-cm}
 \RequirePackage{mathptmx}
 \RequirePackage{amsmath,amssymb}
 \RequirePackage{longtable}
+\RequirePackage{placeins}
 \RequirePackage[colorlinks,citecolor=blue,urlcolor=blue,linkcolor=blue]{hyperref}
 \journalname{Eur. Phys. J. C}
 
@@ -248,10 +291,28 @@ def main(fig_dir, out, copy_figs, gendate):
 
     # ---- the counterpart figures, in the paper's order ----------------------
     body.append("\\clearpage\n\\section{Counterparts of the paper's figures}\n")
+    _grouped = {n for _t, ms in GROUPED_SECTIONS for n, _c in ms}
     for p, e, _ in PAPER_INVENTORY:
-        if e and e in pngs and e not in used:
+        if e and e in pngs and e not in used and e not in _grouped:
             used.add(e)
             body.append(fig_block(e, f"Counterpart of {esc(p)}.", False))
+
+    # ---- grouped subsections ------------------------------------------------
+    # Placed before the family sections so their members are already marked used
+    # and cannot reappear; the barriers keep the two budgets visually separate.
+    for title, members in GROUPED_SECTIONS:
+        have = [(n, cap) for n, cap in members if n in pngs]
+        if not have:
+            continue
+        body.append("\\clearpage\n\\FloatBarrier\n"
+                    f"\\section{{{title}}}\n")
+        for n, cap in have:
+            used.add(n)
+            section_used.add(n)
+            body.append(fig_block(n, cap, True))
+        body.append("\\FloatBarrier\n\\clearpage\n")
+        click.echo(f"[report] grouped section {title!r}: {len(have)} of "
+                   f"{len(members)} members present")
 
     # ---- the full families --------------------------------------------------
     # These families are shown COMPLETE, even when a member already appeared in

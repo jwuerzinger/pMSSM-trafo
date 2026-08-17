@@ -206,15 +206,33 @@ def _discover(manifest, statuses, picks, all_cells, models):
 
 # ── curves ───────────────────────────────────────────────────────────────────
 
-def _al_curve(seqs, tmap, n_target, n_total, n_points, lo):
-    """(fraction, mean, lo, hi) over the seed replicas of one cell."""
-    nmax = min(len(c) for c in seqs)
+def _al_curve(seqs, tmap, n_target, n_total, n_points, lo, min_seeds=2):
+    """(fraction, mean, lo, hi) over the seed replicas of one cell.
+
+    The grid runs to the LONGEST replica, and each budget averages only the
+    replicas that reached it, keeping budgets where at least ``min_seeds`` did.
+    Taking the shortest replica instead lets one dead seed erase the cell: the
+    ExpR TabPFN seeds spent 2000, 8583, 2727, 2992 and 6248 points, so a min
+    truncated the whole curve to 2000 and it rendered as an invisible stub next
+    to its own legend entry. This mirrors the trajectory plotters, which have
+    always dropped iterations reported by fewer than --min-seeds seeds.
+    """
+    nmax = max(len(c) for c in seqs)
     if nmax <= lo:
         return None
+    need = min(min_seeds, len(seqs))          # single-seed probe manifests
     grid = np.unique(np.geomspace(lo, nmax, n_points).astype(np.int64))
-    ys = np.array([[coverage_of(c[:N], tmap, n_target) for N in grid]
-                   for c in seqs])
-    return grid / n_total, ys.mean(0), ys.min(0), ys.max(0)
+    ys = np.full((len(seqs), len(grid)), np.nan)
+    for i, c in enumerate(seqs):
+        for j, N in enumerate(grid):
+            if N <= len(c):
+                ys[i, j] = coverage_of(c[:N], tmap, n_target)
+    keep = (~np.isnan(ys)).sum(axis=0) >= need
+    if not keep.any():
+        return None
+    g, y = grid[keep], ys[:, keep]
+    return (g / n_total, np.nanmean(y, axis=0),
+            np.nanmin(y, axis=0), np.nanmax(y, axis=0))
 
 
 def _ref_curve(cells, tmap, n_target, n_total, calls_per_entry, n_repeats,
@@ -287,6 +305,10 @@ def _speedup(f_al, c_al, f_ref, c_ref):
 @click.option("--n-repeats", default=8, show_default=True,
               help="Random subsets averaged per reference budget.")
 @click.option("--n-points", default=26, show_default=True)
+@click.option("--min-seeds", default=2, show_default=True,
+              help="A budget is plotted when at least this many replicas of the "
+                   "cell reached it; capped at the number of replicas present, "
+                   "so single-seed probe manifests still draw.")
 @click.option("--anchor-min-frac", default=0.4, show_default=True,
               help="A curve whose final budget is below this fraction of the "
                    "longest run's is excluded from setting the common budget "
@@ -299,7 +321,8 @@ def _speedup(f_al, c_al, f_ref, c_ref):
 def main(manifest, output_dir, cache_dir, baseline_data_dir, mcmc_data_dir,
          target, model_tag, run_set_label, include_status, models, all_cells,
          tolerance, n_bins, min_cell, mcmc_max_samples, mcmc_total_rows,
-         n_repeats, n_points, anchor_min_frac, require_neutralino_lsp):
+         n_repeats, n_points, min_seeds, anchor_min_frac,
+         require_neutralino_lsp):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -448,7 +471,7 @@ def main(manifest, output_dir, cache_dir, baseline_data_dir, mcmc_data_dir,
                                   _cells(X, S["edges"]), -1)
                          for X, Y in seqs]
             got = _al_curve(seq_cells, S["tmap"], S["n_target"], S["n_total"],
-                            n_points, 2000)
+                            n_points, 2000, min_seeds=min_seeds)
             if got is not None:
                 curves[key] = got
         # A ratio read at each curve's own endpoint answers "what did this run

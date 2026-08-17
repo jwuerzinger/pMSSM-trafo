@@ -91,9 +91,17 @@ N_SUBMITTED=0
 N_SKIPPED=0
 
 for model in ${MODELS//,/ }; do
+    model_extra=""          # per-model architecture args, set in the case below
     case "${model}" in
         transformer) submit_script="slurm/submit_al_transformer.sh"; model_tag="transformer";;
         dnn)         submit_script="slurm/submit_al_dnn.sh";         model_tag="dnn";;
+        # Same driver as dnn; "matched" IS the architecture, chosen to match the
+        # transformer's parameter count (the plain DNN is 4 layers x 256). Kept
+        # here rather than left to EXTRA_AL_ARGS so the two DNN arms cannot
+        # silently become the same network.
+        dnn_match_trafo)
+                     submit_script="slurm/submit_al_dnn.sh";         model_tag="dnn_match_trafo";
+                     model_extra="--num-layers 3 --dim-feedforward 400";;
         deep_gp)     submit_script="slurm/submit_al_gp_deep.sh";     model_tag="deep_gp";;
         exact_gp)    submit_script="slurm/submit_al_gp_exact.sh";    model_tag="exact_gp";;
         tabpfn)      submit_script="slurm/submit_al_tabpfn.sh";      model_tag="tabpfn";;
@@ -166,7 +174,7 @@ for model in ${MODELS//,/ }; do
                 export AL_SEEDS="${SEEDS}"
                 export AL_OUTPUT_BASE="${al_output_base}"
                 export AL_SWEEP_ID="${SWEEP_ID}"
-                export AL_EXTRA_ARGS_BASE="${EXTRA_AL_ARGS}"
+                export AL_EXTRA_ARGS_BASE="${EXTRA_AL_ARGS} ${model_extra}"
 
                 if [[ "${DRY_RUN}" == "1" ]]; then
                     JOB_ID="DRY"
