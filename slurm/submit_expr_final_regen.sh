@@ -67,9 +67,15 @@ step "1/10 refresh the manifest"
 "${PY}" scripts/update_sweep_manifest.py --manifest "${M}" --all || true
 
 step "2/10 probe manifest for the 160-iteration runs"
-"${PY}" scripts/build_probe_manifest.py --help >/dev/null 2>&1 \
-  && "${PY}" scripts/build_probe_manifest.py 2>&1 | tail -5 \
-  || echo "[skip] build_probe_manifest.py needs its own arguments; see the README"
+# These probes were submitted with AL_RESUME_TO against the seed-1 runs of the
+# main sweep, so they occupy the SAME directories and --pattern cannot separate
+# them from their 40-iteration siblings. Select by seed and by length instead.
+# Previously this step invoked the script with no arguments at all and was
+# skipped by its own guard, leaving the extended runs invisible to every figure.
+PM=/ptmp/jwuerzin/analysis/expr_probe_ext/manifest.csv
+"${PY}" scripts/build_probe_manifest.py --from-manifest "${M}" \
+    --seeds 1 --min-iterations 50 --sweep-id ext160expr --out "${PM}" \
+    2>&1 | tail -6 || echo "[skip] no extended runs yet"
 
 step "3/10 hit rate + hits/desired + classification accuracy"
 # --mcmc-yield-json '' suppresses the relic-density reference lines; the veto is
@@ -100,6 +106,13 @@ step "5/10 R2 / MSE / compute / coverage / inputs"
 "${PY}" scripts/plot_support_efficiency.py --manifest "${M}" --output-dir "${O}" \
     --cache-dir "${O}" --baseline-data-dir "${POOL}" \
     --target ExpR --model-tag expr --run-set-label 40iter 2>&1 | tail -8
+# Same figure for the extended runs, if step 2 found any. --all-cells because the
+# probe manifest holds one cell per model rather than the canonical picks.
+if [[ -f "${PM}" ]]; then
+  "${PY}" scripts/plot_support_efficiency.py --manifest "${PM}" --output-dir "${O}" \
+      --cache-dir "${O}" --baseline-data-dir "${POOL}" --all-cells \
+      --target ExpR --model-tag expr --run-set-label ext160 2>&1 | tail -8
+fi
 "${PY}" scripts/plot_al_input_target_diagnostics.py --manifest "${M}" --output-dir "${O}" \
     --model-tag expr --target ExpR --mcmc-data-dir "" \
     --baseline-data-dir "${POOL}" --cache-dir "${O}" 2>&1 | tail -5
@@ -152,8 +165,17 @@ step "9/10  yield table and per-seed rank uniformity"
     --baseline-data-dir "${POOL}" --mcmc-data-dir "" \
     --target ExpR --model-tag expr --tolerance 0.10 \
     --no-baseline-require-neutralino-lsp 2>&1 | tail -20
-"${PY}" scripts/rank_uniformity_al.py \
-    --manifest "${M}" --output-dir "${O}" --model-tag expr 2>&1 | tail -8
+# Two passes: build the chain caches under torch, then analyse under the
+# Run3ModelGen env, which is the only one carrying emcee_diagnostics (arviz).
+"${PY}" scripts/rank_uniformity_al.py --export-only \
+    --manifest "${M}" --output-dir "${O}" --model-tag expr 2>&1 | tail -4
+PY_R3MG="${REPO_ROOT}/Run3ModelGen/.pixi/envs/default/bin/python"
+if [[ -x "${PY_R3MG}" ]]; then
+  "${PY_R3MG}" scripts/rank_uniformity_al.py \
+      --manifest "${M}" --output-dir "${O}" --model-tag expr 2>&1 | tail -8
+else
+  echo "[skip] ${PY_R3MG} missing; rank uniformity analysis not run"
+fi
 
 step "10/10  rebuild the companion document"
 "${PY}" scripts/build_expr_figure_report.py --fig-dir "${O}" --out "${TEX}" \

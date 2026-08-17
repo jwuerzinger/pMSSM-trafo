@@ -339,7 +339,12 @@ def main(manifest, mcmc_data_dir, mcmc_max_samples, sweep_id, output_dir,
         raise click.ClickException("no rows matched manifest filter")
 
     mcmc_X_free_norm = None
-    if overlay_mcmc:
+    if overlay_mcmc and not mcmc_data_dir:
+        # A target with no posterior is driven with --mcmc-data-dir ''. Both
+        # loaders below glob that for *.root, find nothing, and die in
+        # np.concatenate on an empty list. Drop the overlay instead of the run.
+        click.echo("[pairwise] no --mcmc-data-dir given; skipping the MCMC overlay")
+    elif overlay_mcmc:
         if mcmc_skip_file_cut:
             click.echo(f"[pairwise] loading MCMC (no file-level cut) from "
                        f"{mcmc_data_dir} ...")

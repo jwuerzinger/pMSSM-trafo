@@ -83,13 +83,82 @@ def _parse(name: str):
     return model, strat, warm, int(seed_str)
 
 
+def _from_manifest(src, out, sweep_id, seeds, min_iterations):
+    """Emit the subset of an existing manifest that the extension advanced.
+
+    The ExpR 160-iteration probes were submitted with ``AL_RESUME_TO`` against
+    the seed-1 runs of the main sweep, so they occupy the SAME directories. No
+    directory glob can tell them from their 40-iteration siblings; the only
+    signal on disk is the iteration count in state.pt. Selecting by seed and
+    then by length gives a probe manifest that the run-set figures can use
+    without disturbing the main one.
+    """
+    want = {int(s) for s in seeds.split(",") if s.strip()} if seeds else None
+    rows = []
+    for r in csv.DictReader(open(src)):
+        if want is not None and int(r.get("seed") or -1) not in want:
+            continue
+        d = Path(r["expected_run_dir"])
+        if not (d / "state.pt").exists():
+            continue
+        n_iter = 0
+        if min_iterations:
+            try:
+                import torch  # noqa: PLC0415
+                n_iter = len(list(torch.load(d / "state.pt", weights_only=False,
+                                             map_location="cpu")
+                                  .get("al_n_train") or []))
+            except Exception:                                   # noqa: BLE001
+                n_iter = 0
+            if n_iter < min_iterations:
+                continue
+        rows.append({**{k: r.get(k, "") for k in
+                        ("submit_time", "model", "strategy", "warm_start",
+                         "seed", "job_id", "expected_run_dir", "slurm_log")},
+                     "sweep_id": sweep_id, "status": "completed"})
+        click.echo(f"[probe-manifest] {r['model']}/{r['strategy']}/"
+                   f"{r['warm_start']}/seed{r['seed']}: {n_iter or '?'} iterations")
+    if not rows:
+        raise click.ClickException(
+            f"no rows of {src} matched seeds={seeds!r} with "
+            f">= {min_iterations} iterations")
+    p = Path(out)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    order = ["sweep_id", "submit_time", "model", "strategy", "warm_start",
+             "seed", "job_id", "expected_run_dir", "status", "slurm_log"]
+    with p.open("w", newline="") as fh:
+        w = csv.DictWriter(fh, fieldnames=order)
+        w.writeheader()
+        w.writerows({k: r[k] for k in order} for r in rows)
+    click.echo(f"[probe-manifest] wrote {len(rows)} rows to {p}")
+
+
 @click.command()
 @click.option("--output-root", default="/ptmp/jwuerzin/output", show_default=True)
-@click.option("--pattern", required=True,
-              help="Glob against directory names, e.g. '*ext160*' or '*_20k_*'.")
+@click.option("--pattern", default="",
+              help="Glob against directory names, e.g. '*ext160*' or '*_20k_*'. "
+                   "Required unless --from-manifest is given.")
 @click.option("--out", required=True, help="Manifest CSV to write.")
 @click.option("--sweep-id", default="probe", show_default=True)
-def main(output_root, pattern, out, sweep_id):
+@click.option("--from-manifest", default="",
+              help="Select rows from an existing manifest instead of globbing "
+                   "directories. Needed when the extended runs RESUME IN PLACE "
+                   "and so share their 40-iteration siblings' directory names, "
+                   "which no glob can separate: the ExpR probes are the seed-1 "
+                   "rows of the main sweep. Combine with --seeds.")
+@click.option("--seeds", default="",
+              help="Comma list of seeds to keep from --from-manifest.")
+@click.option("--min-iterations", default=0, type=int,
+              help="With --from-manifest, keep only runs whose state.pt has at "
+                   "least this many iterations, so unextended cells drop out.")
+def main(output_root, pattern, out, sweep_id, from_manifest, seeds,
+         min_iterations):
+    if from_manifest:
+        return _from_manifest(from_manifest, out, sweep_id, seeds,
+                              min_iterations)
+    if not pattern:
+        raise click.UsageError("give --pattern, or --from-manifest to select "
+                               "rows of an existing manifest")
     root = Path(output_root)
     candidates: dict[tuple, tuple[int, Path]] = {}
     for d in sorted(root.glob(pattern)):

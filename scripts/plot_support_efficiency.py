@@ -287,12 +287,19 @@ def _speedup(f_al, c_al, f_ref, c_ref):
 @click.option("--n-repeats", default=8, show_default=True,
               help="Random subsets averaged per reference budget.")
 @click.option("--n-points", default=26, show_default=True)
+@click.option("--anchor-min-frac", default=0.4, show_default=True,
+              help="A curve whose final budget is below this fraction of the "
+                   "longest run's is excluded from setting the common budget "
+                   "the headline factors are read at. It is still drawn, and "
+                   "gets a factor read at its own endpoint, marked with a "
+                   "dagger. Stops one timed-out cell from pulling the anchor "
+                   "back to where no model has separated yet.")
 @click.option("--require-neutralino-lsp/--no-require-neutralino-lsp",
               default=False, show_default=True)
 def main(manifest, output_dir, cache_dir, baseline_data_dir, mcmc_data_dir,
          target, model_tag, run_set_label, include_status, models, all_cells,
          tolerance, n_bins, min_cell, mcmc_max_samples, mcmc_total_rows,
-         n_repeats, n_points, require_neutralino_lsp):
+         n_repeats, n_points, anchor_min_frac, require_neutralino_lsp):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -451,7 +458,22 @@ def main(manifest, output_dir, cache_dir, baseline_data_dir, mcmc_data_dir,
         # to find at random). So the headline number is read at the largest
         # budget EVERY curve in the panel reaches, which is the convention the
         # saturation figure already uses; the endpoint ratio is kept alongside.
-        f_common = min(f[-1] for f, *_ in curves.values()) if curves else 0.0
+        # The anchor is the largest budget every curve reaches, but a run that
+        # died early must not drag it down to where nothing has separated yet:
+        # TabPFN's ExpR cell timed out at 2,442 points, which pulled the anchor
+        # to 0.14% of the dataset and made every factor read 1.0. Curves shorter
+        # than --anchor-min-frac of the longest are excluded from setting it
+        # (they are still drawn, and still get a factor, read at the anchor if
+        # they reach it and at their own endpoint otherwise).
+        ends = {k: f[-1] for k, (f, *_ ) in curves.items()}
+        longest = max(ends.values()) if ends else 0.0
+        anchoring = [v for v in ends.values() if v >= anchor_min_frac * longest]
+        f_common = min(anchoring) if anchoring else (min(ends.values()) if ends else 0.0)
+        short = {k for k, v in ends.items() if v < anchor_min_frac * longest}
+        if short:
+            click.echo(f"[eff] excluded from the anchor (shorter than "
+                       f"{anchor_min_frac:.0%} of the longest run): "
+                       f"{', '.join('/'.join(k) for k in sorted(short))}")
         # Pull the anchor below any curve that has already reached full coverage
         # there: at the ceiling the ratio is decided entirely by how long random
         # sampling takes to stumble on the single hardest cell, which is a
@@ -460,19 +482,29 @@ def main(manifest, output_dir, cache_dir, baseline_data_dir, mcmc_data_dir,
                  for f, mu, *_ in curves.values() if mu.max() >= 0.999]
         if f_sat:
             f_common = min(f_common, 0.95 * min(f_sat))
+        any_at_own = False
         rows_txt = [f"    {'':<34} common budget for the headline column: "
                     f"{f_common * 100:.4f}% of the dataset "
                     f"({int(round(f_common * S['n_total'])):,} calls)"]
         for key, (f, mu, lo_b, hi_b) in curves.items():
             model, strat, warm = key
             fac, bound = _speedup(f[-1], mu[-1], own_f, own_c)
-            c_at_common = float(np.interp(f_common, f, mu))
-            fac_c, bound_c = _speedup(f_common, c_at_common, own_f, own_c)
+            # A curve excluded from the anchor may not reach it. np.interp would
+            # clamp to its final coverage and credit it with a budget it never
+            # spent, which understates it; read those at their own endpoint and
+            # mark them instead.
+            at_own = f[-1] < f_common
+            f_read = f[-1] if at_own else f_common
+            c_at_common = mu[-1] if at_own else float(np.interp(f_common, f, mu))
+            fac_c, bound_c = _speedup(f_read, c_at_common, own_f, own_c)
+            any_at_own = any_at_own or at_own
             base = phr.MODEL_DISPLAY.get(model, model)
             lbl = base if n_per_model[model] == 1 else f"{base} ({strat}/{warm})"
             tag = ("" if not np.isfinite(fac_c) else
                    f"  {'≥' if bound_c else ''}×{fac_c:.1f}"
                    if fac_c < 10 else f"  {'≥' if bound_c else ''}×{fac_c:.0f}")
+            if tag and at_own:
+                tag += "†"
             col = phr.MODEL_COLORS.get(model, "gray")
             ax.plot(f, mu, "-", color=col, lw=1.9, label=lbl + tag)
             if len(runs[key]) > 1:
@@ -500,6 +532,7 @@ def main(manifest, output_dir, cache_dir, baseline_data_dir, mcmc_data_dir,
                 "common_budget_fraction": float(f_common),
                 "coverage_at_common_budget": c_at_common,
                 "budget_speedup_at_common_budget": float(fac_c),
+                "read_at_own_endpoint_not_anchor": bool(at_own),
                 "speedup_at_common_is_lower_bound": bool(bound_c)}
             rows_txt.append(f"    {lbl:<34} cov {mu[-1]:.3f} at "
                             f"{f[-1] * 100:8.4f}% of the dataset "
@@ -546,7 +579,9 @@ def main(manifest, output_dir, cache_dir, baseline_data_dir, mcmc_data_dir,
         ax.legend(fontsize=7.5, loc="upper left",
                   title=f"×N: the {SOURCE_LABEL[src]} needs N times the\nbudget "
                         f"for the same coverage, read at the\ncommon budget of "
-                        f"{f_common:.2%} of the dataset",
+                        f"{f_common:.2%} of the dataset"
+                        + ("\n† run too short to reach it: read at its own end"
+                           if any_at_own else ""),
                   title_fontsize=6.5)
 
         # ── ratio panel: coverage relative to the dataset's own curve ─────────

@@ -106,7 +106,8 @@ def mcmc_yield(mcmc_data_dir: str, tols: list[float]) -> dict:
 
 
 def al_yields(manifest: str, tol: float, require_neutralino_lsp: bool,
-              p_valid: float, include_status=("completed", "timeout")) -> dict:
+              p_valid: float, model_tag: str = "", true_val: float = 0.12,
+              include_status=("completed", "timeout")) -> dict:
     """Per best-per-model cell: final cumulative hits/desired (attempt units)
     AND final hit rate (per valid retained training point) — the two unit
     systems of the paper's yield table."""
@@ -131,10 +132,10 @@ def al_yields(manifest: str, tol: float, require_neutralino_lsp: bool,
                 continue
             if require_neutralino_lsp:
                 run = filter_run_neutralino_lsp(run)
-            _, rates = phr._hits_per_desired_trajectory(run, 0.12, tol)
+            _, rates = phr._hits_per_desired_trajectory(run, true_val, tol)
             if rates:
                 finals.append(rates[-1])
-            _, hr = compute_hit_rate_trajectory(run, 0.12, tol)
+            _, hr = compute_hit_rate_trajectory(run, true_val, tol)
             if hr:
                 finals_valid.append(hr[-1])
         if finals:
@@ -185,7 +186,8 @@ def main(manifest, mcmc_data_dir, baseline_data_dir, output_dir, tolerance, targ
          require_neutralino_lsp):
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    true_value = 0.12
+    from pmssm.config import TARGET_CONFIG  # noqa: PLC0415
+    true_value = float(TARGET_CONFIG[target]["true_value"])
     tols = [tolerance] + [float(s) for s in mcmc_tolerances.split(",")
                           if s.strip() and abs(float(s) - tolerance) > 1e-12]
 
@@ -261,13 +263,22 @@ def main(manifest, mcmc_data_dir, baseline_data_dir, output_dir, tolerance, targ
                f"-> random per-attempt yield {random_yield:.4f}")
 
     # ── MCMC ────────────────────────────────────────────────────────────────
-    m = mcmc_yield(mcmc_data_dir, tols)
-    click.echo(f"[yield] MCMC: {m['distinct_inband']:,} distinct in-band states, "
-               f"{m['stored_rows']:,} stored rows, "
-               f"{m['total_proposals'] and format(m['total_proposals'], ',')} proposals")
+    # Absent for a target with no posterior, which is driven with
+    # --mcmc-data-dir ''. Left unguarded, mcmc_yield finds no ROOT files, so
+    # tot_rows is 0 and the post-burn-in yield divides by zero.
+    if mcmc_data_dir:
+        m = mcmc_yield(mcmc_data_dir, tols)
+        click.echo(f"[yield] MCMC: {m['distinct_inband']:,} distinct in-band states, "
+                   f"{m['stored_rows']:,} stored rows, "
+                   f"{m['total_proposals'] and format(m['total_proposals'], ',')} proposals")
+    else:
+        m = None
+        click.echo("[yield] no --mcmc-data-dir given; the emcee row is omitted "
+                   "and the random-scan multiplier is the reference")
 
     # ── AL picks ────────────────────────────────────────────────────────────
-    al = al_yields(manifest, tolerance, require_neutralino_lsp, p_valid)
+    al = al_yields(manifest, tolerance, require_neutralino_lsp, p_valid,
+                   model_tag=model_tag, true_val=true_value)
 
     # ── table ───────────────────────────────────────────────────────────────
     # Two unit systems: "per attempt" (one simulator call — the common
@@ -277,11 +288,12 @@ def main(manifest, mcmc_data_dir, baseline_data_dir, output_dir, tolerance, targ
     # divided by the random-scan p_valid (marked *) — the same conversion that
     # relates the random baseline between the two unit systems.
     rows = [("Random scan", random_yield, prevalence)]
-    if m["yield_whole_run"]:
-        rows.append(("emcee reference (incl. burn-in) *",
-                     m["yield_whole_run"], m["yield_whole_run"] / p_valid))
-    rows.append(("emcee reference (excl. burn-in) *",
-                 m["yield_post_burnin"], m["yield_post_burnin"] / p_valid))
+    if m is not None:
+        if m["yield_whole_run"]:
+            rows.append(("emcee reference (incl. burn-in) *",
+                         m["yield_whole_run"], m["yield_whole_run"] / p_valid))
+        rows.append(("emcee reference (excl. burn-in) *",
+                     m["yield_post_burnin"], m["yield_post_burnin"] / p_valid))
     rows += [(f"{k} ({v['strategy']}/{v['warm']}, n={v['n_seeds']})",
               v["yield"], v["yield_per_valid"])
              for k, v in sorted(al.items(), key=lambda kv: kv[1]["yield"])]

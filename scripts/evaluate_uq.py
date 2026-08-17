@@ -616,7 +616,7 @@ def _make_plots(results: dict, out_dir: Path, T_default: int) -> None:
               help="Ignore per-run uq_eval_cache.json entries.")
 def main(manifest, baseline_data_dir, mcmc_data_dir, cache_dir, output_dir,
          models, seeds, include_status, eval_size, tabpfn_eval_size, iter_step,
-         mc_samples, dropout, target, device, require_neutralino_lsp,
+         mc_samples, dropout, target, model_tag, device, require_neutralino_lsp,
          skip_tabpfn, refresh):
     import torch
     import plot_hit_rate_trajectories_multiseed as phr

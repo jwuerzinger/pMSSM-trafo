@@ -2694,11 +2694,25 @@ def main(manifest, sweep_id, output_dir, uncertainty, target, tolerances,
 
                 # MCMC eval set
                 X_mcmc = Y_mcmc = None
-                if mcmc_data_dir:
+                # --mcmc-data-dir defaults to the RELIC-DENSITY posterior, and
+                # this call used to omit `target`, so load_mcmc_data defaulted to
+                # DMRD as well. For any other target that silently produced an
+                # eval set of Omega inputs and Omega labels, which was then
+                # scored against this target's threshold: a plausible-looking
+                # accuracy panel comparing two unrelated observables. Refuse by
+                # registry rather than by hoping the caller passes ''.
+                if mcmc_data_dir and not TARGET_CONFIG[target].get(
+                        "has_mcmc_reference", False):
+                    click.echo(f"[accuracy] target {target!r} has no emcee "
+                               f"reference; skipping the MCMC panel "
+                               f"(ignoring --mcmc-data-dir {mcmc_data_dir!r})")
+                    sys.stdout.flush()
+                elif mcmc_data_dir:
                     try:
                         from pmssm.data import load_mcmc_data  # noqa: PLC0415
                         Xm, Ym = load_mcmc_data(
                             data_dir=mcmc_data_dir,
+                            target=target,
                             max_samples=mcmc_max_samples or None,
                         )
                         X_mcmc = Xm.float() if hasattr(Xm, "float") else torch.from_numpy(np.asarray(Xm, dtype=np.float32))
