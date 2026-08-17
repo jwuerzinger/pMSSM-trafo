@@ -62,7 +62,7 @@ PAPER_INVENTORY = [
     # The extension resumed the seed-1 runs in place, so these are single-seed
     # and were produced against the probe manifest built by
     # build_probe_manifest.py --from-manifest. They are placed by
-    # GROUPED_SECTIONS, not here, so the two budgets stay side by side.
+    # GROUPED_SECTIONS, not here, so the run set stays together.
     ("probe_extended_yield.png",               "probe_extended_yield.png", ""),
     ("probe_extended_hitrate.png",             "probe_extended_hitrate.png", ""),
     ("mse_extended.png",                       "mse_extended.png", ""),
@@ -81,24 +81,24 @@ PAPER_INVENTORY = [
     ("laplace_inputs_inband.png",              "", "Laplace-acquisition variant sweep not submitted"),
 ]
 
-# Figures pulled out of the counterpart flow into their own subsection, in this
-# order, because they only mean anything read against each other: the same
-# quantity at the standard 40-iteration budget and at the 160-iteration
-# extension. Each group is fenced with \clearpage and \FloatBarrier so LaTeX
-# cannot float a member of one group into the middle of the other. \clearpage is
-# the load-bearing one: placeins' \FloatBarrier does not hold back full-width
-# figure* floats, which most of these are.
+# Figures pulled out of the counterpart flow into their own section, in this
+# order, because they are one run set read together rather than individual
+# counterparts. Each group is fenced with \clearpage and \FloatBarrier so LaTeX
+# cannot float a member into a neighbouring section. \clearpage is the
+# load-bearing one: placeins' \FloatBarrier does not hold back full-width
+# figure* floats, which most of these are. The 40-iteration support-efficiency
+# panel deliberately stays with the counterparts, since its partner at the
+# standard budget is what the rest of that section shows.
 GROUPED_SECTIONS = [
-    ("Budget comparison: 40 iterations against the 160-iteration extension", [
-        ("support_efficiency_40iter.png",
-         "In-band support covered against budget, 40-iteration runs, five "
-         "seeds. Budget is divided by the random scan's own size, so the "
-         "horizontal gap to its curve is the cost ratio for equal coverage; "
-         "the lower panel is that ratio read vertically at equal budget."),
+    ("The 160-iteration extension", [
         ("support_efficiency_ext160.png",
-         "As above for the 160-iteration extension (single seed, resumed in "
-         "place from the seed-1 runs), i.e. the same axes at roughly three "
-         "times the labelled-set size."),
+         "In-band support covered against budget for the 160-iteration "
+         "extension (single seed, resumed in place from the seed-1 runs). "
+         "Budget is divided by the random scan's own size, so the horizontal "
+         "gap to its curve is the cost ratio for equal coverage, and the lower "
+         "panel is that ratio read vertically at equal budget. Compare the "
+         "40-iteration version among the counterpart figures above: these are "
+         "the same axes at roughly three times the labelled-set size."),
         ("probe_extended_hitrate.png",
          "Hit rate over the extension. Hits are acquired points with "
          "$|r-1| < \\mathrm{tol}$; the reference line is the random-scan "
