@@ -207,7 +207,10 @@ def main(manifest, mcmc_data_dir, baseline_data_dir, output_dir, tolerance, targ
     inband_raw = int((np.abs(Y_full - true_value) / true_value < tolerance).sum())
     neut_mask = None
     if baseline_require_neutralino_lsp:
+        # target= keys the on-disk cache. Omitted, an ExpR pool read is cached
+        # under the DMRD name and the two targets overwrite each other's mask.
         neut_mask = phr._load_pool_neutralino_mask(baseline_data_dir, out_dir,
+                                                   target=target,
                                                    n_expected=len(Y_full))
         if neut_mask is None:
             click.echo("[yield] WARNING no SP_LSP_type available; baseline left "

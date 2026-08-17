@@ -436,7 +436,7 @@ def main(manifest, output_dir, models, mcmc_data_dir, baseline_data_dir, target,
                 f"target {target!r} has no MCMC reference; pass "
                 f"--mcmc-data-dir '' to skip that overlay arm")
         click.echo(f"[al-diag] loading MCMC reference from {mcmc_data_dir} ...")
-        Xm, Ym = load_mcmc_data(data_dir=mcmc_data_dir,
+        Xm, Ym = load_mcmc_data(data_dir=mcmc_data_dir, target=target,
                                 require_neutralino_lsp=require_neutralino_lsp,
                                 max_samples=mcmc_max_samples or None)
         Xm = Xm.numpy() if hasattr(Xm, "numpy") else np.asarray(Xm)

@@ -385,7 +385,9 @@ def main(manifest, output_dir, baseline_data_dir, mcmc_data_dir, target_name, mo
     # ── emcee reference: no fraction branches, reconstruction only ───────────
     if mcmc_data_dir:
         from pmssm.data import load_mcmc_data  # noqa: PLC0415
-        Xm, Ym = load_mcmc_data(data_dir=mcmc_data_dir,
+        # Without target= this defaults to DMRD and quietly hands back relic
+        # densities for any other target; the registry guard now raises instead.
+        Xm, Ym = load_mcmc_data(data_dir=mcmc_data_dir, target=target_name,
                                 require_neutralino_lsp=require_neutralino_lsp,
                                 max_samples=mcmc_max_samples or None)
         Xm = Xm.numpy() if hasattr(Xm, "numpy") else np.asarray(Xm)

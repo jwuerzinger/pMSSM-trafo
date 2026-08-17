@@ -69,6 +69,18 @@ def main(manifest, baseline_data_dir, mcmc_data_dir, cache_dir, output_dir, targ
     import plot_hit_rate_trajectories_multiseed as phr
     from analyse_runs import filter_run_neutralino_lsp, load_run
 
+    # This analysis is relic-density-specific by construction, not merely by
+    # default: it reads MO_Omega directly and its whole subject is the funnel
+    # and coannihilation mechanisms that set Omega. --target and --model-tag
+    # exist so a tagged sweep's rows resolve, not so another observable can be
+    # substituted, and with the band centre hardcoded below a non-DMRD target
+    # would silently score |y - 0.12|/0.12. Refuse rather than mislead.
+    if target != "DMRD":
+        raise click.UsageError(
+            f"funnel_analysis is specific to the relic density (it reads "
+            f"MO_Omega and asks which Omega-setting mechanism each point uses); "
+            f"target={target!r} has no funnel structure to find. Use "
+            f"--model-tag alone if you meant to select a tagged sweep.")
     true_value = 0.12
     out: dict = {"m1_cut": m1_cut, "tolerance": tolerance}
 
