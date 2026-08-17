@@ -478,7 +478,14 @@ def main(manifest, output_dir, sweep_id, include_status, picks_override, models,
     # that --picks can name them, but they must not leak into the main-body
     # per-warm-mode figures just by being registered: those compare
     # architectures under one acquisition rule. Select them explicitly instead.
-    all_models = [m for m in MODEL_DISPLAY
+    # MODEL_DISPLAY is keyed by the BARE model names. A tagged sweep's manifest
+    # holds "transformer_expr", so iterating the keys unchanged looked for cells
+    # that cannot exist and both warm/cold figures reported "no usable cells" —
+    # with the full five seeds present. Lookups of tagged names still work
+    # because MODEL_COLORS/MODEL_DISPLAY fall back on the suffix; it is only
+    # iteration that has to be re-keyed, exactly as picks_with_tag does.
+    _sfx = f"_{model_tag}" if model_tag else ""
+    all_models = [m + _sfx for m in MODEL_DISPLAY
                   if not m.endswith(("_laplace", "_oracle"))]
     all_strats = ("entropy_batch", "top_k", "top_k_tol_only")
     for warm_mode in ("warm", "cold"):

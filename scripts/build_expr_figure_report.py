@@ -89,6 +89,15 @@ PAPER_INVENTORY = [
 # figure* floats, which most of these are. The 40-iteration support-efficiency
 # panel deliberately stays with the counterparts, since its partner at the
 # standard budget is what the rest of that section shows.
+# Appended to every caption whose figure pools acquired points across seeds.
+POOLED_SEED_NOTE = (
+    r" Pooled over all seed replicas with no iteration cut. Seed 1 of each"
+    r" \texttt{entropy\_batch} cell was resumed in place to 160 iterations"
+    r" while seeds 2--5 stopped at 40, so seed 1 contributes several times as"
+    r" many points as any other and this figure is weighted towards it. The"
+    r" trajectory figures are unaffected: they drop any iteration reported by"
+    r" fewer than two seeds.")
+
 GROUPED_SECTIONS = [
     ("The 160-iteration extension", [
         ("support_efficiency_ext160.png",
@@ -145,8 +154,16 @@ EXTRA_SECTIONS = [
     ("n_train_*.png", "Labelled-set growth", "Labelled-set size,", False, False),
     ("mse_*.png", "Mean squared error", "MSE,", False, False),
     ("compute_*.png", "Compute", "Compute,", False, False),
-    ("corner_*.png", "Corner plots", "Input-space corner plot,", True, False),
-    ("pairwise_density_*.png", "Pairwise input densities", "Pairwise input density,", True, False),
+    # These two families pool every acquired point of every seed with no
+    # iteration cut, unlike the trajectory figures, which drop iterations
+    # reported by fewer than two seeds. Seed 1 of each entropy_batch cell was
+    # resumed IN PLACE to 160 iterations while seeds 2-5 stopped at 40, so it
+    # contributes several times what any sibling does. Said in the caption
+    # because it changes what the figure represents.
+    ("corner_*.png", "Corner plots",
+     "Input-space corner plot," + POOLED_SEED_NOTE, True, False),
+    ("pairwise_density_*.png", "Pairwise input densities",
+     "Pairwise input density," + POOLED_SEED_NOTE, True, False),
     ("*_overlay*.png", "Target-marginal overlays", "Target marginal,", False, False),
     ("*_vs_*_lsp_type.png", "Target vs mass parameter by LSP type",
      "Target against a mass parameter, coloured by LSP type,", False, False),
