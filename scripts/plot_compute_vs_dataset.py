@@ -492,7 +492,17 @@ def main(manifest, output_dir, sweep_id, include_status, picks_override, models,
         # Same two-panel layout as the best-per-model figure: what the compute
         # buys in labels (left) and in covered support (right), for every
         # (model, strategy) cell of this warm mode.
-        figw, (axw, axw2) = plt.subplots(1, 2, figsize=(12.5, 5.2))
+        # One coverage axis PER support source, matching the best-per-model
+        # figure. This used to be a single axis showing cov_ctxs[0] only, so on
+        # the relic-density branch the random-scan support was silently dropped
+        # and the panel's meaning depended on the order cov_sources was built in.
+        n_cov = len(cov_ctxs) if coverage else 0
+        figw, axrow = plt.subplots(1, 1 + max(n_cov, 1),
+                                   figsize=(6.25 * (1 + max(n_cov, 1)), 5.2),
+                                   squeeze=False)
+        axw = axrow[0][0]
+        cov_axes = list(axrow[0][1:])
+        axw2 = cov_axes[0]          # kept for the coverage-disabled placeholder
         models_present, strats_present = set(), set()
         cov_present = False
         for model in all_models:
@@ -514,18 +524,24 @@ def main(manifest, output_dir, sweep_id, include_status, picks_override, models,
                 if cell is None:
                     continue
                 Cm, Lm, _Tm, _Sm, Vm = cell
-                # This companion figure has a single coverage axis, so it shows
-                # the FIRST support source only (emcee where one exists, the
-                # random pool otherwise); the axis label below records which.
-                Vm = (Vm[0] if isinstance(Vm, list) and Vm
-                      else (None if isinstance(Vm, list) else Vm))
+                Vlist = (list(Vm) if isinstance(Vm, list)
+                         else ([] if Vm is None else [Vm]))
                 col = phr.MODEL_COLORS.get(model, "gray")
                 axw.plot(Cm.mean(0), Lm.mean(0), lw=1.5, ls=STRAT_LS[strat],
                          color=col)
-                if Vm is not None and np.isfinite(Vm).any():
-                    axw2.plot(Cm.mean(0), np.nanmean(Vm, axis=0), lw=1.5,
-                              ls=STRAT_LS[strat], color=col)
+                cov_finals = {}
+                for ci, Vi in enumerate(Vlist[:len(cov_axes)]):
+                    if Vi is None or not np.isfinite(Vi).any():
+                        continue
+                    cov_axes[ci].plot(Cm.mean(0), np.nanmean(Vi, axis=0), lw=1.5,
+                                      ls=STRAT_LS[strat], color=col)
                     cov_present = True
+                    cov_finals[cov_ctxs[ci][0]] = {
+                        "coverage_final": float(np.nanmean(Vi, axis=0)[-1]),
+                        "coverage_sem": (float(np.nanstd(Vi, axis=0, ddof=1)[-1]
+                                               / np.sqrt(len(Vi)))
+                                         if len(Vi) > 1 else None)}
+                Vm = Vlist[0] if Vlist else None
                 cell_summary.setdefault(warm_mode, {}).setdefault(model, {})[strat] = {
                     "n_seeds": int(Cm.shape[0]),
                     "gpu_hours_final": float(Cm.mean(0)[-1]),
@@ -537,6 +553,9 @@ def main(manifest, output_dir, sweep_id, include_status, picks_override, models,
                                            / np.sqrt(len(Vm)))
                                      if Vm is not None and len(Vm) > 1
                                      and np.isfinite(Vm).any() else None),
+                    # Per-source values; the two fields above stay for
+                    # compatibility and mirror whichever source came first.
+                    "coverage_by_source": cov_finals,
                 }
                 models_present.add(model)
                 strats_present.add(strat)
@@ -544,11 +563,14 @@ def main(manifest, output_dir, sweep_id, include_status, picks_override, models,
             plt.close(figw)
             click.echo(f"[compute] {warm_mode}: no usable cells — skipped")
             continue
-        for ax_i, lab in ((axw, r"labeled-set size $|L|$"),
-                          (axw2, f"fraction of {cov_ctxs[0][1]} in-band support "
-                                 f"covered ({cov_ctxs[0][5]} cells)"
-                                 if cov_ctxs else
-                                 "fraction of in-band support covered")):
+        _labs = [(axw, r"labeled-set size $|L|$")]
+        for ci, ax_c in enumerate(cov_axes):
+            _labs.append((ax_c,
+                          f"fraction of {cov_ctxs[ci][1]} in-band support "
+                          f"covered ({cov_ctxs[ci][5]} cells)"
+                          if ci < len(cov_ctxs) else
+                          "fraction of in-band support covered"))
+        for ax_i, lab in _labs:
             ax_i.set_xscale("log")
             ax_i.set_xlabel("cumulative surrogate compute [GPU h] "
                             "(training + selection)")

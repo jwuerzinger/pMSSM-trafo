@@ -111,11 +111,15 @@ def build_target(mcmc_data_dir: str, ax_idx: list[int], n_bins: int, min_cell: i
         raise ValueError(f"unknown support_source {support_source!r}")
     Xm = np.asarray(Xm.numpy() if hasattr(Xm, "numpy") else Xm)[:, ax_idx]
     Ym = np.asarray(Ym.numpy() if hasattr(Ym, "numpy") else Ym).ravel()
-    perm = rng.permutation(len(Xm))
-    half = len(perm) // 2
-    X_a, Y_a = Xm[perm[:half]], Ym[perm[:half]]
-    X_b, Y_b = Xm[perm[half:]], Ym[perm[half:]]
-    X_def = X_a[np.abs(Y_a - true_val) / true_val < tolerance]
+    # No half-split: the support is every in-band point of the dataset, and the
+    # same rows supply the curve. The dataset's own curve therefore reaches 1.0
+    # at full budget by construction -- that is the definition of its support,
+    # not a result, and the curve's SHAPE is the claim. Splitting bought an
+    # out-of-sample reference at the cost of halving the defining set (27 cells
+    # instead of ~50 for the relic-density pool) and of needing a defensible way
+    # to hold out half of four asymmetric chains, which there isn't.
+    X_b, Y_b = Xm, Ym
+    X_def = Xm[np.abs(Ym - true_val) / true_val < tolerance]
     edges = [np.quantile(X_def[:, j], np.linspace(0, 1, n_bins + 1))
              for j in range(len(ax_idx))]
     for e in edges:
@@ -238,11 +242,10 @@ def main(manifest, baseline_data_dir, mcmc_data_dir, cache_dir, output_dir,
                                 max_samples=mcmc_max_samples)
         Xm = np.asarray(Xm.numpy() if hasattr(Xm, "numpy") else Xm)[:, ax_idx]
         Ym = np.asarray(Ym.numpy() if hasattr(Ym, "numpy") else Ym).ravel()
-    perm = rng.permutation(len(Xm))
-    half = len(perm) // 2
-    X_a, Y_a = Xm[perm[:half]], Ym[perm[:half]]      # defines the target support
-    X_b, Y_b = Xm[perm[half:]], Ym[perm[half:]]      # supplies the MCMC curve
-    X_def = X_a[np.abs(Y_a - true_val) / true_val < tolerance]
+    # As in build_target: no split, so the support uses every in-band row.
+    half = len(Xm)
+    X_b, Y_b = Xm, Ym
+    X_def = Xm[np.abs(Ym - true_val) / true_val < tolerance]
 
     if _has_ref:
         edges = [np.quantile(X_def[:, j], np.linspace(0, 1, n_bins + 1)) for j in range(3)]

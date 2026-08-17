@@ -12,9 +12,9 @@ in the informative subspace, built from a random half of the dataset's in-band
 points, cells needing at least ``--min-cell`` of them), and every curve's budget
 is divided by the number of models that dataset contains. So
 
-  * x = 1     is "you have spent what the whole dataset cost to generate"
-  * x = 0.5   is where the dataset's own held-out half completes its support,
-              by construction of the half-split (that is the ceiling check)
+  * x = 1     is "you have spent what the whole dataset cost to generate", and
+              is where the dataset's own curve necessarily reaches 1.0, since
+              the support is defined by that dataset
   * a curve to the LEFT of the dataset's own curve at the same height is
     cheaper than generating the dataset; to the right, more expensive.
 
@@ -22,12 +22,17 @@ Curves drawn in every panel:
 
   AL, per model   the accumulated labelled set in acquisition order, averaged
                   over seed replicas (band = min/max over seeds)
-  random scan     the static random pool's held-out half, random subsets
-  MCMC            the emcee reference's held-out half, random subsets
-                  (only where a posterior exists for the target)
+  random scan     the whole static random pool, prefixes in scan order
+  MCMC            the RAW emcee chains, prefixes in step order with burn-in and
+                  the repeated rows left by rejected proposals; the band and the
+                  cells still come from the post-burn-in ntuples
+  ATLAS scan      the public ATLAS pMSSM EWK scan, both campaigns merged
 
-The dataset that defines a panel's support is always scored on its held-out
-half, so no population is scored against cells it helped define.
+Nothing is held out: a panel's own dataset defines the support AND supplies its
+curve, so that curve reaches 1.0 at x = 1 by construction. That is the definition
+of the support rather than a result, and the curve's SHAPE is the claim. The
+alternative, splitting in half, halved the defining set and offered no defensible
+way to hold out part of four asymmetric chains.
 
 **Units.** Both sides are counted in *valid models simulated*: an AL run's
 labelled set is train + validation (all of it was simulated and all of it
@@ -83,51 +88,125 @@ for _p in (str(_REPO_ROOT), str(_REPO_ROOT / "scripts")):
 from coverage_saturation import (  # noqa: E402
     AXES, RNG_SEED, _cells, _support_axis, build_target, coverage_of)
 from mcmc_diagnostics import PARAM_ORDER, picks_with_tag  # noqa: E402
+from pmssm.config import TARGET_CONFIG as TARGET_CONFIG_  # noqa: E402
+from pmssm.data import target_validity_mask as target_validity_mask_  # noqa: E402
 
 # Panel identity: what the dataset is called, and its line style when it appears
 # as a reference curve in some other dataset's panel.
-SOURCE_LABEL = {"pool": "static random scan", "mcmc": "emcee posterior"}
-SOURCE_STYLE = {"pool": (":", "black"), "mcmc": ("-.", "0.45")}
-SOURCE_CURVE = {"pool": "random scan", "mcmc": "MCMC"}
+SOURCE_LABEL = {"pool": "static random scan", "mcmc": "emcee posterior",
+                "atlas": "ATLAS pMSSM EWK scan"}
+ATLAS_GLOB = "/viper/ptmp1/jwuerzin/pMSSM_ATLAS_EWK/scans/*/*/*.root"
+EMCEE_H5_NPZ = "/ptmp/jwuerzin/analysis/all_runs/emcee_chain_ordered.npz"
+SOURCE_STYLE = {"pool": (":", "black"), "mcmc": ("-.", "0.45"),
+                "atlas": ((0, (5, 1, 1, 1)), "tab:brown")}
+SOURCE_CURVE = {"pool": "random scan", "mcmc": "MCMC",
+                "atlas": "ATLAS scan"}
+# What each curve is drawn from. Nothing is held out any more: the support
+# uses every in-band row and the curve walks the same dataset in order.
+SOURCE_NOTE = {"pool": "all rows, scan order",
+               "mcmc": "raw chains, burn-in included",
+               "atlas": "all rows, scan order"}
 
 
 # ── support, cached ───────────────────────────────────────────────────────────
 
 def _support(source, target, pool_dir, mcmc_dir, tol, n_bins, min_cell,
-             mcmc_max_samples, veto, cache_dir, true_val):
-    """(edges, tmap, n_target, held_X, held_Y, n_rows) for one dataset.
+             veto, true_val, atlas_n_bins=4):
+    """(edges, tmap, n_target, X_axes, Y, n_rows) from the WHOLE dataset, in order.
 
-    ``build_target`` is used verbatim so this figure's support is the same object
-    the saturation and compute figures score against; only the budget axis is
-    new. ``held_X`` / ``held_Y`` are the half NOT used to define the cells.
+    No half-split: the support is defined by every in-band point of the dataset,
+    and the curve is drawn from the same rows in acquisition/sampling order. The
+    dataset's own curve therefore reaches 1.0 at x = 1 by construction, which is
+    the definition of its support rather than a result; the curve's SHAPE is the
+    claim. Dropping the split also removes the question of how to hold out half
+    of four asymmetric chains without biasing them.
+
+    Order matters for the emcee reference: a prefix must be a genuine partial
+    run. The four ensembles ran in parallel, so their rows are interleaved
+    round-robin (row k of ensemble 0, 1, 2, 3, then row k+1, ...) rather than
+    concatenated end to end, which would describe running one ensemble to
+    completion before starting the next. The pool is i.i.d., so its stored order
+    serves directly.
+
+    Nothing is cached: the arrays are ~0.6 GB for the emcee and the support now
+    depends on every row, so a cache would be larger than the read it saves.
     """
-    key = (f"support_efficiency_ref_{target}_{source}_tol{tol:g}"
-           f"_b{n_bins}_m{min_cell}_v{int(veto)}_s{mcmc_max_samples}")
-    p = Path(cache_dir) / f"{key}.npz"
-    if p.exists():
-        z = np.load(p)
-        edges = [z[f"e{j}"] for j in range(len(AXES))]
-        click.echo(f"[eff] {source}: support from cache {p.name}")
-        return (edges, z["tmap"], int(z["n_target"]), z["held_X"], z["held_Y"],
-                int(z["n_rows"]))
-    ax_idx = [PARAM_ORDER.index(a) for a in AXES]
-    # A fresh RNG at the module seed reproduces coverage_saturation's split
-    # exactly, so the cells and the held-out half match that figure's.
-    rng = np.random.default_rng(RNG_SEED)
-    edges, tmap, n_target, (X_b, Y_b) = build_target(
-        mcmc_dir, ax_idx, n_bins, min_cell, tol, mcmc_max_samples, veto, rng,
-        true_val=None, target=target, support_source=source,
-        pool_data_dir=pool_dir)
-    X_b = np.asarray(X_b, dtype=np.float32)
-    Y_b = np.asarray(Y_b, dtype=np.float64).ravel()
-    n_rows = 2 * len(X_b)          # half = N//2, so this is N to within one row
-    Path(cache_dir).mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(p, tmap=tmap, n_target=np.int64(n_target), held_X=X_b,
-                        held_Y=Y_b, n_rows=np.int64(n_rows),
-                        **{f"e{j}": e for j, e in enumerate(edges)})
-    click.echo(f"[eff] {source}: {n_target} cells of {n_bins ** len(AXES)}, "
-               f"{n_rows:,} rows, cached to {p.name}")
-    return edges, tmap, n_target, X_b, Y_b, n_rows
+    ax = list(AXES)
+    if source == "atlas":
+        # Public ATLAS pMSSM EWK scan, both campaigns merged. Same tree and
+        # branch names as our own ntuples, but nested one level deeper, so it is
+        # read here rather than through load_pmssm_data.
+        import glob as _g
+
+        import uproot
+        cols = ax + [TARGET_CONFIG_[target]["branch"], "SP_m_h"]
+        acc = {c: [] for c in cols}
+        for fn in sorted(_g.glob(ATLAS_GLOB)):
+            t = uproot.open(fn)["susy"]
+            for c in cols:
+                acc[c].append(t[c].array(library="np"))
+        d = {c: np.concatenate(v) for c, v in acc.items()}
+        keep, _ = target_validity_mask_(
+            d[cols[-2]], d["SP_m_h"], target=target)
+        keep = np.asarray(keep)
+        X = np.stack([d[a][keep] for a in ax], axis=1).astype(np.float32)
+        Y = np.asarray(d[cols[-2]])[keep].astype(np.float64)
+    elif source == "pool":
+        from pmssm.data import load_pmssm_data
+        X, Y = load_pmssm_data(n_datasets=-1, data_dir=pool_dir, target=target,
+                               plot_dir="/tmp", require_neutralino_lsp=veto)
+        X = np.asarray(X.numpy() if hasattr(X, "numpy") else X, dtype=np.float32)
+        Y = np.asarray(Y.numpy() if hasattr(Y, "numpy") else Y,
+                       dtype=np.float64).ravel()
+        idx = [PARAM_ORDER.index(a) for a in ax]
+        X = X[:, idx]
+    else:
+        from pmssm.data import load_mcmc_ordered
+        ens = load_mcmc_ordered(mcmc_dir, target=target, branches=ax)
+        n = len(ens)
+        keys = np.concatenate([np.arange(len(y), dtype=np.int64) * n + e
+                               for e, (_x, y) in enumerate(ens)])
+        X = np.concatenate([x for x, _y in ens])
+        Y = np.concatenate([y for _x, y in ens])
+        o = np.argsort(keys, kind="stable")
+        del keys
+        X, Y = X[o], Y[o]
+        del o
+    burn_rows = 0
+    if source == "mcmc":
+        # Cells and band stay defined by the ntuples (the converged posterior);
+        # only the LINE and the budget come from the raw chains, which include
+        # burn-in and the repeated rows left by rejected proposals.
+        inb = np.abs(Y - true_val) / true_val < tol
+        X_def = X[inb]
+        z = np.load(EMCEE_H5_NPZ)
+        X, Y = z["X"], z["Y"].astype(np.float64)
+        burn_rows = int(z["burn_rows"])
+        click.echo(f"[eff] mcmc: curve from raw chains, {len(Y):,} proposals, "
+                   f"burn-in {burn_rows:,} ({burn_rows / len(Y):.1%}); cells "
+                   f"still from the ntuples")
+    else:
+        inb = np.abs(Y - true_val) / true_val < tol
+        X_def = X[inb]
+    # The ATLAS scan has 977 in-band points against the pool's 12,343 and the
+    # posterior's 24.3M, so a 12-bin grid puts every cell under min_cell and the
+    # support comes out EMPTY. Coarsen the grid for that source rather than
+    # relaxing the occupancy threshold: min_cell is what makes a cell a real
+    # feature of the target region, and lowering it was measured on the relic
+    # branch to shrink discrimination. A covered fraction is therefore not
+    # comparable between this panel and the others -- state the cell count.
+    nb = atlas_n_bins if source == "atlas" else n_bins
+    edges = [np.quantile(X_def[:, j], np.linspace(0, 1, nb + 1))
+             for j in range(len(ax))]
+    for e in edges:
+        e[0], e[-1] = -np.inf, np.inf
+    counts = np.bincount(_cells(X_def, edges), minlength=nb ** len(ax))
+    keep = np.where(counts >= min_cell)[0]
+    tmap = -np.ones(nb ** len(ax), dtype=np.int64)
+    tmap[keep] = np.arange(len(keep))
+    click.echo(f"[eff] {source}: {len(keep)} cells of {nb ** len(ax)} from "
+               f"ALL {int(inb.sum()):,} in-band points of {len(Y):,} rows")
+    return edges, tmap, len(keep), X, Y, len(Y), burn_rows
 
 
 # ── AL runs ──────────────────────────────────────────────────────────────────
@@ -235,20 +314,23 @@ def _al_curve(seqs, tmap, n_target, n_total, n_points, lo, min_seeds=2):
             np.nanmin(y, axis=0), np.nanmax(y, axis=0))
 
 
-def _ref_curve(cells, tmap, n_target, n_total, calls_per_entry, n_repeats,
-               rng, n_points, lo):
-    """(fraction, mean coverage) for random subsets of a static dataset.
+def _ref_curve(cells, tmap, n_target, n_total, n_points, lo):
+    """(fraction, coverage) for PREFIXES of the dataset in its own order.
 
-    Random subsets are taken as prefixes of a fresh permutation, which is the
-    same distribution as sampling without replacement but costs one shuffle per
-    repeat instead of one per budget.
+    No permutation and no repeat-averaging: a prefix is what spending that
+    budget actually buys, so there is nothing to average over. Computed from
+    each support cell's FIRST occurrence, which makes coverage(N) a searchsorted
+    rather than a unique() over an N-row slice at every grid point.
     """
+    m = np.where(cells >= 0, tmap[np.where(cells >= 0, cells, 0)], -1)
+    pos = np.flatnonzero(m >= 0)
+    if len(pos) == 0:
+        return np.array([]), np.array([])
+    uniq, first_i = np.unique(m[pos], return_index=True)
+    firsts = np.sort(pos[first_i])
     grid = np.unique(np.geomspace(max(lo, 1), len(cells), n_points).astype(np.int64))
-    acc = np.zeros(len(grid))
-    for _ in range(n_repeats):
-        c = cells[rng.permutation(len(cells))]
-        acc += [coverage_of(c[:N], tmap, n_target) for N in grid]
-    return grid * calls_per_entry / n_total, acc / n_repeats
+    cov = np.searchsorted(firsts, grid, side="left") / n_target
+    return grid / n_total, cov
 
 
 def _speedup(f_al, c_al, f_ref, c_ref):
@@ -309,6 +391,21 @@ def _speedup(f_al, c_al, f_ref, c_ref):
 @click.option("--n-repeats", default=8, show_default=True,
               help="Random subsets averaged per reference budget.")
 @click.option("--n-points", default=26, show_default=True)
+@click.option("--full-range", is_flag=True, default=False,
+              help="Skip the x zoom and show every curve to its full extent, "
+                   "so a reference that runs far past the AL budget (the emcee "
+                   "chains reach 13x the random scan's size) is visible.")
+@click.option("--only-atlas", is_flag=True, default=False,
+              help="Emit ONLY the ATLAS-support panel, for a standalone "
+                   "appendix figure.")
+@click.option("--atlas-n-bins", default=4, show_default=True,
+              help="Bins per axis for the ATLAS panel only. Its in-band "
+                   "population is ~1000 points, so the main --n-bins grid "
+                   "leaves every cell below --min-cell and the support is "
+                   "empty.")
+@click.option("--atlas/--no-atlas", default=False, show_default=True,
+              help="Add a panel whose support is defined by the public "
+                   "ATLAS pMSSM EWK scan (both campaigns merged).")
 @click.option("--min-seeds", default=2, show_default=True,
               help="A budget is plotted when at least this many replicas of the "
                    "cell reached it; capped at the number of replicas present, "
@@ -325,7 +422,8 @@ def _speedup(f_al, c_al, f_ref, c_ref):
 def main(manifest, output_dir, cache_dir, baseline_data_dir, mcmc_data_dir,
          target, model_tag, run_set_label, include_status, models, all_cells,
          tolerance, n_bins, min_cell, mcmc_max_samples, mcmc_total_rows,
-         n_repeats, n_points, min_seeds, anchor_min_frac,
+         n_repeats, n_points, full_range, only_atlas, atlas_n_bins, atlas, min_seeds,
+         anchor_min_frac,
          require_neutralino_lsp):
     import matplotlib
     matplotlib.use("Agg")
@@ -336,6 +434,15 @@ def main(manifest, output_dir, cache_dir, baseline_data_dir, mcmc_data_dir,
     true_val = float(TARGET_CONFIG[target]["true_value"])
     has_mcmc = bool(TARGET_CONFIG[target].get("has_mcmc_reference", False))
     sources = ["pool"] + (["mcmc"] if has_mcmc else [])
+    if atlas or only_atlas:
+        sources.append("atlas")
+    # The ATLAS scan is heavily PRESELECTED, so its row count is not a generation
+    # budget and a curve of its own coverage against its own size means nothing.
+    # Its panel therefore borrows the random scan's denominator, uses the random
+    # scan as its reference, and draws no ATLAS curve at all.
+    panels = ["atlas"] if only_atlas else [s_ for s_ in sources if s_ != "atlas"]
+    if atlas and not only_atlas:
+        panels.append("atlas")
     ax_idx = [PARAM_ORDER.index(a) for a in AXES]
     rng = np.random.default_rng(RNG_SEED)
     click.echo(f"[eff] target={target} band=|y-{true_val:g}|/{true_val:g} < "
@@ -373,7 +480,7 @@ def main(manifest, output_dir, cache_dir, baseline_data_dir, mcmc_data_dir,
 
     # 0 means measure, so the emcee denominator tracks the files instead of a
     # constant that goes stale when the chains grow.
-    if "mcmc" in sources and not mcmc_total_rows:
+    if False:   # --mcmc-total-rows no longer scales anything: 1 row = 1 call
         from pmssm.data import count_mcmc_rows  # noqa: PLC0415
         if require_neutralino_lsp:
             raise click.UsageError(
@@ -386,22 +493,25 @@ def main(manifest, output_dir, cache_dir, baseline_data_dir, mcmc_data_dir,
     # ── panels ───────────────────────────────────────────────────────────────
     supports = {}
     for src in sources:
-        edges, tmap, n_tgt, hX, hY, n_rows = _support(
+        edges, tmap, n_tgt, oX, oY, n_rows, burn_rows = _support(
             src, target, baseline_data_dir, mcmc_data_dir, tolerance, n_bins,
-            min_cell, mcmc_max_samples, require_neutralino_lsp, cache_dir,
-            true_val)
-        # A pool row is one call. A reference row stands for the subsampling
-        # factor, so its budget in calls is deflated the same way
-        # coverage_saturation deflates it.
-        per_entry = (1.0 if src == "pool"
-                     else max(1.0, mcmc_total_rows / max(1, n_rows)))
-        n_calls = n_rows if src == "pool" else int(round(n_rows * per_entry))
-        supports[src] = dict(edges=edges, tmap=tmap, n_target=n_tgt, held_X=hX,
-                             held_Y=hY, n_rows=n_rows, per_entry=per_entry,
-                             n_total=n_calls)
+            min_cell, require_neutralino_lsp, true_val,
+            atlas_n_bins=atlas_n_bins)
+        if n_tgt == 0:
+            click.echo(f"[eff] {src}: support is EMPTY at these settings; "
+                       f"panel skipped", err=True)
+            continue
+        # Every row is one simulator call now: no subsample to undo, so the
+        # deflation that used to represent N proposals by N/70.5 sampled rows
+        # (and thereby cancelled the posterior's in-band enrichment) is gone.
+        supports[src] = dict(edges=edges, tmap=tmap, n_target=n_tgt, held_X=oX,
+                             held_Y=oY, n_rows=n_rows, per_entry=1.0,
+                             n_total=(supports["pool"]["n_total"]
+                                      if src == "atlas" and "pool" in supports
+                                      else n_rows),
+                             burn_rows=burn_rows)
         click.echo(f"[eff] {src:<5} support {n_tgt} cells | dataset "
-                   f"{n_rows:,} rows = {n_calls:,} calls "
-                   f"(1 row = {per_entry:.1f} calls)")
+                   f"{n_rows:,} rows = {n_rows:,} calls (1 row = 1 call)")
 
     out = {"config": {"target": target, "run_set": run_set_label, "axes": AXES,
                       "tolerance": tolerance, "n_bins": n_bins,
@@ -409,8 +519,8 @@ def main(manifest, output_dir, cache_dir, baseline_data_dir, mcmc_data_dir,
                       "budget_unit": "valid models simulated (AL: train+val)"},
            "panels": {}}
 
-    fig, axes = plt.subplots(2, len(sources), squeeze=False, sharex="col",
-                             figsize=(6.6 * len(sources), 6.9),
+    fig, axes = plt.subplots(2, len(panels), squeeze=False, sharex="col",
+                             figsize=(6.6 * len(panels), 6.9),
                              gridspec_kw={"height_ratios": [3.0, 1.2],
                                           "hspace": 0.06})
 
@@ -430,7 +540,7 @@ def main(manifest, output_dir, cache_dir, baseline_data_dir, mcmc_data_dir,
         good = den > floor
         return f[ok][good], c[ok][good] / den[good]
 
-    for col_i, src in enumerate(sources):
+    for col_i, src in enumerate(panels):
         ax, axr = axes[0][col_i], axes[1][col_i]
         S = supports[src]
         rec = {"n_target_cells": int(S["n_target"]),
@@ -444,10 +554,10 @@ def main(manifest, output_dir, cache_dir, baseline_data_dir, mcmc_data_dir,
         r_floor = 0.25 / max(1, S["n_target"])
 
         # Reference curves. Every static dataset appears in every panel; each is
-        # scored on its held-out half, so the panel's own dataset is never
-        # scored against the cells it defined.
+        # drawn from its own full dataset in order.
         ref_curves = {}
-        for rsrc in sources:
+        own_src = "pool" if src == "atlas" else src
+        for rsrc in [r for r in sources if r != "atlas"]:
             R = supports[rsrc]
             rcells = np.where(
                 np.abs(R["held_Y"] - true_val) / true_val < tolerance,
@@ -457,24 +567,23 @@ def main(manifest, output_dir, cache_dir, baseline_data_dir, mcmc_data_dir,
             # Otherwise the emcee curve begins 35x further right than the pool's
             # and the ratio panel loses the AL curves' first decade.
             f, c = _ref_curve(rcells, S["tmap"], S["n_target"], S["n_total"],
-                              R["per_entry"], n_repeats, rng, n_points,
-                              max(4, int(round(200 / R["per_entry"]))))
+                              n_points, 200)
             ref_curves[rsrc] = (f, c)
             ls, col = SOURCE_STYLE[rsrc]
-            ax.plot(f, c, ls, color=col, lw=1.7,
-                    label=f"{SOURCE_CURVE[rsrc]} (held-out half)")
+            ax.plot(f, c, ls=ls, color=col, lw=1.7,
+                    label=f"{SOURCE_CURVE[rsrc]} ({SOURCE_NOTE[rsrc]})")
             rec["reference"][rsrc] = {"fraction": f.tolist(),
                                       "coverage": c.tolist()}
-            if rsrc == src:
+            if rsrc == own_src:
                 own_f, own_c = f, c
         # The panel's own dataset is the unity line by construction, so only the
         # other dataset's ratio is worth a curve here.
         for rsrc, (f, c) in ref_curves.items():
-            if rsrc == src:
+            if rsrc == own_src:
                 continue
             ls, col = SOURCE_STYLE[rsrc]
             rf, rr = _ratio_to_own(f, c, own_f, own_c, r_floor)
-            axr.plot(rf, rr, ls, color=col, lw=1.6)
+            axr.plot(rf, rr, ls=ls, color=col, lw=1.6)
             rec["reference"][rsrc]["ratio_fraction"] = rf.tolist()
             rec["reference"][rsrc]["ratio_to_own"] = rr.tolist()
 
@@ -590,7 +699,7 @@ def main(manifest, output_dir, cache_dir, baseline_data_dir, mcmc_data_dir,
         # squeezes the AL curves into one decade. Keep from just below the AL
         # start to just past where the panel's own dataset matches the best AL
         # coverage, which is exactly the span the horizontal gap is read across.
-        if curves:
+        if curves and not full_range:
             al_lo = min(f[0] for f, *_ in curves.values())
             al_hi = max(f[-1] for f, *_ in curves.values())
             c_max = max(mu[-1] for _f, mu, *_ in curves.values())
@@ -602,7 +711,7 @@ def main(manifest, output_dir, cache_dir, baseline_data_dir, mcmc_data_dir,
         # the support, which is the ceiling this metric is defined against.
         # Only annotate them when the zoom actually reaches that far.
         x_lo, x_hi = ax.get_xlim()
-        for xv, txt in ((0.5, "own held-out half"), (1.0, "whole dataset")):
+        for xv, txt in ((1.0, "whole dataset"),):
             if not (x_lo < xv < x_hi):
                 continue
             for a in (ax, axr):
@@ -610,6 +719,32 @@ def main(manifest, output_dir, cache_dir, baseline_data_dir, mcmc_data_dir,
             ax.annotate(txt, xy=(xv, 0.015), xytext=(-4, 0),
                         textcoords="offset points", rotation=90, ha="right",
                         va="bottom", fontsize=6.5, color="0.45")
+        # A reference whose burn-in ends beyond this panel's x range gets an
+        # arrow instead of a line, so the reader is not left thinking the curve
+        # they see is a converged sampler.
+        for rsrc, (rf_, rc_) in ref_curves.items():
+            B = supports.get(rsrc, {})
+            if not B.get("burn_rows") or rsrc == src:
+                continue
+            xb = B["burn_rows"] / S["n_total"]
+            if xb <= x_hi or len(rf_) == 0:
+                continue
+            yv = float(np.interp(np.log(min(x_hi, rf_[-1])),
+                                 np.log(rf_), rc_))
+            ax.annotate(f"{SOURCE_CURVE[rsrc]} burn-in ends at "
+                        f"x$\\approx${xb:.1f}",
+                        xy=(x_hi * 0.995, yv), xytext=(-104, 16),
+                        textcoords="offset points", fontsize=6.2,
+                        color=SOURCE_STYLE[rsrc][1], ha="left", va="bottom",
+                        arrowprops=dict(arrowstyle="->", lw=1.1,
+                                        color=SOURCE_STYLE[rsrc][1]))
+        if S.get("burn_rows"):
+            xb = S["burn_rows"] / S["n_total"]
+            for a in (ax, axr):
+                a.axvline(xb, color="0.35", ls="--", lw=1.1, zorder=0)
+            ax.annotate("burn-in ends", xy=(xb, 0.015), xytext=(3, 0),
+                        textcoords="offset points", rotation=90, ha="left",
+                        va="bottom", fontsize=6.5, color="0.3")
         ax.set_ylabel(f"fraction of the {SOURCE_LABEL[src]}'s in-band support "
                       f"covered\n({S['n_target']} cells)")
         _support_axis(ax)
@@ -628,12 +763,12 @@ def main(manifest, output_dir, cache_dir, baseline_data_dir, mcmc_data_dir,
         # support per simulator call than the process that produced the dataset,
         # and <1 means generating more of the dataset would have been the better
         # spend. The dataset's own curve is 1 by construction.
-        axr.axhline(1.0, color=SOURCE_STYLE[src][1], lw=1.4,
-                    ls=SOURCE_STYLE[src][0], zorder=1)
+        axr.axhline(1.0, color=SOURCE_STYLE[own_src][1], lw=1.4,
+                    ls=SOURCE_STYLE[own_src][0], zorder=1)
         axr.grid(alpha=0.3, which="both")
-        axr.set_xlabel(f"points spent / size of the {SOURCE_LABEL[src]}\n"
+        axr.set_xlabel(f"points spent / size of the {SOURCE_LABEL[own_src]}\n"
                        f"({S['n_total']:,} valid models simulated)")
-        axr.set_ylabel(f"/ {SOURCE_CURVE[src]}", fontsize=8.5)
+        axr.set_ylabel(f"/ {SOURCE_CURVE[own_src]}", fontsize=8.5)
         # Only data inside the zoom sets the range: the other dataset's ratio
         # runs well past the right edge and would otherwise dictate the scale.
         vis = [v for ln in axr.get_lines()
