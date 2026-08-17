@@ -177,10 +177,13 @@ def coverage_of(cells: np.ndarray, tmap: np.ndarray, n_target: int) -> float:
 @click.option("--min-cell", default=20, show_default=True,
               help="Reference in-band points needed for a cell to count as target.")
 @click.option("--mcmc-max-samples", default=500_000, show_default=True)
-@click.option("--mcmc-total-rows", default=17_498_112, show_default=True,
+@click.option("--mcmc-total-rows", default=0, show_default=True,
               help="Stored reference rows before subsampling; one row is one "
-                   "proposal, so a budget of N calls buys N/(total/subsample) "
-                   "rows of the subsample.")
+                   "proposal, hence one simulator call. 0 = MEASURE it from "
+                   "the files, which is the default because a hardcoded count "
+                   "goes stale the moment the chains are extended (it did: a "
+                   "value from 2026-08-07 was 2.0152x too small after the "
+                   "2026-08-10 rewrite). Set a value only to override.")
 @click.option("--n-repeats", default=20, show_default=True,
               help="Random subsets averaged per (k, budget) point.")
 @click.option("--require-neutralino-lsp/--no-require-neutralino-lsp",
@@ -370,6 +373,14 @@ def main(manifest, baseline_data_dir, mcmc_data_dir, cache_dir, output_dir,
     # One pool point is one simulator call. One reference row is one proposal,
     # but the reference was uniformly subsampled, so each retained row stands
     # for total/subsample proposals; the budget is deflated accordingly.
+    if _has_ref and not mcmc_total_rows:
+        from pmssm.data import count_mcmc_rows  # noqa: PLC0415
+        if require_neutralino_lsp:
+            raise click.UsageError(
+                "--require-neutralino-lsp changes the loaded row count, so a "
+                "measured total would not match; pass --mcmc-total-rows")
+        mcmc_total_rows = count_mcmc_rows(mcmc_data_dir, target=target_key)
+        click.echo(f"[cov] measured emcee stored rows: {mcmc_total_rows:,}")
     mcmc_factor = max(1.0, mcmc_total_rows / max(1, len(Xm)))
     click.echo(f"[cov] one reference row stands for {mcmc_factor:.1f} proposals")
     base_budgets = np.unique(np.geomspace(200, max_calls, 16).astype(int))

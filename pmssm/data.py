@@ -502,3 +502,97 @@ def split_mcmc_for_oracle(X, Y, F, eval_fraction=0.1, seed=42):
         X[eval_idx], Y[eval_idx], F[eval_idx],
         pool_idx, eval_idx,
     )
+
+
+def count_mcmc_rows(data_dir="data/neutralino_v4", target="DMRD", logger=None):
+    """Stored reference rows surviving `load_mcmc_data`'s filters, pre-subsample.
+
+    The emcee panels of the support figures divide a budget by this, so a
+    hardcoded value silently goes stale the moment the chains are extended. It
+    did: a default of 17,498,112 was taken from a run log of 2026-08-07, the
+    files were rewritten on 2026-08-10, and the true count is now 35,261,440 --
+    a factor 2.0152 that moved the AL curves against the emcee curve and nothing
+    else, in the direction that flatters emcee. Measure it instead.
+
+    Applies the same file-level (straddle / omega_min) and per-row filters as
+    `load_mcmc_data`, and deliberately NOT the neutralino veto: callers that
+    enable it must not use this number, because their loaded row count is then
+    filtered more aggressively than this one.
+    """
+    import glob as _glob
+
+    import uproot
+
+    if not TARGET_CONFIG[target].get("has_mcmc_reference", False):
+        raise ValueError(f"target {target!r} has no MCMC reference dataset")
+    branch = TARGET_CONFIG[target]["branch"]
+    true_value = TARGET_CONFIG[target]["true_value"]
+    omega_min = 0.04
+    total = 0
+    for fn in sorted(_glob.glob(f"{data_dir}/*.root")):
+        t = uproot.open(fn)["susy"]
+        y = t[branch].array(library="np")
+        if not (np.any(y < true_value) and np.any(y > true_value)):
+            continue
+        if np.any(y < omega_min):
+            continue
+        mask, _desc = target_validity_mask(
+            y, t["SP_m_h"].array(library="np"), target=target)
+        total += int(np.asarray(mask).sum())
+    if logger:
+        logger.info(f"MCMC stored rows (pre-subsample): {total}")
+    return total
+
+
+def load_mcmc_ordered(data_dir="data/neutralino_v4", target="DMRD", branches=None,
+                      logger=None):
+    """Per-ensemble arrays in STORED ORDER, with no subsampling.
+
+    Returns ``[(X, Y), ...]``, one entry per surviving file, each in the order
+    the rows were written. One file is one emcee ensemble, written step-major
+    over its walkers, so a prefix of an entry is a genuine partial run of that
+    ensemble.
+
+    Why this exists rather than `load_mcmc_data`: that loader takes a seeded
+    uniform subsample, which destroys the chain order and forces the support
+    figures to represent a budget of N proposals by N/factor sampled rows. Since
+    coverage is a saturating set-union quantity, that understates the reference
+    badly -- with a factor of 70.5 it cancelled the posterior's 76x in-band
+    enrichment almost exactly, putting the emcee and random-scan curves on top of
+    each other for no physical reason.
+
+    Filters match `load_mcmc_data` (file-level straddle / omega_min, then the
+    registry validity mask), and all of them preserve order. The neutralino veto
+    is NOT applied. Burn-in is left exactly as stored, i.e. already removed and
+    not charged.
+
+    Interleave the returned entries round-robin to advance all ensembles
+    together; concatenating them end to end would describe running one ensemble
+    to completion before starting the next, which is not what happened.
+    """
+    import glob as _glob
+
+    import uproot
+
+    if not TARGET_CONFIG[target].get("has_mcmc_reference", False):
+        raise ValueError(f"target {target!r} has no MCMC reference dataset")
+    branch = TARGET_CONFIG[target]["branch"]
+    true_value = TARGET_CONFIG[target]["true_value"]
+    cols = list(branches) if branches else list(PARAM_ORDER)
+    omega_min = 0.04
+    out = []
+    for fn in sorted(_glob.glob(f"{data_dir}/*.root")):
+        t = uproot.open(fn)["susy"]
+        y = t[branch].array(library="np")
+        if not (np.any(y < true_value) and np.any(y > true_value)):
+            continue
+        if np.any(y < omega_min):
+            continue
+        keep, _d = target_validity_mask(y, t["SP_m_h"].array(library="np"),
+                                        target=target)
+        keep = np.asarray(keep)
+        X = np.stack([t[c].array(library="np")[keep] for c in cols], axis=1)
+        out.append((X.astype(np.float32), y[keep].astype(np.float64)))
+        if logger:
+            logger.info(f"{fn}: {int(keep.sum())} rows in stored order")
+    return out

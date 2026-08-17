@@ -299,9 +299,13 @@ def _speedup(f_al, c_al, f_ref, c_ref):
 @click.option("--n-bins", default=12, show_default=True)
 @click.option("--min-cell", default=20, show_default=True)
 @click.option("--mcmc-max-samples", default=500_000, show_default=True)
-@click.option("--mcmc-total-rows", default=17_498_112, show_default=True,
+@click.option("--mcmc-total-rows", default=0, show_default=True,
               help="Stored reference rows before subsampling; one row is one "
-                   "proposal, hence one simulator call.")
+                   "proposal, hence one simulator call. 0 = MEASURE it from "
+                   "the files, which is the default because a hardcoded count "
+                   "goes stale the moment the chains are extended (it did: a "
+                   "value from 2026-08-07 was 2.0152x too small after the "
+                   "2026-08-10 rewrite). Set a value only to override.")
 @click.option("--n-repeats", default=8, show_default=True,
               help="Random subsets averaged per reference budget.")
 @click.option("--n-points", default=26, show_default=True)
@@ -366,6 +370,18 @@ def main(manifest, output_dir, cache_dir, baseline_data_dir, mcmc_data_dir,
         runs[key] = seqs
         click.echo(f"[eff] {'/'.join(key):<48} {len(seqs)} replica(s), "
                    f"points spent {[len(y) for _x, y in seqs]}")
+
+    # 0 means measure, so the emcee denominator tracks the files instead of a
+    # constant that goes stale when the chains grow.
+    if "mcmc" in sources and not mcmc_total_rows:
+        from pmssm.data import count_mcmc_rows  # noqa: PLC0415
+        if require_neutralino_lsp:
+            raise click.UsageError(
+                "--require-neutralino-lsp changes how many reference rows load, "
+                "so a measured total would not match; pass --mcmc-total-rows "
+                "explicitly for a vetoed run")
+        mcmc_total_rows = count_mcmc_rows(mcmc_data_dir, target=target)
+        click.echo(f"[eff] measured emcee stored rows: {mcmc_total_rows:,}")
 
     # ── panels ───────────────────────────────────────────────────────────────
     supports = {}
