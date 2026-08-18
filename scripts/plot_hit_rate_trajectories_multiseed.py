@@ -2501,6 +2501,12 @@ def plot_best_per_model(traj, tols, uncertainty, true_val, out_dir,
                    "alone. 0 disables it.")
 @click.option("--min-seeds", default=2, type=int, show_default=True,
               help="Drop groups with fewer completed seeds than this.")
+@click.option("--pool-cache-dir", default=None,
+              help="Where to keep the parsed-pool .npy cache. Defaults to "
+                   "--output-dir, which means a run with a fresh output dir "
+                   "re-parses the whole pool from ROOT: 1500 files on GPFS for "
+                   "the exclusion boundary, ~30 min before anything is drawn. "
+                   "Point several runs at one directory to parse once.")
 @click.option("--min-seeds-axis", default=None, type=int,
               help="Keep iterations reported by at least this many seeds. "
                    "Defaults to --min-seeds. Set to 1 to run every cell out to "
@@ -2576,7 +2582,7 @@ def plot_best_per_model(traj, tols, uncertainty, true_val, out_dir,
                    "is rebased so per-iteration slicing stays consistent.")
 def main(manifest, sweep_id, output_dir, uncertainty, target, tolerances,
          mark_iteration,
-         min_seeds, min_seeds_axis, include_status, baseline_data_dir,
+         min_seeds, pool_cache_dir, min_seeds_axis, include_status, baseline_data_dir,
          baseline_require_neutralino_lsp,
          compute_accuracy, mcmc_data_dir, mcmc_max_samples, mcmc_yield_json,
          accuracy_device, accuracy_cache_only, accuracy_cache_refresh,
@@ -2609,6 +2615,10 @@ def main(manifest, sweep_id, output_dir, uncertainty, target, tolerances,
         _TARGET_LABEL_MATH = _TARGET_LABEL
 
     out_dir = Path(output_dir)
+    # The pool cache is expensive to build and identical across runs, so it is
+    # keyed on the pool, not on where the figures go.
+    pool_cache = Path(pool_cache_dir) if pool_cache_dir else out_dir
+    pool_cache.mkdir(parents=True, exist_ok=True)
 
     Y_full = None
     prevalence = None
@@ -2617,7 +2627,7 @@ def main(manifest, sweep_id, output_dir, uncertainty, target, tolerances,
     p_valid_info = None
     if baseline_data_dir:
         try:
-            Y_full = _load_y_full(baseline_data_dir, target, out_dir)
+            Y_full = _load_y_full(baseline_data_dir, target, pool_cache)
             Y_full_indexable = Y_full
             # Restrict the random-scan baseline to neutralino-LSP models, so it
             # counts the same population the AL loops can produce (a slepton-LSP
@@ -2626,7 +2636,7 @@ def main(manifest, sweep_id, output_dir, uncertainty, target, tolerances,
             # restricted, so this is a change of population, not a reweighting.
             veto_stats = None
             if baseline_require_neutralino_lsp:
-                m = _load_pool_neutralino_mask(baseline_data_dir, out_dir,
+                m = _load_pool_neutralino_mask(baseline_data_dir, pool_cache,
                                                target=target,
                                                n_expected=len(Y_full))
                 if m is not None:
@@ -2882,7 +2892,7 @@ def main(manifest, sweep_id, output_dir, uncertainty, target, tolerances,
                        "load X_full; skipping", err=True)
         else:
             try:
-                X_full, Y_full_local = _load_xy_full(baseline_data_dir, target, out_dir)
+                X_full, Y_full_local = _load_xy_full(baseline_data_dir, target, pool_cache)
             except Exception as exc:
                 click.echo(f"[warn] --compute-accuracy: could not load X_full: {exc}",
                            err=True)

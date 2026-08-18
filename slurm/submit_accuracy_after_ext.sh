@@ -67,6 +67,10 @@ fi
 J=/ptmp/jwuerzin/analysis/joint
 DP=/ptmp/jwuerzin/data/18387358
 EP=/ptmp/jwuerzin/data/260804
+# One shared parsed-pool cache. Without it each step writes its own into its
+# fresh output dir and re-parses the pool from ROOT first, which on GPFS cost
+# ~30 min per exclusion-boundary pass before anything was drawn.
+PC=/ptmp/jwuerzin/analysis/pool_cache
 STAMP=$(date +%Y%m%d_%H%M%S)
 
 echo "=========================================="
@@ -92,7 +96,7 @@ echo "### 1/4 rebuilding joint manifests"
 echo "### 2/4 relic-density accuracy + hit rate over the full horizon"
 "${PYTHON}" scripts/plot_hit_rate_trajectories_multiseed.py \
     --manifest "${J}/manifest_dmrd.csv" --output-dir "${J}/dmrd_final" \
-    --min-seeds 1 --mark-iteration 40 \
+    --min-seeds 1 --mark-iteration 40 --pool-cache-dir "${PC}" \
     --baseline-data-dir "${DP}" --tolerances 0.10,0.20,0.50 \
     --compute-accuracy --accuracy-device "${ACC_DEVICE}" 2>&1 | tail -40
 
@@ -102,7 +106,7 @@ echo "### 2/4 relic-density accuracy + hit rate over the full horizon"
 echo "### 3/4 exclusion-boundary accuracy + hit rate over the full horizon"
 "${PYTHON}" scripts/plot_hit_rate_trajectories_multiseed.py \
     --manifest "${J}/manifest_expr.csv" --output-dir "${J}/expr_final" \
-    --target ExpR --min-seeds 1 --mark-iteration 40 \
+    --target ExpR --min-seeds 1 --mark-iteration 40 --pool-cache-dir "${PC}" \
     --baseline-data-dir "${EP}" --no-baseline-require-neutralino-lsp \
     --tolerances 0.10,0.20,0.50 --mcmc-yield-json "" --mcmc-data-dir "" \
     --compute-accuracy --accuracy-device "${ACC_DEVICE}" 2>&1 | tail -40
