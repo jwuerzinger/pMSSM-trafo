@@ -246,7 +246,25 @@ def _collect_trajectories(
 # Plotting
 # ──────────────────────────────────────────────────────────────────────────────
 
+# Markers are unreadable once a trajectory runs past a few tens of iterations,
+# so above this many points a curve is drawn as a line only. Kept in step with
+# the canonical definition in `plot_hit_rate_trajectories_multiseed.py`.
+MARKER_MAX_POINTS = 50
+
+
+def _markers_on(n_points) -> bool:
+    """True when a series is short enough for per-point markers to be legible."""
+    try:
+        return int(n_points) <= MARKER_MAX_POINTS
+    except (TypeError, ValueError):
+        return True
+
+
 def _draw_curve(ax, iters_ax, Y, *, color, linestyle, marker, label, uncertainty):
+    # The legend on these figures is built from the curve labels, so dropping
+    # the marker here keeps the key and the plot in agreement automatically.
+    if not _markers_on(len(np.atleast_1d(iters_ax))):
+        marker = None
     lo, hi = _band(Y, uncertainty)
     mean = np.nanmean(Y, axis=0)
     ax.plot(iters_ax, mean, color=color, linestyle=linestyle, marker=marker,

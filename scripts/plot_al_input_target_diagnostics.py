@@ -205,12 +205,20 @@ OVERLAY_COLORS = {
 }
 
 
-def _arm_color(label: str):
+def _arm_color(label: str, arms=None):
     """Colour for one overlay arm, matching the hit-rate figures' convention.
 
     MODEL_COLORS is tag-aware, so "deep_gp_expr" resolves to the deep GP's
     colour; the reference arms fall back to OVERLAY_COLORS.
+
+    Black is the reference colour. On the relic density that is the emcee
+    chain and the random pool is a second, grey reference; on the exclusion
+    boundary there is no sampler, so the pool IS the reference and takes
+    black. Pass `arms` (all labels in the figure) to get that distinction.
     """
+    if label == "random pool" and arms is not None:
+        if not any(a == "emcee MCMC" for a in arms):
+            return "black"
     if label in OVERLAY_COLORS:
         return OVERLAY_COLORS[label]
     import plot_hit_rate_trajectories_multiseed as _phr  # noqa: PLC0415
@@ -231,13 +239,18 @@ def plot_omega_overlay(samples: dict, outpath: str, true_value: float = 0.12,
                color="gold", alpha=0.25, lw=0,
                label=f"target ±{int(tol*100)}%")
     vmin, vmax = np.inf, 0.0
-    for label, y in samples.items():
+    # `name`, not `label`: the loop must not shadow the `label` parameter, which
+    # carries the target's axis label and is consumed after the loop. It did,
+    # so the x axis was silently labelled with the LAST sample's key -- visible
+    # as "random pool" on the ExpR overlay, and harmless-looking on the Omega
+    # one only because that figure predates the regression.
+    for name, y in samples.items():
         y = np.asarray(y, dtype=float).ravel()
         y = y[np.isfinite(y) & (y > 0)]
         dens, _ = np.histogram(np.clip(y, bins[0], bins[-1]), bins=bins,
                                density=True)
-        ax.stairs(dens, bins, lw=1.8, color=_arm_color(label),
-                  label=f"{label} (N={len(y):,})")
+        ax.stairs(dens, bins, lw=1.8, color=_arm_color(name, samples),
+                  label=f"{name} (N={len(y):,})")
         pos = dens[dens > 0]
         if len(pos):
             vmin = min(vmin, pos.min())
@@ -278,7 +291,7 @@ def plot_input_overlays(x_samples: dict, param_names, outpath: str):
             x = np.asarray(X[:, j], dtype=float)
             x = x[np.isfinite(x)]
             ax.hist(x, bins=bins, density=True, histtype="step", lw=1.6,
-                    color=_arm_color(label), label=label)
+                    color=_arm_color(label, x_samples), label=label)
         ax.set_xlabel(name)
         ax.set_yticks([])
         ax.grid(alpha=0.3)

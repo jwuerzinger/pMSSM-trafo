@@ -25,6 +25,7 @@ from scripts.plot_hit_rate_trajectories_multiseed import (  # noqa: E402
     _baseline_hit_rate_trajectory,
     _hits_per_desired_trajectory,
     _load_y_full,
+    _markers_on,
     _pool_prevalence,
 )
 
@@ -120,7 +121,8 @@ def main(run_dir, seed, model_label, strategy_label, warm_label, target,
         for ax, tol in zip(axes, tols):
             iters, rates = traj_fn(run, true_val, tol)
             if rates:
-                ax.plot(iters, rates, color=color, linestyle="-", marker="o",
+                ax.plot(iters, rates, color=color, linestyle="-",
+                        marker="o" if _markers_on(len(rates)) else None,
                         markersize=3, linewidth=1.6, label=cfg_label)
 
             if Y_full is not None:

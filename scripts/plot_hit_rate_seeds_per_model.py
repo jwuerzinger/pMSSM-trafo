@@ -33,7 +33,9 @@ from scripts.plot_hit_rate_trajectories_multiseed import (  # noqa: E402
     MODEL_COLORS,
     _best_setting_for_model,
     _collect_trajectories,
+    _enforce_marker_policy,
     _load_y_full,
+    _markers_on,
     _pool_prevalence,
 )
 
@@ -64,6 +66,9 @@ def _finalize(fig, axes, out_path):
                    fontsize=8, frameon=True, borderaxespad=0.)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    # Per-seed panels mix horizons: seed 1 was resumed past 40 and the rest were
+    # not, so without this the short seeds alone would carry markers.
+    _enforce_marker_policy(fig)
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
 
@@ -126,9 +131,12 @@ def _draw_seed_curves(ax, rows, color):
     cmap = plt.get_cmap("viridis", max(n, 2))
     for i, (seed, iters, rates) in enumerate(sorted(rows, key=lambda r: (r[0] if r[0] is not None else i))):
         lbl = f"seed {int(seed)}" if seed is not None and not pd.isna(seed) else f"run {i}"
+        # Line only once a run is long: at the extended budgets the per-point
+        # markers merge into a band and hide the curve.
+        _mk = "o" if _markers_on(len(list(iters))) else None
         ax.plot(iters, rates,
                 color=cmap(i) if color is None else color,
-                alpha=0.85, linewidth=1.2, marker="o", markersize=2.5,
+                alpha=0.85, linewidth=1.2, marker=_mk, markersize=2.5,
                 label=lbl)
 
 

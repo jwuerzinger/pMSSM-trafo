@@ -94,9 +94,32 @@ def build_target(mcmc_data_dir: str, ax_idx: list[int], n_bins: int, min_cell: i
         # only support definition available for a target with no posterior.
         if not pool_data_dir:
             raise ValueError("support_source='pool' requires pool_data_dir")
-        Xm, Ym = load_pmssm_data(n_datasets=-1, data_dir=pool_data_dir,
-                                 target=target, plot_dir="/tmp",
-                                 require_neutralino_lsp=veto)
+        # Parsing the pool from ROOT costs minutes, not seconds: the
+        # exclusion-boundary pool is 1500 files on GPFS and a cold open there
+        # measures ~29 ms, so a support build spent ~25 min in
+        # cxiWaitEventWait before doing any arithmetic. The parsed arrays are
+        # ~140 MB, so cache them next to the pool and mmap on reuse. Keyed on
+        # the veto because it changes which rows load.
+        _tag = f"{target}_veto{int(bool(veto))}"
+        _cache = Path(pool_data_dir) / f".support_pool_cache_{_tag}.npz"
+        Xm = Ym = None
+        if _cache.exists():
+            try:
+                _z = np.load(_cache, mmap_mode="r")
+                Xm, Ym = _z["X"], _z["Y"]
+            except Exception:
+                Xm = Ym = None          # unreadable cache: fall through and rebuild
+        if Xm is None:
+            Xm, Ym = load_pmssm_data(n_datasets=-1, data_dir=pool_data_dir,
+                                     target=target, plot_dir="/tmp",
+                                     require_neutralino_lsp=veto)
+            _Xa = np.asarray(Xm.numpy() if hasattr(Xm, "numpy") else Xm)
+            _Ya = np.asarray(Ym.numpy() if hasattr(Ym, "numpy") else Ym)
+            try:
+                np.savez(_cache, X=_Xa, Y=_Ya)
+            except OSError:
+                pass                    # read-only pool dir: just skip caching
+            Xm, Ym = _Xa, _Ya
     elif support_source == "mcmc":
         if not TARGET_CONFIG[target].get("has_mcmc_reference", False):
             raise ValueError(
@@ -373,9 +396,21 @@ def main(manifest, baseline_data_dir, mcmc_data_dir, cache_dir, output_dir,
                    f"k=1 {out['al'][model]['k1']['coverage_at_common']:.3f}, "
                    f"k={S} {out['al'][model][f'k{S}']['coverage_at_common']:.3f}")
 
-    # One pool point is one simulator call. One reference row is one proposal,
-    # but the reference was uniformly subsampled, so each retained row stands
-    # for total/subsample proposals; the budget is deflated accordingly.
+    # The emcee curve is drawn from the RAW chains (burn-in included, repeated
+    # rows from rejected proposals kept), so one row is one proposal and no
+    # deflation is needed. Representing a budget of N proposals by N/factor
+    # uniformly sampled rows understated it badly: coverage is a saturating
+    # set-union quantity, so 1/70th of the points reaches far fewer cells.
+    _H5 = Path("/ptmp/jwuerzin/analysis/all_runs/emcee_chain_ordered.npz")
+    if _has_ref and _H5.exists():
+        _z = np.load(_H5)
+        _Xh, _Yh = _z["X"], _z["Y"].astype(np.float64)
+        held_cells = np.where(np.abs(_Yh - true_val) / true_val < tolerance,
+                              _cells(_Xh, edges), -1)
+        mcmc_factor = 1.0
+        click.echo(f"[cov] emcee curve from raw chains: {len(_Yh):,} proposals, "
+                   f"burn-in {int(_z['burn_rows']):,}")
+    # One pool point is one simulator call.
     if _has_ref and not mcmc_total_rows:
         from pmssm.data import count_mcmc_rows  # noqa: PLC0415
         if require_neutralino_lsp:
@@ -389,16 +424,22 @@ def main(manifest, baseline_data_dir, mcmc_data_dir, cache_dir, output_dir,
     base_budgets = np.unique(np.geomspace(200, max_calls, 16).astype(int))
     for name, cells, per_entry in (("random_scan", pool_cells, 1.0),
                                    ("mcmc", held_cells, mcmc_factor)):
+        ordered = (name == "mcmc" and mcmc_factor == 1.0)
         fr = []
         for N in base_budgets:
             n_entries = int(N / per_entry)
             if n_entries < 1 or n_entries > len(cells):
                 fr.append(float("nan"))
                 continue
-            vals = [cover_frac(cells[rng.choice(len(cells), size=n_entries,
-                                                replace=False)])
-                    for _ in range(n_repeats)]
-            fr.append(float(np.mean(vals)))
+            if ordered:
+                # chain order carries the trajectory: a prefix is what that
+                # budget actually buys, so there is nothing to average over
+                fr.append(cover_frac(cells[:n_entries]))
+            else:
+                vals = [cover_frac(cells[rng.choice(len(cells), size=n_entries,
+                                                    replace=False)])
+                        for _ in range(n_repeats)]
+                fr.append(float(np.mean(vals)))
         out["baselines"][name] = {"budget": [int(b) for b in base_budgets],
                                   "coverage": fr, "calls_per_entry": per_entry}
         last = next((v for v in reversed(fr) if v == v), float("nan"))

@@ -21,6 +21,7 @@ Each metric produces three figures (one panel per tolerance):
 """
 from __future__ import annotations
 
+import csv
 import json
 import re
 import sys
@@ -195,6 +196,78 @@ WARM_MARKER = {
     "cold":   "s",
     "tabpfn": "^",
 }
+
+
+# Iteration at which the multi-seed benchmark ends on a joint figure; 0 = off.
+# Set once from main() rather than threaded through the plotting signatures.
+MARK_ITERATION = 0
+
+# Per-point markers stop being readable once a curve carries more than a few
+# tens of iterations: at the 160-200 iteration budgets of the extended runs they
+# merge into a band and hide the line. Above this many points a curve is drawn
+# as a line only. Legend handles follow the same rule so the key matches the
+# plot.
+MARKER_MAX_POINTS = 50
+
+
+def _markers_on(n_points) -> bool:
+    """True when a series is short enough for per-point markers to be legible."""
+    try:
+        return int(n_points) <= MARKER_MAX_POINTS
+    except (TypeError, ValueError):
+        return True
+
+
+def _markers_on_axes(*axes) -> bool:
+    """`_markers_on` applied to the longest series actually drawn on `axes`.
+
+    Legend proxies are built after the curves, so asking the axes how many
+    points they carry keeps the key and the plot in agreement without
+    threading the iteration axis through every caller.
+    """
+    n = 0
+    for ax in axes:
+        for line in ax.get_lines():
+            try:
+                n = max(n, int(len(line.get_xdata())))
+            except (TypeError, ValueError):
+                continue
+    return _markers_on(n)
+
+
+def _enforce_marker_policy(fig) -> None:
+    """Markers are all-or-nothing per figure.
+
+    `_draw_curve` decides per curve, which on a joint figure left the short
+    un-extended cells wearing markers beside marker-free long ones. That reads
+    as a property of those models rather than of their length, so once ANY
+    series on the figure is too long for markers, none of them keep markers.
+    Legend proxies built through `_markers_on_axes` already follow this rule;
+    this brings the curves, and any legend already constructed, into line.
+    """
+    axes = fig.get_axes()
+    if _markers_on_axes(*axes):
+        return
+    for ax in axes:
+        for line in ax.get_lines():
+            line.set_marker("None")
+        leg = ax.get_legend()
+        if leg is None:
+            continue
+        for h in (getattr(leg, "legend_handles", None)
+                  or getattr(leg, "legendHandles", None) or []):
+            if hasattr(h, "set_marker"):
+                h.set_marker("None")
+
+
+def _mark_benchmark_end(ax) -> None:
+    if not MARK_ITERATION:
+        return
+    ax.axvline(MARK_ITERATION, color="0.35", ls=":", lw=1.1, zorder=0)
+    ax.annotate(f"benchmark ends ({MARK_ITERATION} it.)",
+                xy=(MARK_ITERATION, 0.02), xycoords=("data", "axes fraction"),
+                xytext=(4, 0), textcoords="offset points", rotation=90,
+                ha="left", va="bottom", fontsize=6.5, color="0.35")
 
 
 def _band(Y: np.ndarray, mode: str) -> tuple[np.ndarray, np.ndarray]:
@@ -1168,7 +1241,9 @@ def _collect_accuracy_trajectories(df, picks, target: str, X_full: np.ndarray,
                                    Y_mcmc: torch.Tensor, threshold_t: float,
                                    device: str, min_seeds: int,
                                    refresh: bool = False,
-                                   dropout: float = 0.1) -> dict:
+                                   dropout: float = 0.1,
+                                   cache_only_all: bool = False,
+                                   min_seeds_axis: int | None = None) -> dict:
     """Build accuracy trajectories for every picked (model, strategy, warm)+seed.
 
     TabPFN picks are skipped: AL TabPFN runs save no per-iteration weight file,
@@ -1183,7 +1258,8 @@ def _collect_accuracy_trajectories(df, picks, target: str, X_full: np.ndarray,
         _GP_NORM = build_norm_tensors()
 
     click.echo(f"[accuracy] starting collection over {len(picks)} pick(s); "
-               f"min_seeds={min_seeds}, refresh={refresh}, device={device}")
+               f"min_seeds={min_seeds}, refresh={refresh}, device={device}"
+               + (", CACHE-ONLY (no model is loaded)" if cache_only_all else ""))
     sys.stdout.flush()
 
     out: dict = {}
@@ -1194,7 +1270,11 @@ def _collect_accuracy_trajectories(df, picks, target: str, X_full: np.ndarray,
         # cache as-is. Note: cached values reflect the eval sets the RUN
         # loaded, so they only match the other picks for runs launched
         # against the same --mcmc-data-dir.
-        cache_only = model.startswith("tabpfn")
+        # cache_only_all: harvest every model's on-disk cache and compute
+        # nothing, so the figure can be rebuilt on a CPU-only node. The AL
+        # driver writes each iteration's accuracy as it runs, so for a finished
+        # run the cache is complete and this loses nothing.
+        cache_only = cache_only_all or model.startswith("tabpfn")
         if cache_only:
             click.echo(f"[accuracy] [{pick_idx}/{len(picks)}] {model}-{strat}-{warm}: "
                        "cache-only (run-time accuracy_trajectory.json; no "
@@ -1261,17 +1341,24 @@ def _collect_accuracy_trajectories(df, picks, target: str, X_full: np.ndarray,
                 trajs = per_role_ds[role][ds]
                 if len(trajs) < min_seeds:
                     continue
-                max_len = max(len(t) for t in trajs)
-                Y = np.full((len(trajs), max_len), np.nan, dtype=np.float64)
-                iters_ax = None
+                # Align on the ITERATION NUMBER, never on position. A resumed
+                # run keeps its full history in state.pt but its
+                # accuracy_trajectory.json starts at the iteration the resume
+                # began (the earlier iterations were written in the directory
+                # the run was resumed FROM). Filling row-by-row from index 0
+                # therefore plotted the 40-iteration seeds' accuracies at
+                # iterations 41-80 and made every extended cell's curve start
+                # at 41.
+                all_iters = sorted({int(it) for t in trajs for it, _ in t})
+                col = {it: k for k, it in enumerate(all_iters)}
+                Y = np.full((len(trajs), len(all_iters)), np.nan, dtype=np.float64)
                 for j, t in enumerate(trajs):
-                    if len(t) == max_len and iters_ax is None:
-                        iters_ax = np.asarray([it for it, _ in t])
-                    Y[j, :len(t)] = [a for _, a in t]
-                if iters_ax is None:
-                    iters_ax = np.asarray([it for it, _ in trajs[0]])
+                    for it, a in t:
+                        Y[j, col[int(it)]] = a
+                iters_ax = np.asarray(all_iters)
                 n_per_iter = np.sum(~np.isnan(Y), axis=0)
-                keep = n_per_iter >= min_seeds
+                keep = n_per_iter >= (min_seeds if min_seeds_axis is None
+                                      else min_seeds_axis)
                 if not keep.any():
                     continue
                 cfg_out[role][ds] = (iters_ax[keep], Y[:, keep])
@@ -1390,6 +1477,8 @@ def plot_classification_accuracy_oracle_comparison(traj_acc: dict, picks,
             plt.close(fig)
             continue
 
+        _mark_benchmark_end(ax)
+
         if np.isfinite(y_lo) and np.isfinite(y_hi):
             pad = max(0.02, (y_hi - y_lo) * 0.15)
             ax.set_ylim(max(0.0, y_lo - pad), min(1.0, y_hi + pad))
@@ -1405,15 +1494,20 @@ def plot_classification_accuracy_oracle_comparison(traj_acc: dict, picks,
                 [0], [0], color=MODEL_COLORS.get(m, "gray"), lw=2.4,
                 label=f"{MODEL_DISPLAY.get(m, m)} ({n_str})",
             ))
+        _mk_on = _markers_on_axes(ax)
         role_handles = [
-            Line2D([0], [0], color="black", linestyle="-",  marker="o",
+            Line2D([0], [0], color="black", linestyle="-",
+                   marker="o" if _mk_on else None,
                    markersize=5, label="AL"),
-            Line2D([0], [0], color="black", linestyle="--", marker="s",
+            Line2D([0], [0], color="black", linestyle="--",
+                   marker="s" if _mk_on else None,
                    markersize=5, label="baseline"),
-            Line2D([0], [0], color="black", linestyle=":",  marker="*",
+            Line2D([0], [0], color="black", linestyle=":",
+                   marker="*" if _mk_on else None,
                    markersize=6, label="AL (oracle)"),
             Line2D([0], [0], color="black", linestyle=(0, (3, 1, 1, 1)),
-                   marker="x", markersize=5, label="baseline (oracle)"),
+                   marker="x" if _mk_on else None,
+                   markersize=5, label="baseline (oracle)"),
         ]
         leg_model = ax.legend(
             handles=model_handles, loc="lower right",
@@ -1430,9 +1524,81 @@ def plot_classification_accuracy_oracle_comparison(traj_acc: dict, picks,
         fig.tight_layout()
         out_path = out_dir / f"accuracy_oracle_comparison_{ds}.png"
         out_dir.mkdir(parents=True, exist_ok=True)
+        _enforce_marker_policy(fig)
         fig.savefig(out_path, dpi=150, bbox_inches="tight")
         plt.close(fig)
         written.append(out_path)
+    return written
+
+
+def _dump_accuracy_trajectories(traj_acc: dict, picks, out_dir: Path,
+                               target: str, threshold_t: float) -> list:
+    """Persist the accuracy curves as numbers, so the figure can be redrawn
+    without a GPU and without the run directories.
+
+    The per-run `accuracy_trajectory.json` caches are the primary record, but
+    they live next to the checkpoints on scratch and are keyed per run. This
+    writes the *pooled* arrays the figure actually plots: the full
+    `[n_seeds, n_iters]` matrix per (model, strategy, warm, role, dataset),
+    NaN where a seed did not reach an iteration. Mean and SEM are derivable
+    from it, so nothing about the figure needs recomputing.
+
+    Two files: a JSON holding the arrays and the pick metadata, and a long-form
+    CSV for anything that would rather not parse nested JSON.
+    """
+    payload = {
+        "target": target,
+        "threshold_transformed": float(threshold_t),
+        "datasets": list(ACC_DATASETS),
+        "roles": list(ACC_ROLES),
+        "picks": [{"model": m, "strategy": s, "warm_start": w} for (m, s, w, *_r) in picks],
+        "cells": {},
+    }
+    rows = []
+    for (m, s, w, *_r) in picks:
+        cfg = (m, s, w)
+        if cfg not in traj_acc:
+            continue
+        key = f"{m}|{s}|{w}"
+        payload["cells"][key] = {}
+        for role in ACC_ROLES:
+            for ds, val in (traj_acc[cfg].get(role) or {}).items():
+                iters_ax, Y = val
+                iters_l = [int(i) for i in np.atleast_1d(iters_ax)]
+                Y = np.atleast_2d(Y)
+                payload["cells"][key].setdefault(role, {})[ds] = {
+                    "iterations": iters_l,
+                    "accuracy_per_seed": [[None if not np.isfinite(v) else float(v)
+                                           for v in row] for row in Y],
+                    "n_seeds_per_iteration": [int(n) for n in
+                                              np.sum(np.isfinite(Y), axis=0)],
+                }
+                mean = np.nanmean(Y, axis=0)
+                n = np.sum(np.isfinite(Y), axis=0)
+                with np.errstate(invalid="ignore"):
+                    sem = np.nanstd(Y, axis=0, ddof=1) / np.sqrt(np.maximum(n, 1))
+                for k, it in enumerate(iters_l):
+                    rows.append((m, s, w, role, ds, it,
+                                 mean[k], sem[k], int(n[k])))
+
+    written = []
+    jp = out_dir / "accuracy_trajectories.json"
+    with open(jp, "w") as fh:
+        json.dump(payload, fh, indent=1, allow_nan=False)
+    written.append(jp)
+    cp = out_dir / "accuracy_trajectories.csv"
+    with open(cp, "w", newline="") as fh:
+        wr = csv.writer(fh)
+        wr.writerow(["model", "strategy", "warm_start", "role", "dataset",
+                     "iteration", "accuracy_mean", "accuracy_sem", "n_seeds"])
+        for r in rows:
+            wr.writerow([r[0], r[1], r[2], r[3], r[4], r[5],
+                         "" if not np.isfinite(r[6]) else f"{r[6]:.6f}",
+                         "" if not np.isfinite(r[7]) else f"{r[7]:.6f}",
+                         r[8]])
+    written.append(cp)
+    click.echo(f"[accuracy] wrote {jp.name} and {cp.name} "
+               f"({len(rows)} (cell, role, dataset, iteration) rows)")
     return written
 
 
@@ -1556,6 +1722,8 @@ def plot_classification_accuracy_best_per_model(traj_acc: dict, picks, out_dir: 
             data_efficiency_all[ds] = ds_eff
 
         # Auto-zoom y-axis with 10% padding (or at least 0.02), clipped to [0, 1].
+        _mark_benchmark_end(ax)
+
         if np.isfinite(y_lo) and np.isfinite(y_hi):
             pad = max(0.02, (y_hi - y_lo) * 0.15)
             ax.set_ylim(max(0.0, y_lo - pad), min(1.0, y_hi + pad))
@@ -1577,10 +1745,13 @@ def plot_classification_accuracy_best_per_model(traj_acc: dict, picks, out_dir: 
                 [0], [0], color=MODEL_COLORS.get(m, "gray"), lw=2.4,
                 label=f"{MODEL_DISPLAY.get(m, m)} ({n_str})",
             ))
+        _mk_on = _markers_on_axes(ax)
         role_handles = [
-            Line2D([0], [0], color="black", linestyle="-",  marker="o",
+            Line2D([0], [0], color="black", linestyle="-",
+                   marker="o" if _mk_on else None,
                    markersize=5, label="AL"),
-            Line2D([0], [0], color="black", linestyle="--", marker="s",
+            Line2D([0], [0], color="black", linestyle="--",
+                   marker="s" if _mk_on else None,
                    markersize=5, label="baseline"),
         ]
         leg_model = ax.legend(
@@ -1598,6 +1769,7 @@ def plot_classification_accuracy_best_per_model(traj_acc: dict, picks, out_dir: 
         fig.tight_layout()
         out_path = out_dir / f"accuracy_best_per_model_{ds}.png"
         out_dir.mkdir(parents=True, exist_ok=True)
+        _enforce_marker_policy(fig)
         fig.savefig(out_path, dpi=150, bbox_inches="tight")
         plt.close(fig)
         written.append(out_path)
@@ -1628,7 +1800,8 @@ METRICS = {
 }
 
 
-def _collect_trajectories(df, true_val, tols, min_seeds, traj_fn):
+def _collect_trajectories(df, true_val, tols, min_seeds, traj_fn,
+                          min_seeds_axis=None):
     """Build {(model, strategy, warm): {tol: (iters_axis, Y[n_seeds, n_iters])}}.
 
     Each run is loaded once and re-used across tolerances. Trajectories of
@@ -1659,14 +1832,19 @@ def _collect_trajectories(df, true_val, tols, min_seeds, traj_fn):
                     click.echo(f"[warn] skip {run_dir} tol={tol}: {exc}", err=True)
             if len(trajs) < min_seeds:
                 continue
-            max_len = max(len(r) for _, r in trajs)
-            Y = np.full((len(trajs), max_len), np.nan, dtype=float)
-            for i, (_, rates) in enumerate(trajs):
-                Y[i, :len(rates)] = rates
-            longest_iters = next(its for its, r in trajs if len(r) == max_len)
-            iters_ax = np.asarray(longest_iters[:max_len])
+            # Align on the iteration number (see _collect_accuracy_trajectories):
+            # positional filling is only correct while every seed starts at
+            # iteration 1, which a resumed run need not.
+            all_iters = sorted({int(i) for its, _ in trajs for i in its})
+            col = {it: k for k, it in enumerate(all_iters)}
+            Y = np.full((len(trajs), len(all_iters)), np.nan, dtype=float)
+            for i, (its, rates) in enumerate(trajs):
+                for it, v in zip(its, rates):
+                    Y[i, col[int(it)]] = v
+            iters_ax = np.asarray(all_iters)
             n_per_iter = np.sum(~np.isnan(Y), axis=0)
-            keep = n_per_iter >= min_seeds
+            keep = n_per_iter >= (min_seeds if min_seeds_axis is None
+                                  else min_seeds_axis)
             if not keep.any():
                 continue
             per_tol[tol] = (iters_ax[keep], Y[:, keep])
@@ -1676,7 +1854,7 @@ def _collect_trajectories(df, true_val, tols, min_seeds, traj_fn):
 
 
 def _collect_baseline_trajectories(df, true_val, tols, min_seeds, traj_fn_baseline,
-                                   Y_full):
+                                   Y_full, min_seeds_axis=None):
     """Like `_collect_trajectories` but builds the random-baseline trajectories.
 
     Per-run: needs the seed (for replaying the AL driver's `_load_perm`) and
@@ -1698,14 +1876,19 @@ def _collect_baseline_trajectories(df, true_val, tols, min_seeds, traj_fn_baseli
                     click.echo(f"[warn] baseline skip {run_dir} tol={tol}: {exc}", err=True)
             if len(trajs) < min_seeds:
                 continue
-            max_len = max(len(r) for _, r in trajs)
-            Y = np.full((len(trajs), max_len), np.nan, dtype=float)
-            for i, (_, rates) in enumerate(trajs):
-                Y[i, :len(rates)] = rates
-            longest_iters = next(its for its, r in trajs if len(r) == max_len)
-            iters_ax = np.asarray(longest_iters[:max_len])
+            # Align on the iteration number (see _collect_accuracy_trajectories):
+            # positional filling is only correct while every seed starts at
+            # iteration 1, which a resumed run need not.
+            all_iters = sorted({int(i) for its, _ in trajs for i in its})
+            col = {it: k for k, it in enumerate(all_iters)}
+            Y = np.full((len(trajs), len(all_iters)), np.nan, dtype=float)
+            for i, (its, rates) in enumerate(trajs):
+                for it, v in zip(its, rates):
+                    Y[i, col[int(it)]] = v
+            iters_ax = np.asarray(all_iters)
             n_per_iter = np.sum(~np.isnan(Y), axis=0)
-            keep = n_per_iter >= min_seeds
+            keep = n_per_iter >= (min_seeds if min_seeds_axis is None
+                                  else min_seeds_axis)
             if not keep.any():
                 continue
             per_tol[tol] = (iters_ax[keep], Y[:, keep])
@@ -1718,6 +1901,8 @@ def _draw_curve(ax, iters_ax, Y, *, color, linestyle, marker, label,
                 uncertainty, linewidth=1.5, fill_alpha=0.15, alpha=1.0):
     lo, hi = _band(Y, uncertainty)
     mean = np.nanmean(Y, axis=0)
+    if not _markers_on(len(np.atleast_1d(iters_ax))):
+        marker = None
     ax.plot(iters_ax, mean, color=color, linestyle=linestyle, marker=marker,
             markersize=3, linewidth=linewidth, label=label, alpha=alpha)
     if fill_alpha > 0:
@@ -1756,6 +1941,7 @@ def _finalize(fig, axes, out_path):
                    fontsize=14, frameon=True, borderaxespad=0.)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    _enforce_marker_policy(fig)
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
 
@@ -1800,6 +1986,7 @@ def _finalize_split_legend(fig, axes, *, color_handles, style_handles,
         )
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    _enforce_marker_policy(fig)
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
 
@@ -1863,10 +2050,11 @@ def plot_models_per_strategy(traj, tols, uncertainty, true_val, out_dir,
             for m in models_present
         ]
         warms_present = list(dict.fromkeys(w for (_, _, w) in sorted(cfgs)))
+        _mk_on = _markers_on_axes(*fig.get_axes())
         style_handles = [
             Line2D([0], [0], color="black",
                    linestyle=WARM_LS.get(w, "-"),
-                   marker=WARM_MARKER.get(w, "x"),
+                   marker=WARM_MARKER.get(w, "x") if _mk_on else None,
                    markersize=5, label=w)
             for w in warms_present
         ]
@@ -1875,7 +2063,7 @@ def plot_models_per_strategy(traj, tols, uncertainty, true_val, out_dir,
         if any(m.endswith("_laplace") for (m, _, _) in cfgs):
             style_handles.append(Line2D(
                 [0], [0], color="black", linestyle=LAPLACE_LS,
-                marker=LAPLACE_MARKER, markersize=5,
+                marker=LAPLACE_MARKER if _mk_on else None, markersize=5,
                 label="Laplace acquisition",
             ))
         if prevalence:
@@ -1964,10 +2152,11 @@ def plot_strategies_per_model(traj, tols, uncertainty, true_val, out_dir,
             for s in strategies_present
         ]
         warms_present = list(dict.fromkeys(w for (_, _, w) in sorted(cfgs)))
+        _mk_on = _markers_on_axes(*fig.get_axes())
         style_handles = [
             Line2D([0], [0], color="black",
                    linestyle=WARM_LS.get(w, "-"),
-                   marker=WARM_MARKER.get(w, "x"),
+                   marker=WARM_MARKER.get(w, "x") if _mk_on else None,
                    markersize=5, label=w)
             for w in warms_present
         ]
@@ -1976,7 +2165,7 @@ def plot_strategies_per_model(traj, tols, uncertainty, true_val, out_dir,
         if any(m.endswith("_laplace") for (m, _, _) in cfgs):
             style_handles.append(Line2D(
                 [0], [0], color="black", linestyle=LAPLACE_LS,
-                marker=LAPLACE_MARKER, markersize=5,
+                marker=LAPLACE_MARKER if _mk_on else None, markersize=5,
                 label="Laplace acquisition",
             ))
         if prevalence:
@@ -2143,10 +2332,13 @@ def plot_oracle_comparison(traj, tols, uncertainty, true_val, out_dir,
             [0], [0], color=MODEL_COLORS.get(base_model, "gray"), lw=2.4,
             label=label,
         ))
+    _mk_on = _markers_on_axes(*fig.get_axes())
     style_handles = [
-        Line2D([0], [0], color="black", linestyle="-",  marker="o",
+        Line2D([0], [0], color="black", linestyle="-",
+               marker="o" if _mk_on else None,
                markersize=5, label="regular"),
-        Line2D([0], [0], color="black", linestyle=":",  marker="*",
+        Line2D([0], [0], color="black", linestyle=":",
+               marker="*" if _mk_on else None,
                markersize=6, lw=2.0, label="oracle"),
     ]
     if prevalence:
@@ -2228,8 +2420,17 @@ def plot_best_per_model(traj, tols, uncertainty, true_val, out_dir,
         if mcmc_yield is not None and tol in mcmc_yield:
             ax.axhline(mcmc_yield[tol], color="black", linestyle="-.",
                        linewidth=1.4, label=None)
+        _mark_benchmark_end(ax)
 
     # Build split legends: Model (colour key) + Curve (linestyle key).
+    # The longest series decides whether markers are drawn at all, so the key
+    # must be built from the same test the curves used.
+    _longest = 0
+    for (m, s, w, _tu, _sc) in picks:
+        for tol in tols:
+            if tol in traj[(m, s, w)]:
+                _longest = max(_longest, len(np.atleast_1d(traj[(m, s, w)][tol][0])))
+    _mk_on = _markers_on(_longest)
     color_handles = []
     for (m, s, w, _tu, _sc) in picks:
         n = 0
@@ -2242,7 +2443,7 @@ def plot_best_per_model(traj, tols, uncertainty, true_val, out_dir,
             # Mirror the curve: a hardcoded solid-circle handle made the two
             # entries of an architecture's pair indistinguishable in the legend.
             linestyle=LAPLACE_LS if m.endswith("_laplace") else "-",
-            marker=LAPLACE_MARKER if m.endswith("_laplace") else "o",
+            marker=(LAPLACE_MARKER if m.endswith("_laplace") else "o") if _mk_on else None,
             markersize=5,
             label=f"{MODEL_DISPLAY.get(m, m)} (n={n})",
         ))
@@ -2293,8 +2494,21 @@ def plot_best_per_model(traj, tols, uncertainty, true_val, out_dir,
               help="TARGET_CONFIG key (threshold + true_value source).")
 @click.option("--tolerances", default="0.10,0.20,0.50", show_default=True,
               help="Comma-separated relative tolerances for hit-rate panels.")
+@click.option("--mark-iteration", default=0, type=int, show_default=True,
+              help="Draw a vertical rule at this iteration and label it. Used on "
+                   "joint 40-iteration + extension figures to show where the "
+                   "multi-seed benchmark ends and the resumed seeds continue "
+                   "alone. 0 disables it.")
 @click.option("--min-seeds", default=2, type=int, show_default=True,
               help="Drop groups with fewer completed seeds than this.")
+@click.option("--min-seeds-axis", default=None, type=int,
+              help="Keep iterations reported by at least this many seeds. "
+                   "Defaults to --min-seeds. Set to 1 to run every cell out to "
+                   "its longest seed while still requiring --min-seeds seeds for "
+                   "the cell to be drawn at all: past the benchmark horizon a "
+                   "resumed cell is a single seed, so folding the two thresholds "
+                   "together either truncates it or admits cells that never had "
+                   "more than one seed.")
 @click.option("--include-status", default="completed,running,timeout",
               show_default=True,
               help="Comma-separated statuses to include from the manifest. "
@@ -2332,6 +2546,11 @@ def plot_best_per_model(traj, tols, uncertainty, true_val, out_dir,
 @click.option("--accuracy-device", default=None,
               help="Torch device for accuracy recompute (e.g. cuda:0). "
                    "Default: cuda if available, else cpu.")
+@click.option("--accuracy-cache-only", is_flag=True, default=False,
+              help="Build the accuracy figures purely from each run's "
+                   "accuracy_trajectory.json, loading no checkpoints and no "
+                   "model. Needs no GPU; iterations absent from a cache are "
+                   "simply missing from the curve.")
 @click.option("--accuracy-cache-refresh/--no-accuracy-cache-refresh",
               default=False, show_default=True,
               help="Force re-evaluation of cached iters (overwrites "
@@ -2356,13 +2575,15 @@ def plot_best_per_model(traj, tols, uncertainty, true_val, out_dir,
                    "F rows with NaN) before computing any metric. n_train_per_iter "
                    "is rebased so per-iteration slicing stays consistent.")
 def main(manifest, sweep_id, output_dir, uncertainty, target, tolerances,
-         min_seeds, include_status, baseline_data_dir,
+         mark_iteration,
+         min_seeds, min_seeds_axis, include_status, baseline_data_dir,
          baseline_require_neutralino_lsp,
          compute_accuracy, mcmc_data_dir, mcmc_max_samples, mcmc_yield_json,
-         accuracy_device, accuracy_cache_refresh,
+         accuracy_device, accuracy_cache_only, accuracy_cache_refresh,
          accuracy_static_eval_size, accuracy_dropout,
          require_neutralino_lsp):
-    global _REQUIRE_NEUTRALINO_LSP
+    global _REQUIRE_NEUTRALINO_LSP, MARK_ITERATION
+    MARK_ITERATION = int(mark_iteration or 0)
     _REQUIRE_NEUTRALINO_LSP = bool(require_neutralino_lsp)
     if _REQUIRE_NEUTRALINO_LSP:
         click.echo("[filter] neutralino-LSP veto ENABLED — sneutrino rows will "
@@ -2531,7 +2752,8 @@ def main(manifest, sweep_id, output_dir, uncertainty, target, tolerances,
     picks_by_metric: dict[str, list] = {}
     traj_by_metric: dict[str, dict] = {}
     for metric_name, (traj_fn, file_prefix, ylabel, title_word, traj_fn_baseline) in METRICS.items():
-        traj = _collect_trajectories(df, true_val, tols, min_seeds, traj_fn)
+        traj = _collect_trajectories(df, true_val, tols, min_seeds, traj_fn,
+                                     min_seeds_axis=min_seeds_axis)
         if not traj:
             click.echo(f"[warn] metric '{metric_name}': no groups passed min-seeds filter; skipping",
                        err=True)
@@ -2542,6 +2764,7 @@ def main(manifest, sweep_id, output_dir, uncertainty, target, tolerances,
             baseline_traj = _collect_baseline_trajectories(
                 # Position-preserving copy: see the sentinel note above.
                 df, true_val, tols, min_seeds, traj_fn_baseline, Y_full_indexable,
+                min_seeds_axis=min_seeds_axis,
             )
         # For the per-attempt metric, the baseline trajectory comes back in
         # per-valid-sample units (same as the hit_rate panel). Multiply by
@@ -2772,8 +2995,13 @@ def main(manifest, sweep_id, output_dir, uncertainty, target, tolerances,
                         device=accuracy_device, min_seeds=min_seeds,
                         refresh=accuracy_cache_refresh,
                         dropout=accuracy_dropout,
+                        cache_only_all=accuracy_cache_only,
+                        min_seeds_axis=min_seeds_axis,
                     )
                     if traj_acc:
+                        written += _dump_accuracy_trajectories(
+                            traj_acc, picks, out_dir, target, threshold_t,
+                        )
                         written += plot_classification_accuracy_best_per_model(
                             traj_acc, picks, out_dir, uncertainty,
                         )

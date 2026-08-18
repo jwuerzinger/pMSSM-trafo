@@ -191,6 +191,12 @@ def _selection_seconds(main_log: Path) -> dict[int, float]:
                    "names entropy_batch and would therefore match no row.")
 @click.option("--models", default=None,
               help="Comma list of picks (default: all DEFAULT_AL_PICKS).")
+@click.option("--pad-seeds/--truncate-seeds", default=False, show_default=True,
+              help="With --pad-seeds a cell keeps every iteration any seed "
+                   "reached, NaN-padding the shorter seeds and averaging over "
+                   "whatever is available at each point, so an in-place resume "
+                   "continues the curve past the benchmark horizon instead of "
+                   "the whole cell being cut to its shortest seed.")
 @click.option("--min-seeds", default=2, show_default=True)
 @click.option("--min-iters", default=5, show_default=True,
               help="Iterations a seed needs before its compute series is used. "
@@ -216,7 +222,7 @@ def _selection_seconds(main_log: Path) -> dict[int, float]:
 @click.option("--mcmc-max-samples", default=500_000, show_default=True)
 @click.option("--require-neutralino-lsp/--no-require-neutralino-lsp",
               default=False, show_default=True)
-def main(manifest, output_dir, sweep_id, include_status, picks_override, models, min_seeds, min_iters,
+def main(manifest, output_dir, sweep_id, include_status, picks_override, models, pad_seeds, min_seeds, min_iters,
          coverage, mcmc_data_dir, baseline_data_dir, tolerance, target, model_tag, n_bins, min_cell, mcmc_max_samples,
          require_neutralino_lsp):
     import torch
@@ -358,15 +364,26 @@ def main(manifest, output_dir, sweep_id, include_status, picks_override, models,
 
         if len(per_seed_C) < min_seeds:
             return None
-        n_it = min(len(c) for c in per_seed_C)
+
+        def _pad(arrs, n):
+            """Stack unequal-length seeds to width n, NaN-filling the tails."""
+            M = np.full((len(arrs), n), np.nan, dtype=float)
+            for i, a in enumerate(arrs):
+                M[i, :min(len(a), n)] = a[:n]
+            return M
+
+        if pad_seeds:
+            n_it = max(len(c) for c in per_seed_C)
+            stack = lambda arrs: _pad(arrs, n_it)  # noqa: E731
+        else:
+            n_it = min(len(c) for c in per_seed_C)
+            stack = lambda arrs: np.stack([a[:n_it] for a in arrs])  # noqa: E731
         # One coverage matrix per support source; None where a source produced
         # nothing for every seed of this cell.
-        V = [np.stack([v[:n_it] for v in per_src]) if len(per_src) == len(per_seed_C)
-             and per_src else None for per_src in per_seed_V] or None
-        return (np.stack([c[:n_it] for c in per_seed_C]),
-                np.stack([l[:n_it] for l in per_seed_L]),
-                np.stack([t[:n_it] for t in per_seed_T]),
-                np.stack([s[:n_it] for s in per_seed_S]), V)
+        V = [stack(per_src) if len(per_src) == len(per_seed_C) and per_src else None
+             for per_src in per_seed_V] or None
+        return (stack(per_seed_C), stack(per_seed_L),
+                stack(per_seed_T), stack(per_seed_S), V)
 
     STRAT_SHORT = {"top_k": "top-k", "top_k_tol_only": "tol-only",
                    "entropy_batch": "entropy"}
@@ -392,15 +409,42 @@ def main(manifest, output_dir, sweep_id, include_status, picks_override, models,
             continue
         Cm, Lm, Tm, Sm, Vm = cell
         n_it = Cm.shape[1]
-        pick_label = MODEL_DISPLAY.get(model, model)
+        # phr's table, not the one imported above: that one is a plain dict
+        # with no _expr keys, so a tagged sweep's legend showed the raw
+        # "transformer_expr" while its colour resolved correctly.
+        pick_label = phr.MODEL_DISPLAY.get(model, model)
         if not model.startswith("tabpfn"):
             pick_label += f" ({STRAT_SHORT.get(strat, strat)}, {warm})"
         else:
             pick_label += f" ({STRAT_SHORT.get(strat, strat)})"
-        c_mu, c_sem = Cm.mean(0), Cm.std(0, ddof=1) / np.sqrt(len(Cm))
-        l_mu, l_sem = Lm.mean(0), Lm.std(0, ddof=1) / np.sqrt(len(Lm))
+        # nan-aware: with --pad-seeds the tail columns hold only the seeds that
+        # ran that far, and the SEM there is over that smaller n.
+        _n = lambda M: np.maximum(np.sum(np.isfinite(M), axis=0), 1)  # noqa: E731
+        with np.errstate(invalid="ignore"):
+            if pad_seeds:
+                # Cumulative cost must be averaged as INCREMENTS and then summed,
+                # not averaged directly. Averaging the cumulative series makes the
+                # curve jump backwards where the seed population shrinks: at the
+                # first extended iteration the mean is suddenly the one resumed
+                # seed's own cumulative cost, which is below the five-seed mean if
+                # that seed happened to be faster. Summing mean increments is
+                # identical while all seeds are present (mean of a cumsum is the
+                # cumsum of the mean) and continues monotonically past the branch.
+                _inc = np.diff(Cm, axis=1, prepend=0.0)
+                c_mu = np.nancumsum(np.nanmean(_inc, axis=0))
+            else:
+                c_mu = np.nanmean(Cm, axis=0)
+            c_sem = np.nanstd(Cm, axis=0, ddof=0) / np.sqrt(_n(Cm))
+            l_mu = np.nanmean(Lm, axis=0)
+            l_sem = np.nanstd(Lm, axis=0, ddof=0) / np.sqrt(_n(Lm))
         col = phr.MODEL_COLORS.get(model, "gray")
-        ax.plot(c_mu, l_mu, "o-", ms=2.5, lw=1.6, color=col,
+        # Per-point markers become an unreadable band once a run carries more
+        # than a few tens of iterations, which the extended budgets do; above
+        # that the curve is drawn as a line only.
+        # Optimistic per curve; _enforce_marker_policy strips markers from
+        # the whole figure if ANY series on it is too long for them.
+        _style = "o-" if phr._markers_on(n_it) else "-"
+        ax.plot(c_mu, l_mu, _style, ms=2.5, lw=1.6, color=col,
                 label=pick_label)
         ax.fill_betweenx(l_mu, c_mu - c_sem, c_mu + c_sem, color=col, alpha=0.2, lw=0)
 
@@ -409,8 +453,8 @@ def main(manifest, output_dir, sweep_id, include_status, picks_override, models,
             if _Vm is None or not np.isfinite(_Vm).any():
                 continue
             v_mu = np.nanmean(_Vm, axis=0)
-            v_sem = np.nanstd(_Vm, axis=0, ddof=1) / np.sqrt(len(_Vm))
-            _ax.plot(c_mu, v_mu, "o-", ms=2.5, lw=1.6, color=col, label=pick_label)
+            v_sem = np.nanstd(_Vm, axis=0, ddof=0) / np.sqrt(_n(_Vm))
+            _ax.plot(c_mu, v_mu, _style, ms=2.5, lw=1.6, color=col, label=pick_label)
             _ax.fill_between(c_mu, v_mu - v_sem, v_mu + v_sem, color=col,
                              alpha=0.2, lw=0)
 
@@ -420,8 +464,9 @@ def main(manifest, output_dir, sweep_id, include_status, picks_override, models,
                   label=pick_label)
         ax_l.fill_between(it_ax, l_mu - l_sem, l_mu + l_sem, color=col, alpha=0.2, lw=0)
         for ax_i, M in ((ax_c, Tm + Sm), (ax_t, Tm), (ax_s, Sm)):
-            m_mu = M.mean(0)
-            m_sem = M.std(0, ddof=1) / np.sqrt(len(M))
+            with np.errstate(invalid="ignore"):
+                m_mu = np.nanmean(M, axis=0)
+                m_sem = np.nanstd(M, axis=0, ddof=0) / np.sqrt(_n(M))
             ax_i.plot(it_ax, m_mu, lw=1.6, color=col)
             ax_i.fill_between(it_ax, m_mu - m_sem, m_mu + m_sem,
                               color=col, alpha=0.2, lw=0)
@@ -453,6 +498,7 @@ def main(manifest, output_dir, sweep_id, include_status, picks_override, models,
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
     p = out / "compute_vs_dataset.png"
+    phr._enforce_marker_policy(fig)
     fig.savefig(p, dpi=200)
     click.echo(f"[compute] wrote {p}")
 
@@ -469,6 +515,7 @@ def main(manifest, output_dir, sweep_id, include_status, picks_override, models,
         ax_i.set_xlabel("AL iteration")
     fig2.tight_layout()
     p2 = out / "compute_per_iteration.png"
+    phr._enforce_marker_policy(fig2)
     fig2.savefig(p2, dpi=200)
     click.echo(f"[compute] wrote {p2}")
 
@@ -579,7 +626,7 @@ def main(manifest, output_dir, sweep_id, include_status, picks_override, models,
             if "support covered" in lab:
                 _support_axis(ax_i, full_range=False)
         mh = [Line2D([], [], color=phr.MODEL_COLORS.get(m, "gray"), lw=1.6,
-                     label=MODEL_DISPLAY.get(m, m))
+                     label=phr.MODEL_DISPLAY.get(m, m))
               for m in all_models if m in models_present]
         sh = [Line2D([], [], color="black", ls=STRAT_LS[s], lw=1.4,
                      label=STRAT_SHORT[s])
@@ -593,6 +640,7 @@ def main(manifest, output_dir, sweep_id, include_status, picks_override, models,
                       fontsize=9, color="0.45")
         figw.tight_layout()
         pw = out / f"compute_vs_dataset_{warm_mode}.png"
+        phr._enforce_marker_policy(figw)
         figw.savefig(pw, dpi=200)
         plt.close(figw)
         click.echo(f"[compute] wrote {pw}")

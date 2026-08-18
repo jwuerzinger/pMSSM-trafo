@@ -93,7 +93,21 @@ def _to_floats(v) -> list[float]:
               help="Comma list of picks to include (default: all DEFAULT_AL_PICKS).")
 @click.option("--min-seeds", default=2, show_default=True)
 @click.option("--logy/--no-logy", default=True, show_default=True)
-def main(manifest, output_dir, sweep_id, include_status, models, min_seeds, logy, model_tag):
+@click.option("--skip-empty-panels/--all-panels", default=False, show_default=True,
+              help="Drop evaluation panels no model has data for and re-lay "
+                   "out the grid, instead of drawing them empty. A target "
+                   "with no posterior reference (ExpR) has no MCMC "
+                   "trajectories, so its four-panel figure carries one blank "
+                   "cell; this emits the three populated panels in a row.")
+@click.option("--out-name", default="mse_best_per_model.png", show_default=True,
+              help="Output file name inside --output-dir.")
+@click.option("--mark-iteration", default=0, type=int, show_default=True,
+              help="Draw a vertical rule at this iteration and label it. Used on "
+                   "joint 40-iteration + extension figures to show where the "
+                   "multi-seed benchmark ends and the resumed seeds continue "
+                   "alone. 0 disables it.")
+def main(manifest, output_dir, sweep_id, include_status, models, min_seeds, logy, model_tag,
+         skip_empty_panels, out_name, mark_iteration):
     import torch
     import matplotlib
     matplotlib.use("Agg")
@@ -163,10 +177,24 @@ def main(manifest, output_dir, sweep_id, include_status, models, min_seeds, logy
         return x, mu, sem
 
     from matplotlib.lines import Line2D
-    fig = plt.figure(figsize=(12.5, 9.5))
-    outer = fig.add_gridspec(2, 2, hspace=0.26, wspace=0.30)
+    panels = list(DATASET_KEYS)
+    if skip_empty_panels:
+        panels = [ds for ds in DATASET_KEYS
+                  if any(ds in per_ds for per_ds in traj.values())]
+        dropped = [ds for ds in DATASET_KEYS if ds not in panels]
+        if dropped:
+            click.echo("[mse] dropping empty panel(s): " + ", ".join(dropped))
+    if len(panels) == 4:
+        nrows, ncols = 2, 2
+        figsize = (12.5, 9.5)
+    else:
+        nrows, ncols = 1, max(1, len(panels))
+        figsize = (6.25 * ncols, 4.75)
+    fig = plt.figure(figsize=figsize)
+    outer = fig.add_gridspec(nrows, ncols, hspace=0.26, wspace=0.30)
+    cells = [(i, j) for i in range(nrows) for j in range(ncols)]
     first_loss_ax = None
-    for cell, ds in zip([(i, j) for i in (0, 1) for j in (0, 1)], DATASET_KEYS):
+    for cell, ds in zip(cells, panels):
         inner = outer[cell].subgridspec(2, 1, height_ratios=(2.6, 1), hspace=0.06)
         ax = fig.add_subplot(inner[0])
         axr = fig.add_subplot(inner[1], sharex=ax)
@@ -204,6 +232,13 @@ def main(manifest, output_dir, sweep_id, include_status, models, min_seeds, logy
                                      color=c, alpha=0.15, lw=0)
                     ratio_tops.append(np.nanmax(ratio[common >= 5])
                                       if (common >= 5).any() else np.nanmax(ratio))
+        if mark_iteration:
+            for a_ in (ax, axr):
+                a_.axvline(mark_iteration, color="0.35", ls=":", lw=1.1, zorder=0)
+            ax.annotate(f"benchmark ends ({mark_iteration} it.)",
+                        xy=(mark_iteration, 0.02), xycoords=("data", "axes fraction"),
+                        xytext=(4, 0), textcoords="offset points", rotation=90,
+                        ha="left", va="bottom", fontsize=6.5, color="0.35")
         if logy:
             ax.set_yscale("log")
         ax.set_title(DATASET_TITLES[ds], fontsize=11)
@@ -227,7 +262,7 @@ def main(manifest, output_dir, sweep_id, include_status, models, min_seeds, logy
 
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
-    p = out / "mse_best_per_model.png"
+    p = out / out_name
     fig.savefig(p, dpi=200, bbox_inches="tight")
     click.echo(f"[mse] wrote {p}")
 
