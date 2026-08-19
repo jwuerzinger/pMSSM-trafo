@@ -34,6 +34,14 @@ of the support rather than a result, and the curve's SHAPE is the claim. The
 alternative, splitting in half, halved the defining set and offered no defensible
 way to hold out part of four asymmetric chains.
 
+**Off-band variant.** ``--band-side out`` builds the same figure from the
+COMPLEMENT of the tolerance band: the support is defined by the dataset's
+off-band points and a run is credited only for its own off-band points. It is
+the specificity counterpart, showing what coverage of the excluded region a
+focused acquisition trades away, and it is written to a ``_offband`` filename.
+The two supports are different partitions (the quantile edges follow their own
+population), so covered fractions are comparable only within one figure.
+
 **Units.** Both sides are counted in *valid models simulated*: an AL run's
 labelled set is train + validation (all of it was simulated and all of it
 contributes coverage), and a pool point is one valid model. Counting attempted
@@ -108,10 +116,22 @@ SOURCE_NOTE = {"pool": "all rows, scan order",
                "atlas": "all rows, scan order"}
 
 
+# Which side of the tolerance band a point has to be on to count, for the
+# support definition and for every curve alike. "out" gives the off-band
+# (excluded-region) counterpart of the paper's figure.
+BAND_WORD = {"in": "in-band", "out": "off-band"}
+
+
+def _band_mask(Y, true_val, tol, band_side):
+    """Boolean mask of the rows on the requested side of the tolerance band."""
+    inside = np.abs(np.asarray(Y) - true_val) / true_val < tol
+    return inside if band_side == "in" else ~inside
+
+
 # ── support, cached ───────────────────────────────────────────────────────────
 
 def _support(source, target, pool_dir, mcmc_dir, tol, n_bins, min_cell,
-             veto, true_val, atlas_n_bins=4):
+             veto, true_val, atlas_n_bins=4, band_side="in"):
     """(edges, tmap, n_target, X_axes, Y, n_rows) from the WHOLE dataset, in order.
 
     No half-split: the support is defined by every in-band point of the dataset,
@@ -130,6 +150,17 @@ def _support(source, target, pool_dir, mcmc_dir, tol, n_bins, min_cell,
 
     Nothing is cached: the arrays are ~0.6 GB for the emcee and the support now
     depends on every row, so a cache would be larger than the read it saves.
+
+    ``band_side`` picks which half of the dataset defines the support: "in" is
+    the band itself, the paper's figure, and "out" is its complement, the
+    OFF-band support. The off-band version is the specificity counterpart of the
+    figure: it asks how much of the region the constraint EXCLUDES a run still
+    visits, which is the coverage active learning is supposed to give up in
+    exchange for its in-band gain. Everything else (axes, quantile grid,
+    ``min_cell``, budget normalisation, the curves and the ratio panel) is
+    unchanged, so the two figures are read the same way, but the off-band
+    quantile edges come from the off-band population and the cells are therefore
+    a different partition -- never compare a covered fraction across the two.
     """
     ax = list(AXES)
     if source == "atlas":
@@ -177,7 +208,7 @@ def _support(source, target, pool_dir, mcmc_dir, tol, n_bins, min_cell,
         # Cells and band stay defined by the ntuples (the converged posterior);
         # only the LINE and the budget come from the raw chains, which include
         # burn-in and the repeated rows left by rejected proposals.
-        inb = np.abs(Y - true_val) / true_val < tol
+        inb = _band_mask(Y, true_val, tol, band_side)
         X_def = X[inb]
         z = np.load(EMCEE_H5_NPZ)
         X, Y = z["X"], z["Y"].astype(np.float64)
@@ -186,7 +217,7 @@ def _support(source, target, pool_dir, mcmc_dir, tol, n_bins, min_cell,
                    f"burn-in {burn_rows:,} ({burn_rows / len(Y):.1%}); cells "
                    f"still from the ntuples")
     else:
-        inb = np.abs(Y - true_val) / true_val < tol
+        inb = _band_mask(Y, true_val, tol, band_side)
         X_def = X[inb]
     # The ATLAS scan has 977 in-band points against the pool's 12,343 and the
     # posterior's 24.3M, so a 12-bin grid puts every cell under min_cell and the
@@ -205,7 +236,8 @@ def _support(source, target, pool_dir, mcmc_dir, tol, n_bins, min_cell,
     tmap = -np.ones(nb ** len(ax), dtype=np.int64)
     tmap[keep] = np.arange(len(keep))
     click.echo(f"[eff] {source}: {len(keep)} cells of {nb ** len(ax)} from "
-               f"ALL {int(inb.sum()):,} in-band points of {len(Y):,} rows")
+               f"ALL {int(inb.sum()):,} {BAND_WORD[band_side]} points of "
+               f"{len(Y):,} rows")
     return edges, tmap, len(keep), X, Y, len(Y), burn_rows
 
 
@@ -378,6 +410,14 @@ def _speedup(f_al, c_al, f_ref, c_ref):
                    "Needed for the probe manifests, whose cells are not the "
                    "canonical per-model picks.")
 @click.option("--tolerance", default=0.10, show_default=True)
+@click.option("--band-side", type=click.Choice(["in", "out"]), default="in",
+              show_default=True,
+              help="Which side of the tolerance band defines the support and "
+                   "scores the curves. 'in' is the paper's figure; 'out' is the "
+                   "OFF-band counterpart, i.e. coverage of the region the "
+                   "constraint excludes, which is what a focused acquisition is "
+                   "expected to give up. Writes a '_offband' filename so the two "
+                   "coexist.")
 @click.option("--n-bins", default=12, show_default=True)
 @click.option("--min-cell", default=20, show_default=True)
 @click.option("--mcmc-max-samples", default=500_000, show_default=True)
@@ -421,7 +461,7 @@ def _speedup(f_al, c_al, f_ref, c_ref):
               default=False, show_default=True)
 def main(manifest, output_dir, cache_dir, baseline_data_dir, mcmc_data_dir,
          target, model_tag, run_set_label, include_status, models, all_cells,
-         tolerance, n_bins, min_cell, mcmc_max_samples, mcmc_total_rows,
+         tolerance, band_side, n_bins, min_cell, mcmc_max_samples, mcmc_total_rows,
          n_repeats, n_points, full_range, only_atlas, atlas_n_bins, atlas, min_seeds,
          anchor_min_frac,
          require_neutralino_lsp):
@@ -445,8 +485,11 @@ def main(manifest, output_dir, cache_dir, baseline_data_dir, mcmc_data_dir,
         panels.append("atlas")
     ax_idx = [PARAM_ORDER.index(a) for a in AXES]
     rng = np.random.default_rng(RNG_SEED)
-    click.echo(f"[eff] target={target} band=|y-{true_val:g}|/{true_val:g} < "
-               f"{tolerance:g}  datasets={sources}  run set={run_set_label}")
+    band_word = BAND_WORD[band_side]
+    click.echo(f"[eff] target={target} support={band_word} "
+               f"(|y-{true_val:g}|/{true_val:g} "
+               f"{'<' if band_side == 'in' else '>='} {tolerance:g})  "
+               f"datasets={sources}  run set={run_set_label}")
 
     # ── the AL runs ──────────────────────────────────────────────────────────
     statuses = {s.strip() for s in include_status.split(",")}
@@ -496,7 +539,7 @@ def main(manifest, output_dir, cache_dir, baseline_data_dir, mcmc_data_dir,
         edges, tmap, n_tgt, oX, oY, n_rows, burn_rows = _support(
             src, target, baseline_data_dir, mcmc_data_dir, tolerance, n_bins,
             min_cell, require_neutralino_lsp, true_val,
-            atlas_n_bins=atlas_n_bins)
+            atlas_n_bins=atlas_n_bins, band_side=band_side)
         if n_tgt == 0:
             click.echo(f"[eff] {src}: support is EMPTY at these settings; "
                        f"panel skipped", err=True)
@@ -514,7 +557,8 @@ def main(manifest, output_dir, cache_dir, baseline_data_dir, mcmc_data_dir,
                    f"{n_rows:,} rows = {n_rows:,} calls (1 row = 1 call)")
 
     out = {"config": {"target": target, "run_set": run_set_label, "axes": AXES,
-                      "tolerance": tolerance, "n_bins": n_bins,
+                      "tolerance": tolerance, "band_side": band_side,
+                      "support": f"{band_word} support", "n_bins": n_bins,
                       "min_cell": min_cell, "manifest": manifest,
                       "budget_unit": "valid models simulated (AL: train+val)"},
            "panels": {}}
@@ -560,7 +604,7 @@ def main(manifest, output_dir, cache_dir, baseline_data_dir, mcmc_data_dir,
         for rsrc in [r for r in sources if r != "atlas"]:
             R = supports[rsrc]
             rcells = np.where(
-                np.abs(R["held_Y"] - true_val) / true_val < tolerance,
+                _band_mask(R["held_Y"], true_val, tolerance, band_side),
                 _cells(R["held_X"], S["edges"]), -1)
             # The grid's floor is set in CALLS, not rows, so a subsampled
             # reference still starts at the same budget as everything else.
@@ -592,7 +636,7 @@ def main(manifest, output_dir, cache_dir, baseline_data_dir, mcmc_data_dir,
         # known until they are all in hand.
         curves = {}
         for key, seqs in runs.items():
-            seq_cells = [np.where(np.abs(Y - true_val) / true_val < tolerance,
+            seq_cells = [np.where(_band_mask(Y, true_val, tolerance, band_side),
                                   _cells(X, S["edges"]), -1)
                          for X, Y in seqs]
             got = _al_curve(seq_cells, S["tmap"], S["n_target"], S["n_total"],
@@ -719,34 +763,46 @@ def main(manifest, output_dir, cache_dir, baseline_data_dir, mcmc_data_dir,
             ax.annotate(txt, xy=(xv, 0.015), xytext=(-4, 0),
                         textcoords="offset points", rotation=90, ha="right",
                         va="bottom", fontsize=6.5, color="0.45")
-        # A reference whose burn-in ends beyond this panel's x range gets an
-        # arrow instead of a line, so the reader is not left thinking the curve
-        # they see is a converged sampler.
-        for rsrc, (rf_, rc_) in ref_curves.items():
-            B = supports.get(rsrc, {})
-            if not B.get("burn_rows") or rsrc == src:
+        # Burn-in marker, in EVERY panel where that dataset appears and with
+        # that panel's own normalisation: 0.27 of the emcee budget is the same
+        # boundary as 9.8x the random scan's size. Inside the x range it is a
+        # dashed vertical; outside it (which the zoom makes the usual case, in
+        # both panels) it becomes a horizontal arrow off the right edge. The
+        # previous code skipped the panel's OWN dataset, so the emcee panel drew
+        # its line at 0.27 outside the limits and it never appeared.
+        # Only the panel whose OWN dataset burned in gets the marker: in the
+        # random-scan panel the same boundary sits at 9.8x its size, which is
+        # true but reads as clutter next to a curve nobody is asked to budget
+        # against.
+        for bsrc in ([src] if src in sources else []):
+            B = supports.get(bsrc, {})
+            if not B.get("burn_rows"):
                 continue
             xb = B["burn_rows"] / S["n_total"]
-            if xb <= x_hi or len(rf_) == 0:
-                continue
-            yv = float(np.interp(np.log(min(x_hi, rf_[-1])),
-                                 np.log(rf_), rc_))
-            ax.annotate(f"{SOURCE_CURVE[rsrc]} burn-in ends at "
-                        f"x$\\approx${xb:.1f}",
-                        xy=(x_hi * 0.995, yv), xytext=(-104, 16),
-                        textcoords="offset points", fontsize=6.2,
-                        color=SOURCE_STYLE[rsrc][1], ha="left", va="bottom",
-                        arrowprops=dict(arrowstyle="->", lw=1.1,
-                                        color=SOURCE_STYLE[rsrc][1]))
-        if S.get("burn_rows"):
-            xb = S["burn_rows"] / S["n_total"]
-            for a in (ax, axr):
-                a.axvline(xb, color="0.35", ls="--", lw=1.1, zorder=0)
-            ax.annotate("burn-in ends", xy=(xb, 0.015), xytext=(3, 0),
-                        textcoords="offset points", rotation=90, ha="left",
-                        va="bottom", fontsize=6.5, color="0.3")
-        ax.set_ylabel(f"fraction of the {SOURCE_LABEL[src]}'s in-band support "
-                      f"covered\n({S['n_target']} cells)")
+            col_b = SOURCE_STYLE[bsrc][1]
+            if x_lo < xb < x_hi:
+                for a_ in (ax, axr):
+                    a_.axvline(xb, color=col_b, ls="--", lw=1.2, zorder=0)
+                ax.annotate(f"{SOURCE_CURVE[bsrc]} burn-in ends",
+                            xy=(xb, 0.015), xytext=(3, 0),
+                            textcoords="offset points", rotation=90,
+                            ha="left", va="bottom", fontsize=7, color=col_b)
+            else:
+                # Top-right corner: the legend sits upper-left and the curves
+                # rise from the lower left, so this is the one empty region.
+                # Text on the same line, to the left of the arrow.
+                # Text centred directly ABOVE the arrow's line, both spanning
+                # the same x range, so they read as one label.
+                y0, x0, x1 = 0.93, 0.66, 0.995
+                ax.annotate("", xy=(x1, y0), xytext=(x0, y0),
+                            xycoords="axes fraction", textcoords="axes fraction",
+                            arrowprops=dict(arrowstyle="-|>", lw=1.7, color=col_b))
+                ax.text((x0 + x1) / 2 - 0.035, y0 + 0.012,
+                        f"{SOURCE_CURVE[bsrc]} burn-in ends at $x = {xb:.2g}$",
+                        transform=ax.transAxes, ha="center", va="bottom",
+                        fontsize=8, color=col_b)
+        ax.set_ylabel(f"fraction of the {SOURCE_LABEL[src]}'s {band_word} "
+                      f"support covered\n({S['n_target']} cells)")
         _support_axis(ax)
         ax.grid(alpha=0.3, which="both")
         ax.tick_params(axis="x", labelbottom=False)
@@ -785,7 +841,8 @@ def main(manifest, output_dir, cache_dir, baseline_data_dir, mcmc_data_dir,
             click.echo(t)
 
     fig.tight_layout(h_pad=0.4)
-    stem = f"support_efficiency_{run_set_label}"
+    stem = (f"support_efficiency_{run_set_label}"
+            + ("_offband" if band_side == "out" else ""))
     p_png = Path(output_dir) / f"{stem}.png"
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     fig.savefig(p_png, dpi=200)
