@@ -142,8 +142,9 @@ def _inband(Y, tol, true_val):
     return np.abs(Y - true_val) / true_val < tol
 
 
-def _valid(Y, m_h=None):
-    """The standard physics filter: 0 < Omega < 1 and a real Higgs mass.
+def _valid(Y, m_h=None, target_name="DMRD"):
+    """The registry's physics filter: Y > 0, a real Higgs mass, and Y <
+    ``valid_max`` only for targets that define one.
 
     Applying this before the in-band cut is not optional. Without it the random
     pool's in-band population looks 85% non-neutralino-LSP, because slepton-LSP
@@ -152,19 +153,35 @@ def _valid(Y, m_h=None):
     baseline is computed over. After filtering, the valid pool is 99.4%
     neutralino-LSP and the composition is a statement about physics rather than
     about unfiltered generator output.
+
+    ``valid_max`` must come from the registry, as ``pmssm.data`` does it. It is
+    1.0 for the relic density, where Omega above unity is overclosure, and None
+    for the exclusion ratio, where nothing bounds r from above. Hardcoding the
+    relic-density form applied ``0 < r_exp < 1`` on that target, which is the
+    *unexcluded* half-plane: combined with the band cut it kept only
+    r_exp in (0.9, 1.0), halving the in-band set and quietly turning the
+    composition into a statement about points the LHC does not exclude.
     """
     Y = np.asarray(Y).ravel()
-    ok = (Y > 0) & (Y < 1)
+    ok = Y > 0
+    valid_max = TARGET_CONFIG_COMP[target_name].get("valid_max")
+    if valid_max is not None:
+        ok &= Y < valid_max
     if m_h is not None:
         ok &= np.asarray(m_h).ravel() != -1
     return ok
 
 
-AL_BRANCHES = ("IN_M_1", "IN_M_2", "IN_mu", "IN_tanb", "MO_Omega",
+# The target's own branch is appended per call: reading MO_Omega for every
+# target selected each AL cell's in-band points by relic density, so on the
+# exclusion boundary the composition rows described a relic-density population.
+from pmssm.config import TARGET_CONFIG as TARGET_CONFIG_COMP  # noqa: E402
+
+AL_BRANCHES = ("IN_M_1", "IN_M_2", "IN_mu", "IN_tanb",
                "SP_LSP_Bino_frac", "SP_LSP_Wino_frac", "SP_LSP_Higgsino_frac")
 
 
-def _al_cell_from_ntuples(run_dirs, max_iter=None):
+def _al_cell_from_ntuples(run_dirs, max_iter=None, branch="MO_Omega"):
     """Read the per-worker SPheno ntuples of an AL cell's runs.
 
     The AL driver keeps an ntuple for every evaluated candidate under
@@ -188,10 +205,11 @@ def _al_cell_from_ntuples(run_dirs, max_iter=None):
             for p in it.rglob("ntuple.*.root"):
                 try:
                     t = uproot.open(p)["susy"]
-                    cols = {b: t[b].array(library="np") for b in AL_BRANCHES}
+                    cols = {b: t[b].array(library="np")
+                            for b in (*AL_BRANCHES, branch)}
                 except Exception:                          # noqa: BLE001
                     continue
-                oms.append(cols["MO_Omega"])
+                oms.append(cols[branch])
                 frs.append(np.stack([cols["SP_LSP_Bino_frac"],
                                      cols["SP_LSP_Wino_frac"],
                                      cols["SP_LSP_Higgsino_frac"]], axis=1))
@@ -255,7 +273,7 @@ def main(manifest, output_dir, baseline_data_dir, mcmc_data_dir, target_name, mo
     def record(name, *, Y, fracs=None, X_free=None, extra=None, m_h=None):
         """Store one row. `fracs` = SPheno's own fractions (preferred);
         `X_free` enables the tree-level reconstruction and the |mu| window."""
-        keep = _inband(Y, tolerance, target) & _valid(Y, m_h)
+        keep = _inband(Y, tolerance, target) & _valid(Y, m_h, target_name)
         if keep.sum() == 0:
             click.echo(f"[comp] {name}: no in-band points, skipping", err=True)
             return
@@ -303,7 +321,8 @@ def main(manifest, output_dir, baseline_data_dir, mcmc_data_dir, target_name, mo
         X_free, omega_state, n_seeds = _pooled_cell_data(run_dirs,
                                                         require_neutralino_lsp)
         om, fr, n_seeds_nt, n_files = _al_cell_from_ntuples(
-            run_dirs, max_iter=max_iter or None)
+            run_dirs, max_iter=max_iter or None,
+            branch=TARGET_CONFIG_COMP[target_name]["branch"])
         if fr is None:
             click.echo(f"[comp] {name}: no worker ntuples found; "
                        f"falling back to the reconstruction", err=True)
@@ -334,10 +353,17 @@ def main(manifest, output_dir, baseline_data_dir, mcmc_data_dir, target_name, mo
         Xb, Yb = phr._load_xy_full(baseline_data_dir, target_name, Path(cache_dir))
         Xb_free = np.asarray(Xb)[:, FREE_PARAM_INDICES]
         oms, frs, mhs = [], [], []
+        # The target's OWN branch, not MO_Omega. Hardcoding the relic-density
+        # branch here selected the pool's in-band rows by relic density for any
+        # other target, so the SPheno-based pool row was computed on a different
+        # population than the reconstructed one printed beside it. On the
+        # exclusion boundary that meant |Omega - 1.0|/1.0 < tol, which is not a
+        # population anyone asked about.
+        _branch = TARGET_CONFIG_COMP[target_name]["branch"]
         for p in sorted(Path(baseline_data_dir).glob("ntuple.*.root")):
             try:
                 t = uproot.open(p)["susy"]
-                oms.append(t["MO_Omega"].array(library="np"))
+                oms.append(t[_branch].array(library="np"))
                 mhs.append(t["SP_m_h"].array(library="np"))
                 frs.append(np.stack(
                     [t[b].array(library="np") for b in

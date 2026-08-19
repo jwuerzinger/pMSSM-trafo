@@ -1,0 +1,62 @@
+{
+ "random pool 260804": {
+  "files_read": 24905,
+  "n_inband": 806,
+  "distinct_analyses": 17,
+  "effective_analyses": 7.4539504320498144,
+  "top_share": 0.2853598014888337,
+  "by_analysis": {
+   "CMS-SUS-20-001": 230,
+   "ATLAS-SUSY-2018-19": 208,
+   "ATLAS-EXOT-2018-06": 85,
+   "ATLAS-SUSY-2019-09": 81,
+   "ATLAS-SUSY-2018-41": 54,
+   "ATLAS-SUSY-2018-16-hino": 53,
+   "CMS-SUS-21-002": 37,
+   "ATLAS-SUSY-2018-42": 21,
+   "ATLAS-SUSY-2019-08": 7,
+   "CMS-SUS-16-039-agg": 7,
+   "ATLAS-SUSY-2016-24": 5,
+   "CMS-SUS-17-009": 5,
+   "ATLAS-SUSY-2018-06": 4,
+   "CMS-SUS-18-004": 3,
+   "ATLAS-SUSY-2018-16": 3,
+   "CMS-SUS-16-048": 2,
+   "ATLAS-SUSY-2016-32": 1
+  },
+  "by_txname": {
+   "TSlepSlep": 237,
+   "TDTM2F": 229,
+   "TDTM1F": 229,
+   "TChiWZ": 94,
+   "TChiISR": 85,
+   "TChiWISRll": 81,
+   "TChiZISRqq": 80,
+   "TChiWWISRqq": 75,
+   "TChiZISRll": 72,
+   "TChiWH": 61,
+   "TChiWZoff": 57,
+   "TChiZoff": 53,
+   "TChiWWoff": 53,
+   "TChiWW": 37,
+   "TChiZH": 6,
+   "TChiHH": 6,
+   "TChiZZ": 5,
+   "TSelSel": 5,
+   "TSmuSmu": 4,
+   "THSCPM1b": 1
+  },
+  "ntuple_route_agrees": 556,
+  "ntuple_route_disagrees": 250,
+  "ntuple_route_accuracy": 0.6898263027295285,
+  "config": {
+   "root": "/tmp/jwuerzin/claude-104378/-afs-cern-ch-user-j-jwuerzin-Run3ModelGen/b0bbf518-0a65-4e46-8198-b896243dddd8/scratchpad/sm260804",
+   "pattern": "*.slha.py",
+   "tol": 0.1,
+   "true_val": 1.0,
+   "files_discovered": 24905,
+   "budget": 0,
+   "iters_per_dir": 0
+  }
+ }
+}
