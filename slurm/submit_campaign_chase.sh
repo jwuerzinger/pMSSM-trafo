@@ -24,7 +24,9 @@
 #   CAMPAIGN_CELLS    the cells CSV written by submit_campaign_200.sh (required)
 #   CAMPAIGN_HORIZON  YYYY-MM-DD; the loop stops resubmitting after this
 #   CHASE_RESUME_TO   iteration target (default 200)
-#   CHASE_QUEUE_CAP   stop submitting past this many of my queued jobs (default 24)
+#   CHASE_PER_WAKE    most jobs to add per wake (default 12)
+#   CHASE_QUEUE_CAP   hard ceiling on my total queued jobs (default 250);
+#                     must stay above the campaign's standing depth, ~50
 #   CHASE_EVERY       resubmission delay (default 6hours)
 #   DRY_RUN=1         chase in dry-run AND validate the resubmission with
 #                     `sbatch --test-only` instead of queueing it
@@ -55,7 +57,8 @@ PYTHON="${REPO_ROOT}/.pixi/envs/${PIXI_ENV:-rocm}/bin/python"
 CELLS="${CAMPAIGN_CELLS:-}"
 HORIZON="${CAMPAIGN_HORIZON:-2026-09-30}"
 RESUME_TO="${CHASE_RESUME_TO:-200}"
-QUEUE_CAP="${CHASE_QUEUE_CAP:-24}"
+QUEUE_CAP="${CHASE_QUEUE_CAP:-250}"
+PER_WAKE="${CHASE_PER_WAKE:-12}"
 EVERY="${CHASE_EVERY:-6hours}"
 DRY_RUN="${DRY_RUN:-0}"
 
@@ -79,7 +82,7 @@ if [[ ! -x "${PYTHON}" ]]; then
 fi
 
 CHASE_FLAGS=(--cells "${CELLS}" --resume-to "${RESUME_TO}"
-             --queue-cap "${QUEUE_CAP}")
+             --per-wake "${PER_WAKE}" --queue-cap "${QUEUE_CAP}")
 [[ "${DRY_RUN}" == "1" ]] && CHASE_FLAGS+=(--dry-run) || CHASE_FLAGS+=(--submit)
 "${PYTHON}" scripts/campaign_chase.py "${CHASE_FLAGS[@]}"
 RC=$?
@@ -122,6 +125,7 @@ fi
 
 export CAMPAIGN_CELLS="${CELLS}" CAMPAIGN_HORIZON="${HORIZON}"
 export CHASE_RESUME_TO="${RESUME_TO}" CHASE_QUEUE_CAP="${QUEUE_CAP}"
+export CHASE_PER_WAKE="${PER_WAKE}"
 export CHASE_EVERY="${EVERY}" DRY_RUN="${DRY_RUN}"
 export CHASE_PRUNE="${CHASE_PRUNE:-0}"
 export CHASE_PRUNE_GLOB="${CHASE_PRUNE_GLOB:-}"

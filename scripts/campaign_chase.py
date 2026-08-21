@@ -171,20 +171,29 @@ def cells_from_manifests(target: str, seeds: list[str], resume_to: int,
 @click.option("--cells", default="", help="Campaign cells CSV from submit_campaign_200.sh.")
 @click.option("--resume-to", default=200, show_default=True)
 @click.option("--seeds", default="1,2,3,4,5", show_default=True)
-@click.option("--queue-cap", default=24, show_default=True,
-              help="Stop submitting once this many of my jobs are queued or running. "
-                   "8 can run at once and MaxSubmit is 300, so this keeps the queue "
-                   "fed without burying the rest of it.")
+@click.option("--per-wake", default=12, show_default=True,
+              help="Most jobs to ADD in one wake. This is the real throttle: it "
+                   "stops a single pass from dumping the whole campaign into the "
+                   "queue at once, while still letting every cell be resumed "
+                   "within a wake or two.")
+@click.option("--queue-cap", default=250, show_default=True,
+              help="Hard ceiling on my total queued+running jobs, as a runaway "
+                   "guard against the association's MaxSubmit of 300. It must "
+                   "stay ABOVE the campaign's standing depth (one job per cell, "
+                   "so ~50): set to 24 it silently blocked every resume, because "
+                   "a cell whose job had just timed out was counted against a "
+                   "cap the other cells' queued jobs had already exhausted.")
 @click.option("--min-iters-continuation", default=40, show_default=True,
               help="A manifest cell counts as a continuation target only past this.")
 @click.option("--partition", default="apu", show_default=True)
 @click.option("--dry-run/--submit", default=False)
-def main(cells, resume_to, seeds, queue_cap, min_iters_continuation, partition,
-         dry_run):
+def main(cells, resume_to, seeds, per_wake, queue_cap,
+         min_iters_continuation, partition, dry_run):
     seed_list = [s for s in seeds.split(",") if s]
     running = queued_names()
     n_jobs = n_my_jobs()
-    click.echo(f"[chase] {n_jobs} of my jobs queued/running, cap {queue_cap}")
+    click.echo(f"[chase] {n_jobs} of my jobs queued/running; will add at most "
+               f"{per_wake} this wake (hard ceiling {queue_cap})")
 
     work: list[dict] = []
     if cells and os.path.exists(cells):
@@ -229,7 +238,7 @@ def main(cells, resume_to, seeds, queue_cap, min_iters_continuation, partition,
             click.echo(f"  [busy] {name:34s} seeds({prog}) already queued")
             skipped_busy += 1
             continue
-        if n_jobs >= queue_cap:
+        if submitted >= per_wake or n_jobs >= queue_cap:
             skipped_cap += 1
             continue
         extra = derive_extra(c["target"], bare_model(c["model"]), c["strategy"])
@@ -267,7 +276,7 @@ def main(cells, resume_to, seeds, queue_cap, min_iters_continuation, partition,
         n_jobs += 1
 
     click.echo(f"[chase] {submitted} submitted, {skipped_busy} already running, "
-               f"{skipped_cap} held by the queue cap, "
+               f"{skipped_cap} deferred to a later wake, "
                f"{len(work)} cells short of {resume_to}")
     if not work:
         click.echo("[chase] nothing left to do: every cell has reached the target")
