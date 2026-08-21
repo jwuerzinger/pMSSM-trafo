@@ -85,13 +85,18 @@ if [[ "${MODE}" == "wiring" ]]; then
 else
     # Real generation, so real workspaces to pack. The DNN is the cheapest
     # surrogate, which leaves the budget to the simulator.
+    # No --testing here. It pins n_candidates to 100 and, on apudev, the run
+    # died at the selection step before ever reaching save_state, i.e. upstream
+    # of the housekeeping call. Reproduce the production path instead: real
+    # candidate counts, small n_samples so the simulator budget is bearable.
     run_one dnn_generate "${PYTHON}" active_learning_dnn.py \
         --target ExpR --target-value 1.0 --y-transform log \
-        --n-iterations 2 --n-select 8 --n-candidates 2000 \
-        --n-samples 200 --data-dir "${POOL}" --static-eval-size 2000 \
+        --n-iterations 2 --n-select 8 --n-candidates 20000 \
+        --n-samples 60 --data-dir "${POOL}" --static-eval-size 2000 \
         --no-mcmc-eval --generate-data --gen-workers 4 \
         --min-gen-fraction 0.1 --max-gen-attempts 2 \
-        --seed 1 --gpu-ids 0 --testing --epochs 40 --no-warm-starting \
+        --epochs 200 --patience 50 --no-warm-starting \
+        --seed 1 --gpu-ids 0 \
         --output-dir "${OUT}/dnn_generate"
 fi
 

@@ -390,8 +390,15 @@ def select_entropy_batch_mc(X_candidates, predictions, pred_mean, pred_var,
     T = preds_2d.shape[0]
     sample_cov = (centered.T @ centered) / (T - 1)  # (n_pool, n_pool)
 
-    # Regularize: sample covariance is rank-deficient when T < n_pool
-    sample_cov += 1e-4 * torch.eye(n_pool)
+    # Regularize: sample covariance is rank-deficient when T < pool size.
+    # The identity must be sized on the ACTUAL pool, not on the requested
+    # n_pool: the tolerance filter above can leave fewer survivors than
+    # entropy_pool_size, in which case k = min(n_pool, len(surviving_indices))
+    # shrinks the pool and torch.eye(n_pool) no longer matches. In production
+    # the two are equal (1e6 candidates against a 5000 pool), so this only ever
+    # fired on reduced-size runs, which is to say on every smoke test:
+    # "The size of tensor a (34) must match the size of tensor b (100)".
+    sample_cov += 1e-4 * torch.eye(sample_cov.shape[0], dtype=sample_cov.dtype)
 
     if logger:
         logger.info(f"Sample covariance: shape={sample_cov.shape}, rank≤{T}, "
