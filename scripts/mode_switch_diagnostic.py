@@ -112,7 +112,10 @@ def _sample_paths(run_dirs, iters_per_run, budget):
         for i in sorted(set(idx.tolist())):
             # One call covers both layouts: the loose files where they exist,
             # the packed run's JSON records where they do not.
-            picked.extend(iter_smodels_items(iters[i]))
+            # include_retries=False preserves this study's original scope, which
+            # globbed worker_*/scan/SModelS only. Retried candidates are not a
+            # random subset, so pulling them in would move the gap statistics.
+            picked.extend(iter_smodels_items(iters[i], include_retries=False))
     if len(picked) > budget:
         sel = np.linspace(0, len(picked) - 1, budget).astype(int)
         picked = [picked[i] for i in sel]

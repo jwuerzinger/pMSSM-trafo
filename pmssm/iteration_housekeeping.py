@@ -381,8 +381,16 @@ def load_iteration_smodels(iter_dir):
     return []
 
 
-def iter_smodels_items(iter_dir):
+def iter_smodels_items(iter_dir, include_retries=True):
     """One item per point of an iteration: a Path if loose, else a record dict.
+
+    ``include_retries=False`` restricts to the direct ``worker_*`` workspaces,
+    excluding candidates the loop re-dispatched under ``retry_NNN/``. That is not
+    a detail: composition_fractions.py records that the direct workers hold only
+    ~45% of the evaluated points and that the retries are not a random subset of
+    them, so a caller whose original glob covered only ``worker_*`` must keep
+    covering only ``worker_*`` or its numbers move. Records carry their source
+    path, so the same restriction applies to both layouts.
 
     The single entry point for the three offline studies that used to glob
     ``worker_*/scan/SModelS/*.slha.py`` directly. On a run whose workspaces are
@@ -401,8 +409,11 @@ def iter_smodels_items(iter_dir):
         tar -xf <iteration_dir>/debris.tar -C <iteration_dir>
     """
     iter_dir = Path(iter_dir)
+    dirs = _debris_dirs(iter_dir)
+    if not include_retries:
+        dirs = [d for d in dirs if not d.name.startswith("retry_")]
     loose = []
-    for d in _debris_dirs(iter_dir):
+    for d in dirs:
         loose.extend(sorted(d.rglob("*.slha.py")))
     if loose:
         return loose
@@ -410,9 +421,13 @@ def iter_smodels_items(iter_dir):
     if not cached.exists():
         return []
     try:
-        return json.loads(cached.read_text()).get("points", [])
+        points = json.loads(cached.read_text()).get("points", [])
     except Exception:                                          # noqa: BLE001
         return []
+    if not include_retries:
+        points = [p for p in points
+                  if not str(p.get("source", "")).startswith("retry_")]
+    return points
 
 
 def record_to_exptres(rec):
