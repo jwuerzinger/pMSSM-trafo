@@ -34,7 +34,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=16G
-#SBATCH --time=00:15:00
+#SBATCH --time=02:00:00
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err
 
@@ -85,6 +85,24 @@ CHASE_FLAGS=(--cells "${CELLS}" --resume-to "${RESUME_TO}"
 RC=$?
 echo "[chase] campaign_chase.py exited ${RC}"
 
+# ---- optional: reclaim the debris of completed iterations --------------------
+# Off by default because it deletes files. Each AL iteration leaves ~145 MB and
+# ~6,200 files of Run3ModelGen workspaces behind and nothing in the loop removes
+# them, so the full campaign would leave roughly 6 PB and 260 million files.
+# CHASE_PRUNE=1 turns it on; --keep-last 3 protects the in-progress iteration and
+# any retry that reuses its workspace, and the caps keep it inside the wall clock.
+if [[ "${CHASE_PRUNE:-0}" == "1" ]]; then
+    echo; echo "[chase] pruning completed-iteration debris"
+    "${PYTHON}" scripts/prune_run_debris.py \
+        --runs "${CHASE_PRUNE_GLOB:-/ptmp/jwuerzin/output/active_learning_*}" \
+        --keep-last 3 --max-dirs "${CHASE_PRUNE_MAX_DIRS:-4000}" \
+        --deadline-min "${CHASE_PRUNE_DEADLINE_MIN:-60}" --delete 2>&1 | tail -6
+else
+    echo; echo "[chase] CHASE_PRUNE unset: simulator debris is NOT being reclaimed."
+    echo "        Each iteration leaves ~145 MB / ~6,200 files. Enable with"
+    echo "        CHASE_PRUNE=1 when relaunching this loop."
+fi
+
 # ---- resubmit, unless past the horizon --------------------------------------
 TODAY="$(date +%Y-%m-%d)"
 if [[ "${TODAY}" > "${HORIZON}" ]]; then
@@ -97,6 +115,10 @@ fi
 export CAMPAIGN_CELLS="${CELLS}" CAMPAIGN_HORIZON="${HORIZON}"
 export CHASE_RESUME_TO="${RESUME_TO}" CHASE_QUEUE_CAP="${QUEUE_CAP}"
 export CHASE_EVERY="${EVERY}" DRY_RUN="${DRY_RUN}"
+export CHASE_PRUNE="${CHASE_PRUNE:-0}"
+export CHASE_PRUNE_GLOB="${CHASE_PRUNE_GLOB:-}"
+export CHASE_PRUNE_MAX_DIRS="${CHASE_PRUNE_MAX_DIRS:-4000}"
+export CHASE_PRUNE_DEADLINE_MIN="${CHASE_PRUNE_DEADLINE_MIN:-60}"
 SB=(sbatch --parsable "--begin=now+${EVERY}" --partition=apu1 --gres=gpu:1
     --mem=16G --export=ALL slurm/submit_campaign_chase.sh)
 # In dry-run, --test-only exercises the whole path (sbatch on a compute node,
