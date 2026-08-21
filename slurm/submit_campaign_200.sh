@@ -93,20 +93,57 @@ N_GROUPS=0
 # One invocation per (target, arm, driver family). Every argument that differs
 # between drivers is resolved here so nothing downstream has to guess.
 run_group () {  # $1 target  $2 arm  $3 family  $4 models  $5 warm  $6 head_args
+                #  $7 (optional) output-tag suffix
     local t="$1" arm="$2" fam="$3" models="$4" warm="$5" head_args="$6"
+    local suffix="${7:-}"
     [[ ",${TARGETS}," == *",${t},"* ]] || return 0
     [[ ",${ARMS},"    == *",${arm},"* ]] || return 0
     local extra; extra="$(common_for "${t}" "${fam}") ${head_args}"
+    # A variant of a driver that already has cells here (lsqgp is exact_gp with a
+    # different head) must not reuse the base model's names, or its run
+    # directories collide with them and AL_RESUME_TO would extend the wrong
+    # thing. The suffix goes through OUTPUT_TAG, which names both the manifest
+    # model column and the output dir.
+    local otag; otag="$(tag_for "${t}")"
+    if [[ -n "${suffix}" ]]; then
+        otag="${otag:+${otag}_}${suffix}"
+    fi
+    # Refuse to resubmit a cell that already has a job. Re-running this script
+    # to add ONE new group would otherwise resubmit every earlier group too,
+    # and a second bundle against the same run directories races the first on
+    # state.pt. (That is exactly what happened when the lsq group was added on
+    # 2026-08-21; 32 duplicates had to be cancelled by hand.) Cell names here
+    # must match job_name() in scripts/campaign_chase.py.
+    local pending=""
+    for m in ${models//,/ }; do
+        local short jn tt
+        case "${arm}" in
+            tol_only_random) short=tol;; cls_entropy) short=clsent;;
+            bald) short=bald;; *) short="${arm}";;
+        esac
+        [[ "${t}" == "ExpR" ]] && tt=e || tt=d
+        jn="c200_${tt}_${m}${suffix:+_${suffix}}_${short}"
+        if squeue -h -u "${USER}" -o "%j" 2>/dev/null | grep -qx "${jn}"; then
+            pending="${pending} ${jn}"
+        fi
+    done
+    if [[ -n "${pending}" && "${FORCE_RESUBMIT:-0}" != "1" ]]; then
+        echo
+        echo "--- [skip] ${t} / ${arm} / ${fam}${suffix:+ [${suffix}]}: already queued:${pending}"
+        echo "           (FORCE_RESUBMIT=1 to override, but check for run-dir collisions first)"
+        return 0
+    fi
     N_GROUPS=$((N_GROUPS + 1))
     echo
-    echo "--- [${N_GROUPS}] ${t} / ${arm} / ${fam}: ${models} (${warm})"
+    echo "--- [${N_GROUPS}] ${t} / ${arm} / ${fam}: ${models} (${warm})${suffix:+ [${suffix}]}"
+    echo "    OUTPUT_TAG:    ${otag:-<none>}"
     echo "    EXTRA_AL_ARGS: ${extra}"
     for m in ${models//,/ }; do
-        echo "${t},${m},${arm},${warm},${CAMPAIGN_ID},$(manifest_for "${t}")" >> "${CELLS_CSV}"
+        echo "${t},${m}${suffix:+_${suffix}},${arm},${warm},${CAMPAIGN_ID},$(manifest_for "${t}")" >> "${CELLS_CSV}"
     done
     SWEEP_ID="${CAMPAIGN_ID}" \
     MANIFEST="$(manifest_for "${t}")" \
-    OUTPUT_TAG="$(tag_for "${t}")" \
+    OUTPUT_TAG="${otag}" \
     BUNDLE_SEEDS=1 \
     SEEDS="${SEEDS}" \
     MODELS="${models}" \
@@ -125,6 +162,14 @@ run_group () {  # $1 target  $2 arm  $3 family  $4 models  $5 warm  $6 head_args
 # budget that mode finding needs.
 CLS="--head classification"
 CLS_EXACT="--model-type laplace_gpc --head classification --epochs 3000 --patience 200 --learning-rate 1e-2"
+# The least-squares alternative of Rasmussen & Williams section 6.5: regress
+# +-1 targets under the ordinary Gaussian likelihood and read the verdict off a
+# probit. It stays CONJUGATE, so it needs neither laplace_gpc nor the enlarged
+# optimiser budget that mode finding does, and it runs on the plain exact GP
+# with the production settings. Paired with CLS_EXACT it separates two things
+# the Laplace arm changes at once: discretising the target, and replacing the
+# likelihood.
+CLS_LSQ="--head lsq_classification"
 NEURAL=transformer,dnn,dnn_match_trafo
 
 if [[ ! -f "${CELLS_CSV}" ]]; then
@@ -160,6 +205,11 @@ done
 for t in ExpR DMRD; do
     run_group "${t}" bald        gp exact_gp warm "${CLS_EXACT}"
     run_group "${t}" cls_entropy gp exact_gp warm "${CLS_EXACT}"
+done
+# Last, alongside the Laplace arm it is the control for.
+for t in ExpR DMRD; do
+    run_group "${t}" bald        gp exact_gp warm "${CLS_LSQ}" lsq
+    run_group "${t}" cls_entropy gp exact_gp warm "${CLS_LSQ}" lsq
 done
 
 echo
