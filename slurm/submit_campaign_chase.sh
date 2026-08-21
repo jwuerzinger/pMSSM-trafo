@@ -81,6 +81,46 @@ if [[ ! -x "${PYTHON}" ]]; then
     exit 1
 fi
 
+# ---- chain the next wake FIRST ----------------------------------------------
+# Queued before any work is done, on purpose. Submitting it at the end meant a
+# crash in the body, a node failure or a kill left no successor and the loop
+# died silently for the rest of the campaign, which for an unattended run is the
+# one failure that matters. --begin is 6 h against a 2 h wall clock, so a
+# successor can never overlap its parent. The pre-flight checks above still run
+# first: a broken configuration should stop the chain, not be inherited by it.
+TODAY="$(date +%Y-%m-%d)"
+if [[ "${TODAY}" > "${HORIZON}" ]]; then
+    echo "[chase] ${TODAY} is past the horizon ${HORIZON}; not chaining further."
+    echo "[chase] Restart with: CAMPAIGN_CELLS=${CELLS} CAMPAIGN_HORIZON=<date> \\"
+    echo "        sbatch --partition=apu1 --gres=gpu:1 --mem=16G slurm/submit_campaign_chase.sh"
+else
+    export CAMPAIGN_CELLS="${CELLS}" CAMPAIGN_HORIZON="${HORIZON}"
+    export CHASE_RESUME_TO="${RESUME_TO}" CHASE_QUEUE_CAP="${QUEUE_CAP}"
+    export CHASE_PER_WAKE="${PER_WAKE}" CHASE_EVERY="${EVERY}" DRY_RUN="${DRY_RUN}"
+    export CHASE_PRUNE="${CHASE_PRUNE:-0}"
+    export CHASE_PRUNE_GLOB="${CHASE_PRUNE_GLOB:-}"
+    export CHASE_PRUNE_MAX_DIRS="${CHASE_PRUNE_MAX_DIRS:-4000}"
+    export CHASE_PRUNE_DEADLINE_MIN="${CHASE_PRUNE_DEADLINE_MIN:-60}"
+    if [[ "${DRY_RUN}" == "1" ]]; then
+        # --test-only exercises the whole path (sbatch from a compute node, the
+        # controller connection, the flag set) without queueing anything. That
+        # is the assumption this design rests on, so it is checked not assumed.
+        echo "[chase] dry-run: validating the chain with --test-only"
+        sbatch --test-only "--begin=now+${EVERY}" --partition=apu1 --gres=gpu:1 \
+            --mem=16G --export=ALL slurm/submit_campaign_chase.sh 2>&1 | sed 's/^/        /'
+    else
+        NEXT="$(sbatch --parsable "--begin=now+${EVERY}" --partition=apu1 \
+                --gres=gpu:1 --mem=16G --export=ALL \
+                slurm/submit_campaign_chase.sh)"
+        if [[ -z "${NEXT}" ]]; then
+            echo "[chase] WARNING: could not chain the next wake. The loop STOPS" >&2
+            echo "        after this run. Restart it by hand; see the header." >&2
+        else
+            echo "[chase] next wake queued as job ${NEXT}, begins in ${EVERY}"
+        fi
+    fi
+fi
+
 CHASE_FLAGS=(--cells "${CELLS}" --resume-to "${RESUME_TO}"
              --per-wake "${PER_WAKE}" --queue-cap "${QUEUE_CAP}")
 [[ "${DRY_RUN}" == "1" ]] && CHASE_FLAGS+=(--dry-run) || CHASE_FLAGS+=(--submit)
@@ -114,40 +154,4 @@ else
     echo "        relaunching this loop; it tars, it does not delete."
 fi
 
-# ---- resubmit, unless past the horizon --------------------------------------
-TODAY="$(date +%Y-%m-%d)"
-if [[ "${TODAY}" > "${HORIZON}" ]]; then
-    echo "[chase] ${TODAY} is past the horizon ${HORIZON}; the loop ends here."
-    echo "[chase] Resume it with: CAMPAIGN_CELLS=${CELLS} CAMPAIGN_HORIZON=<date> \\"
-    echo "        sbatch --partition=apu1 --gres=gpu:1 --mem=16G slurm/submit_campaign_chase.sh"
-    exit ${RC}
-fi
-
-export CAMPAIGN_CELLS="${CELLS}" CAMPAIGN_HORIZON="${HORIZON}"
-export CHASE_RESUME_TO="${RESUME_TO}" CHASE_QUEUE_CAP="${QUEUE_CAP}"
-export CHASE_PER_WAKE="${PER_WAKE}"
-export CHASE_EVERY="${EVERY}" DRY_RUN="${DRY_RUN}"
-export CHASE_PRUNE="${CHASE_PRUNE:-0}"
-export CHASE_PRUNE_GLOB="${CHASE_PRUNE_GLOB:-}"
-export CHASE_PRUNE_MAX_DIRS="${CHASE_PRUNE_MAX_DIRS:-4000}"
-export CHASE_PRUNE_DEADLINE_MIN="${CHASE_PRUNE_DEADLINE_MIN:-60}"
-SB=(sbatch --parsable "--begin=now+${EVERY}" --partition=apu1 --gres=gpu:1
-    --mem=16G --export=ALL slurm/submit_campaign_chase.sh)
-# In dry-run, --test-only exercises the whole path (sbatch on a compute node,
-# the controller connection, the flag set) without queueing anything. That is
-# the one assumption this design rests on, so it is checked rather than assumed.
-if [[ "${DRY_RUN}" == "1" ]]; then
-    echo "[chase] dry-run: validating the resubmission with --test-only"
-    sbatch --test-only "--begin=now+${EVERY}" --partition=apu1 --gres=gpu:1 \
-        --mem=16G --export=ALL slurm/submit_campaign_chase.sh 2>&1 | sed 's/^/        /'
-    echo "[chase] --test-only rc=$?"
-    exit ${RC}
-fi
-NEXT="$("${SB[@]}")"
-if [[ -z "${NEXT}" ]]; then
-    echo "[chase] WARNING: resubmission failed. The loop has STOPPED." >&2
-    echo "        Restart it by hand with the command in this script's header." >&2
-    exit 1
-fi
-echo "[chase] next wake queued as job ${NEXT}, begins in ${EVERY}"
 exit ${RC}
