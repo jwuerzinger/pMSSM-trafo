@@ -14,14 +14,34 @@ Nothing in the loop ever removes it, so a 40-iteration run is 5.8 GB and
 across both targets, that is roughly 6 PB and 260 million files on a shared
 filesystem with 7.9 PB free and no inode quota to stop it.
 
-Why deleting it is safe
------------------------
-This is the same subset ``scripts/archive_runs.sh`` already refuses to archive,
-in its words "worker_*/retry_* simulation debris (regenerable)". The training
-data itself is folded into ``state.pt`` as (X, Y, F) the moment the iteration's
-ntuple is parsed, and every figure in the paper is built from ``state.pt``,
-``summary.json``, the per-iteration checkpoints and the accuracy caches. None of
-them reads a worker directory.
+Why this PACKS rather than deletes
+----------------------------------
+``scripts/archive_runs.sh`` calls this subset "worker_*/retry_* simulation debris
+(regenerable)" and declines to archive it. That comment is about what could in
+principle be re-simulated, NOT about whether anything reads it, and four
+analyses do (checked 2026-08-21):
+
+  scripts/composition_fractions.py       iteration_*/**/ntuple.*.root
+  scripts/best_analysis_arms.py          worker_*/scan/SModelS/*.slha.py
+                                         retry_*/worker_*/scan/SModelS/*.slha.py
+  scripts/best_analysis_from_smodels.py  the same *.slha.py, via rglob
+  scripts/mode_switch_diagnostic.py      the same *.slha.py
+
+composition_fractions.py is explicit that the loss would be permanent: "the
+pooled state.pt holds only inputs and Omega, so these files are the only route
+to the same composition definition the LSP-type figure uses", and "the direct
+workers alone hold only ~45% of the evaluated points, and the retries are not a
+random subset of them".
+
+So the default mode is ``tar``: each completed iteration's workspaces are packed
+into one ``debris.tar`` beside them and the trees removed. That turns ~6,200
+inodes into 1 without losing a byte, and it is reversible with ``tar -xf``. It is
+the same trick archive_runs.sh uses for the home filesystem's 261,120-file quota.
+The consumers above need the tar expanded before they run.
+
+``--mode delete`` is available but it is destructive and irreversible; it will
+break all four scripts above for the pruned iterations. It requires
+``--i-know-this-deletes-analysis-inputs``.
 
 What it will not touch
 ----------------------
@@ -33,15 +53,18 @@ already in ``state.pt``.
 
 Usage
 -----
-    python scripts/prune_run_debris.py                      # dry run, reports only
-    python scripts/prune_run_debris.py --delete             # actually reclaim
-    python scripts/prune_run_debris.py --delete --max-dirs 2000 --deadline-min 60
+    python scripts/prune_run_debris.py                       # dry run, reports only
+    python scripts/prune_run_debris.py --apply               # pack into debris.tar
+    python scripts/prune_run_debris.py --apply --mode delete \
+        --i-know-this-deletes-analysis-inputs                # destructive
 """
 from __future__ import annotations
 
 import glob
 import os
 import shutil
+import subprocess
+import tarfile
 import time
 from pathlib import Path
 
@@ -83,10 +106,30 @@ def _measure(paths):
 @click.option("--min-age-hours", default=6.0, show_default=True,
               help="Skip debris modified more recently than this, as a second "
                    "guard against touching live work.")
-@click.option("--delete/--dry-run", default=False,
-              help="Dry run by default: nothing is removed and the reclaimable "
-                   "total is reported.")
-def main(runs, keep_last, max_dirs, deadline_min, min_age_hours, delete):
+@click.option("--mode", default="tar", show_default=True,
+              type=click.Choice(["tar", "delete"]),
+              help="tar packs each iteration's workspaces into debris.tar beside "
+                   "them and removes the trees: same bytes, one inode instead of "
+                   "~6,200, reversible with tar -xf. delete is irreversible and "
+                   "breaks composition_fractions.py, best_analysis_arms.py, "
+                   "best_analysis_from_smodels.py and mode_switch_diagnostic.py "
+                   "for the pruned iterations.")
+@click.option("--i-know-this-deletes-analysis-inputs", "confirmed_delete",
+              is_flag=True, default=False,
+              help="Required for --mode delete.")
+@click.option("--apply/--dry-run", default=False,
+              help="Dry run by default: nothing is written or removed and the "
+                   "reclaimable total is reported.")
+def main(runs, keep_last, max_dirs, deadline_min, min_age_hours, mode,
+         confirmed_delete, apply):
+    if mode == "delete" and apply and not confirmed_delete:
+        raise click.UsageError(
+            "--mode delete destroys the inputs of composition_fractions.py, "
+            "best_analysis_arms.py, best_analysis_from_smodels.py and "
+            "mode_switch_diagnostic.py, and composition_fractions.py states "
+            "that state.pt cannot substitute for them. Pass "
+            "--i-know-this-deletes-analysis-inputs if that is genuinely "
+            "intended, or use the default --mode tar, which keeps every byte.")
     t0 = time.time()
     deadline = t0 + deadline_min * 60 if deadline_min else None
     now = time.time()
@@ -107,6 +150,8 @@ def main(runs, keep_last, max_dirs, deadline_min, min_age_hours, delete):
             paths = _debris(it)
             if not paths:
                 continue
+            if (it / "debris.tar").exists():
+                continue        # already packed on an earlier pass
             if min_age_hours:
                 try:
                     if now - it.stat().st_mtime < min_age_hours * 3600:
@@ -117,9 +162,29 @@ def main(runs, keep_last, max_dirs, deadline_min, min_age_hours, delete):
             run_b += b
             run_f += f
             run_d += len(paths)
-            if delete:
-                for p in paths:
-                    shutil.rmtree(p, ignore_errors=True)
+            if apply:
+                if mode == "tar":
+                    # Pack first, verify the archive opens, and only then remove
+                    # the trees. A tar that cannot be read back is worse than no
+                    # tar at all, so the removal is gated on the read.
+                    tarball = it / "debris.tar"
+                    try:
+                        with tarfile.open(tarball, "w") as tf:
+                            for p in paths:
+                                tf.add(p, arcname=p.name)
+                        with tarfile.open(tarball, "r") as tf:
+                            if not tf.getnames():
+                                raise OSError("empty archive")
+                    except Exception as exc:                # noqa: BLE001
+                        click.echo(f"  [skip] {it}: pack failed "
+                                   f"({type(exc).__name__}: {exc})")
+                        tarball.unlink(missing_ok=True)
+                        continue
+                    for p in paths:
+                        shutil.rmtree(p, ignore_errors=True)
+                else:
+                    for p in paths:
+                        shutil.rmtree(p, ignore_errors=True)
             tot_d += len(paths)
             if max_dirs and tot_d >= max_dirs:
                 stopped = f"--max-dirs {max_dirs} reached"
@@ -135,15 +200,17 @@ def main(runs, keep_last, max_dirs, deadline_min, min_age_hours, delete):
         if stopped:
             break
 
-    verb = "reclaimed" if delete else "reclaimable"
+    verb = ("packed" if mode == "tar" else "deleted") if apply \
+        else "reclaimable"
     click.echo(f"\n[prune] {n_runs} run(s) examined, {tot_d} debris "
                f"director{'y' if tot_d == 1 else 'ies'}")
     click.echo(f"[prune] {verb}: {tot_b / 2**40:.3f} TiB, {tot_f:,d} files "
                f"in {time.time() - t0:.0f}s")
     if stopped:
         click.echo(f"[prune] stopped early: {stopped}; run again to continue")
-    if not delete and tot_f:
-        click.echo("[prune] DRY RUN: nothing was removed. Add --delete to reclaim.")
+    if not apply and tot_f:
+        click.echo("[prune] DRY RUN: nothing was written or removed. "
+                   "Add --apply to pack into debris.tar.")
 
 
 if __name__ == "__main__":

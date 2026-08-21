@@ -85,22 +85,30 @@ CHASE_FLAGS=(--cells "${CELLS}" --resume-to "${RESUME_TO}"
 RC=$?
 echo "[chase] campaign_chase.py exited ${RC}"
 
-# ---- optional: reclaim the debris of completed iterations --------------------
-# Off by default because it deletes files. Each AL iteration leaves ~145 MB and
-# ~6,200 files of Run3ModelGen workspaces behind and nothing in the loop removes
-# them, so the full campaign would leave roughly 6 PB and 260 million files.
-# CHASE_PRUNE=1 turns it on; --keep-last 3 protects the in-progress iteration and
-# any retry that reuses its workspace, and the caps keep it inside the wall clock.
+# ---- optional: pack the workspaces of completed iterations -------------------
+# /ptmp has NO per-user file quota but a hard filesystem inode ceiling that does
+# not grow (mmlsfs viper_ptmp2: --inode-limit 629,145,600, --auto-inode-limit no),
+# of which about 268 million were free on 2026-08-21. Each AL iteration leaves
+# ~6,200 files of Run3ModelGen workspaces and nothing in the loop removes them,
+# so a completed campaign would claim most of that headroom.
+#
+# This PACKS rather than deletes: tar per iteration, ~6,200 inodes to 1, no byte
+# lost, reversible with tar -xf. It has to pack rather than delete because
+# composition_fractions.py, best_analysis_arms.py, best_analysis_from_smodels.py
+# and mode_switch_diagnostic.py all read inside those trees, and
+# composition_fractions.py states that state.pt cannot substitute for them.
+# Those four need the tar expanded before they run.
 if [[ "${CHASE_PRUNE:-0}" == "1" ]]; then
-    echo; echo "[chase] pruning completed-iteration debris"
+    echo; echo "[chase] packing completed-iteration workspaces into debris.tar"
     "${PYTHON}" scripts/prune_run_debris.py \
         --runs "${CHASE_PRUNE_GLOB:-/ptmp/jwuerzin/output/active_learning_*}" \
-        --keep-last 3 --max-dirs "${CHASE_PRUNE_MAX_DIRS:-4000}" \
-        --deadline-min "${CHASE_PRUNE_DEADLINE_MIN:-60}" --delete 2>&1 | tail -6
+        --keep-last 3 --mode tar --max-dirs "${CHASE_PRUNE_MAX_DIRS:-4000}" \
+        --deadline-min "${CHASE_PRUNE_DEADLINE_MIN:-60}" --apply 2>&1 | tail -6
 else
-    echo; echo "[chase] CHASE_PRUNE unset: simulator debris is NOT being reclaimed."
-    echo "        Each iteration leaves ~145 MB / ~6,200 files. Enable with"
-    echo "        CHASE_PRUNE=1 when relaunching this loop."
+    echo; echo "[chase] CHASE_PRUNE unset: iteration workspaces are NOT being packed."
+    echo "        Each iteration leaves ~6,200 files against a filesystem inode"
+    echo "        ceiling that does not grow. Enable with CHASE_PRUNE=1 when"
+    echo "        relaunching this loop; it tars, it does not delete."
 fi
 
 # ---- resubmit, unless past the horizon --------------------------------------
