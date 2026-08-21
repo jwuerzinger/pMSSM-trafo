@@ -112,10 +112,15 @@ def _sample_paths(run_dirs, iters_per_run, budget):
         for i in sorted(set(idx.tolist())):
             # One call covers both layouts: the loose files where they exist,
             # the packed run's JSON records where they do not.
-            # include_retries=False preserves this study's original scope, which
-            # globbed worker_*/scan/SModelS only. Retried candidates are not a
-            # random subset, so pulling them in would move the gap statistics.
-            picked.extend(iter_smodels_items(iters[i], include_retries=False))
+            #
+            # This DELIBERATELY widens the study's scope. The original glob was
+            # worker_*/scan/SModelS only, which saw 306 of 623 points on a
+            # representative iteration; the retried candidates are the other
+            # half and are not a random subset of them
+            # (see composition_fractions.py). Including them roughly doubles the
+            # sample the gap statistics are computed from, so numbers from
+            # before this change are not comparable with numbers after it.
+            picked.extend(iter_smodels_items(iters[i]))
     if len(picked) > budget:
         sel = np.linspace(0, len(picked) - 1, budget).astype(int)
         picked = [picked[i] for i in sel]
