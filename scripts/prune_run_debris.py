@@ -164,24 +164,36 @@ def main(runs, keep_last, max_dirs, deadline_min, min_age_hours, mode,
             run_d += len(paths)
             if apply:
                 if mode == "tar":
-                    # Pack first, verify the archive opens, and only then remove
-                    # the trees. A tar that cannot be read back is worse than no
-                    # tar at all, so the removal is gated on the read.
+                    # Pack, then verify by READING THE ARCHIVE BACK AND COUNTING,
+                    # and only then remove the trees. "the archive is not empty"
+                    # is not a verification: a tar truncated by a full filesystem
+                    # or an I/O error part-way through would satisfy it and the
+                    # only copy of the data would then be deleted. The count must
+                    # equal the count measured on disk a moment ago, or the source
+                    # stays and the half-written tar goes.
                     tarball = it / "debris.tar"
                     try:
                         with tarfile.open(tarball, "w") as tf:
                             for p in paths:
                                 tf.add(p, arcname=p.name)
                         with tarfile.open(tarball, "r") as tf:
-                            if not tf.getnames():
-                                raise OSError("empty archive")
+                            packed = sum(1 for m in tf.getmembers() if m.isfile())
+                        if packed != f:
+                            raise OSError(f"packed {packed} files, expected {f}")
                     except Exception as exc:                # noqa: BLE001
-                        click.echo(f"  [skip] {it}: pack failed "
+                        click.echo(f"  [keep] {it}: NOT removed, pack failed "
                                    f"({type(exc).__name__}: {exc})")
                         tarball.unlink(missing_ok=True)
                         continue
-                    for p in paths:
-                        shutil.rmtree(p, ignore_errors=True)
+                    # Removal is reported, not silenced: rmtree(ignore_errors)
+                    # would leave a half-removed tree looking like a success.
+                    for pth in paths:
+                        errs = []
+                        shutil.rmtree(pth, onerror=lambda *a: errs.append(a[1]))
+                        if errs or pth.exists():
+                            click.echo(f"  [warn] {pth} not fully removed "
+                                       f"({len(errs)} error(s)); its data is in "
+                                       f"{tarball.name}")
                 else:
                     for p in paths:
                         shutil.rmtree(p, ignore_errors=True)
