@@ -161,6 +161,37 @@ pixi run python active_learning.py \
 6. **Comprehensive Tracking**: Logs losses, R² scores, and dataset sizes across iterations
 7. **Consistent R² Calculation**: Always computed in physical space regardless of training space
 
+### Acquisition Heads
+
+The surrogate's single output has a *meaning*, and that meaning is selectable.
+The head decides the training target, the loss, and how MC samples become an
+acquisition score; see `pmssm/heads.py`.
+
+| head | trains on | loss | acquisition scores |
+|---|---|---|---|
+| `regression` (default) | `t = log(Y / true_value)` | MSE | predictive variance (with the tolerance cut and proximity weighting of the selector) |
+| `classification` | `1[t > 0]` | BCE with logits | `entropy` = H[p̄] of the mean probability ("committee nearest 0.5"), `bald` = H[p̄] − E H[p] (epistemic only) |
+
+`regression` is the production path and is bit-identical to the behaviour before
+heads existed; passing no head selects it. The classification head exists to test
+the framing the BSM active-learning literature uses, which trains a classifier of
+a discrete label rather than regressing the observable.
+
+**Diagnostics work for every head.** Each head keeps one scalar output and the
+same decision point (output > 0, since a logit is positive exactly when p > 0.5),
+so the per-iteration accuracy diagnostics need no change: `plot_hit_rate_trajectories_multiseed.py --compute-accuracy`
+thresholds transformed-space output at zero and is head-agnostic by construction.
+Uncertainty diagnostics that only *rank* sigma (Spearman rho, AUSE) also transfer.
+What does not transfer is any metric that reads the output as a *value* of `t`
+(MSE, R², NLPD, CRPS, physical-space inversion): those are reported as `None`
+rather than as plausible-looking wrong numbers, and `plot_mse_trajectories_multiseed.py`
+skips such runs by name. `pmssm.heads.head_for_run` recovers a run's head from its
+`summary.json`, defaulting to `regression` for every run made before heads existed.
+
+Adding a head means adding one class in `pmssm/heads.py` and registering it;
+`select_points(strategy='head_score', score=...)` already ranks by whatever the
+head produces, so no new selector is needed.
+
 ### Pipeline Stages
 
 ```

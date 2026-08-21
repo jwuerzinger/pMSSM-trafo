@@ -102,7 +102,7 @@ source "${REPO_ROOT}/slurm/resume_args.sh"
     --tolerance-sampling 1.0 \
     --gen-workers 20 \
     --mcmc-data-dir ${CLUSTER_DATA_DIR}/neutralino_v4 \
-    --data-dir ${CLUSTER_DATA_DIR}/18387358 \
+    --data-dir "${AL_DATA_DIR:-${CLUSTER_DATA_DIR}/18387358}" \
     --static-eval-size 100000 \
     --kernel RBF \
     --lengthscale 1.0 \

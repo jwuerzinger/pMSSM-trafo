@@ -120,8 +120,25 @@ PER_SEED_GRES="gpu:2"
 # one bundle job per cell instead of one job per seed (the per-user job limit
 # makes 5 single-seed resumes expensive), and it is idempotent, so a second
 # resume round can reuse the same command.
+#
+# With AL_START_MISSING=1 alongside it, a per-seed directory that holds no
+# state.pt is STARTED at AL_RESUME_TO iterations instead of being skipped. That
+# is what makes one command cover a cell whose seeds are in different states:
+# seed 1 continuing a probe run while seeds 2-5 have never run, or a cell whose
+# first bundle died before the first iteration wrote any state. Without it such
+# a seed can never be recovered by a repeated resume round, because every round
+# skips it for the same reason.
 if [[ -n "${AL_RESUME_TO:-}" ]]; then
     RESUME_PYTHON="${REPO_ROOT}/.pixi/envs/${PIXI_ENV:-rocm}/bin/python"
+    # Assert the interpreter rather than discovering it is gone one seed at a
+    # time: _iters_done returns empty on any failure, and an empty read is
+    # indistinguishable from "no state", so a missing interpreter would skip
+    # every seed and the job would exit 0 having done nothing.
+    if [[ ! -x "${RESUME_PYTHON}" ]]; then
+        echo "[error] AL_RESUME_TO set but ${RESUME_PYTHON} is not executable;" >&2
+        echo "        every seed would be silently skipped. Aborting." >&2
+        exit 3
+    fi
     echo "[bundle] resume mode: continuing each seed to ${AL_RESUME_TO} iterations"
 fi
 
@@ -153,6 +170,28 @@ for seed in "${SEEDS_ARR[@]}"; do
     per_seed_n_add=""
     if [[ -n "${AL_RESUME_TO:-}" ]]; then
         if [[ ! -f "${per_seed_dir}/state.pt" ]]; then
+            if [[ "${AL_START_MISSING:-0}" == "1" ]]; then
+                # Fresh start to the same horizon. --n-iterations goes on the
+                # per-seed extra args rather than through AL_N_ITERATIONS
+                # because submit_al_gp_{exact,deep}.sh hardcode 40 and ignore
+                # that variable; Click takes the last occurrence, so appending
+                # it here overrides whichever value the submit script passes.
+                per_seed_extra="${per_seed_extra} --n-iterations ${AL_RESUME_TO}"
+                echo "[bundle] seed=${seed}: no state.pt — starting fresh to ${AL_RESUME_TO}"
+                AL_OUTPUT_DIR="${per_seed_dir}" \
+                AL_EXTRA_ARGS="${per_seed_extra}" \
+                AL_RESUME_FROM="" \
+                AL_N_ADDITIONAL_ITERATIONS="" \
+                srun \
+                    --nodes=1 \
+                    --ntasks=1 \
+                    --exclusive \
+                    --gres="${PER_SEED_GRES}" \
+                    --output="logs/al_bundled_${SLURM_JOB_ID}_seed${seed}.out" \
+                    --error="logs/al_bundled_${SLURM_JOB_ID}_seed${seed}.err" \
+                    bash "${PER_MODEL_SCRIPT}" &
+                continue
+            fi
             echo "[bundle] seed=${seed}: no state.pt in ${per_seed_dir} — skipped" >&2
             continue
         fi

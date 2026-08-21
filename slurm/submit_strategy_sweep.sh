@@ -61,7 +61,10 @@ else
     CLUSTER_GPU_GRES_1="${CLUSTER_GPU_GRES_1:-gpu:1}"
 fi
 
-SWEEP_ID="$(date +%Y%m%d_%H%M%S)"
+# Overridable so one campaign can span several invocations of this script and
+# still share a single sweep id, which is what lets a follow-up resume round
+# select its own cells out of the manifest.
+SWEEP_ID="${SWEEP_ID:-$(date +%Y%m%d_%H%M%S)}"
 SEEDS="${SEEDS:-1,2,3,4,5}"
 MODELS="${MODELS:-transformer,dnn,deep_gp,exact_gp,tabpfn}"
 STRATEGIES="${STRATEGIES:-top_k,top_k_tol_only,entropy_batch}"
