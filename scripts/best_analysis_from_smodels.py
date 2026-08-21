@@ -61,15 +61,33 @@ import os
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from pmssm.iteration_housekeeping import iter_smodels_items  # noqa: E402
+
 
 # ── reading one point ────────────────────────────────────────────────────────
-def read_winner(path, tol, true_val):
-    """(analysis, txnames, r_expected, all_entries) for one .py, or None.
+def read_winner(item, tol, true_val):
+    """(analysis, txnames, r_expected, all_entries) for one point, or None.
 
     SModelS writes these files as executable Python (``smodelsOutput = {...}``),
     which is how Run3ModelGen's ntupler reads them too, so exec is the format's
     intended reader rather than a shortcut.
+
+    `item` is a Path on a run whose workspaces are intact, or a record dict from
+    smodels_best_analysis.json on a packed run. For a record the fourth element
+    is None: the record keeps only the top RANK_KEEP results, and
+    ntuple_style_winner needs all of them, so it must be reported unavailable
+    rather than computed from a truncated list.
     """
+    if isinstance(item, dict):
+        r = item.get("r_expected")
+        if r is None or item.get("analysis") is None:
+            return None
+        if abs(r - true_val) / true_val >= tol:
+            return None
+        return (item["analysis"], tuple(item.get("txnames") or ("?",)),
+                float(r), None)
+    path = item
     g = {}
     try:
         with open(path) as fh:
@@ -132,7 +150,13 @@ def discover(root, pattern, iters_per_dir):
             out = []
             for _run, dirs in sorted(by_run.items()):
                 for d in spread(sorted(dirs), iters_per_dir):
-                    out.extend(sorted(d.rglob(pattern)))
+                    # Loose files where they exist, the packed run's records
+                    # where they do not. Only meaningful for the default
+                    # *.slha.py pattern; any other pattern stays a pure glob.
+                    if pattern == "*.slha.py":
+                        out.extend(iter_smodels_items(d))
+                    else:
+                        out.extend(sorted(d.rglob(pattern)))
             return out
     return sorted(root.rglob(pattern))
 
@@ -141,10 +165,10 @@ def discover(root, pattern, iters_per_dir):
 def measure(paths, tol, true_val, jobs):
     by_ana = collections.Counter()
     by_tx = collections.Counter()
-    agree = disagree = n_inband = 0
+    agree = disagree = n_inband = nt_unavailable = 0
 
     def handle(res):
-        nonlocal agree, disagree, n_inband
+        nonlocal agree, disagree, n_inband, nt_unavailable
         if res is None:
             return
         ana, txs, _r, er = res
@@ -152,7 +176,12 @@ def measure(paths, tol, true_val, jobs):
         by_ana[ana] += 1
         for tx in txs:
             by_tx[tx] += 1
-        if ntuple_style_winner(er) == ana:
+        if er is None:
+            # Packed run: only the top RANK_KEEP results survive in the record,
+            # and this comparison needs all of them. Counted apart rather than
+            # folded into "disagrees", which would read as a measurement.
+            nt_unavailable += 1
+        elif ntuple_style_winner(er) == ana:
             agree += 1
         else:
             disagree += 1
@@ -180,6 +209,7 @@ def measure(paths, tol, true_val, jobs):
         "by_txname": dict(by_tx.most_common()),
         "ntuple_route_agrees": agree,
         "ntuple_route_disagrees": disagree,
+        "ntuple_route_unavailable": nt_unavailable,
         "ntuple_route_accuracy": agree / max(agree + disagree, 1),
     }
 

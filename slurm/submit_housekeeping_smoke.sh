@@ -92,7 +92,7 @@ else
     run_one dnn_generate "${PYTHON}" active_learning_dnn.py \
         --target ExpR --target-value 1.0 --y-transform log \
         --n-iterations 2 --n-select 8 --n-candidates 20000 \
-        --n-samples 60 --data-dir "${POOL}" --static-eval-size 2000 \
+        --n-samples 30 --data-dir "${POOL}" --static-eval-size 2000 \
         --no-mcmc-eval --generate-data --gen-workers 4 \
         --min-gen-fraction 0.1 --max-gen-attempts 2 \
         --epochs 200 --patience 50 --no-warm-starting \

@@ -379,3 +379,53 @@ def load_iteration_smodels(iter_dir):
         except Exception:                                      # noqa: BLE001
             return []
     return []
+
+
+def iter_smodels_items(iter_dir):
+    """One item per point of an iteration: a Path if loose, else a record dict.
+
+    The single entry point for the three offline studies that used to glob
+    ``worker_*/scan/SModelS/*.slha.py`` directly. On a run whose workspaces are
+    intact it returns exactly those paths, so the study is byte-for-byte what it
+    always was. On a packed run it returns the records from
+    ``smodels_best_analysis.json``.
+
+    Callers must handle both, which is a two-line branch in each reader, and must
+    treat one thing as unavailable from a record: the FULL ExptRes list. Records
+    keep the top RANK_KEEP results, which serves the winner and the gap to the
+    next distinct AnalysisID but not
+    ``best_analysis_from_smodels.ntuple_style_winner``, which walks every result.
+    Report that as unavailable rather than computing it from a truncated list.
+
+    For an exact re-run of anything that needs the raw files, restore them:
+        tar -xf <iteration_dir>/debris.tar -C <iteration_dir>
+    """
+    iter_dir = Path(iter_dir)
+    loose = []
+    for d in _debris_dirs(iter_dir):
+        loose.extend(sorted(d.rglob("*.slha.py")))
+    if loose:
+        return loose
+    cached = iter_dir / "smodels_best_analysis.json"
+    if not cached.exists():
+        return []
+    try:
+        return json.loads(cached.read_text()).get("points", [])
+    except Exception:                                          # noqa: BLE001
+        return []
+
+
+def record_to_exptres(rec):
+    """A record's ``ranked`` list as ExptRes-shaped dicts (TRUNCATED, top-RANK_KEEP).
+
+    Lets a reader that expects SModelS' own dict layout consume a record. The
+    winner is faithful; anything that needs the complete result list is not.
+    """
+    out = []
+    for r_exp, ana, tp, eul in rec.get("ranked") or []:
+        out.append({"AnalysisID": ana, "r_expected": r_exp,
+                    "theory prediction (fb)": tp,
+                    "expected upper limit (fb)": eul,
+                    "TxNames": list(rec.get("txnames") or [])
+                    if ana == rec.get("analysis") else []})
+    return out

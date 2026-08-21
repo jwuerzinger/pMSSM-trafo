@@ -29,6 +29,9 @@ from pathlib import Path
 
 import numpy as np
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from pmssm.iteration_housekeeping import iter_smodels_items  # noqa: E402
+
 TOL = 0.10
 TRUE_VAL = 1.0
 MANIFEST = "/ptmp/jwuerzin/analysis/joint/manifest_expr.csv"
@@ -39,8 +42,23 @@ ITERS_PER_RUN = int(sys.argv[2]) if len(sys.argv) > 2 else 12
 ARMS = ("deep_gp_expr", "exact_gp_expr", "transformer_expr", "dnn_expr", "tabpfn_expr")
 
 
-def read_point(path):
-    """(winner_entry, all_entries) for one SModelS .py output, or (None, None)."""
+def read_point(item):
+    """(winner_entry, all_entries) for one point, or (None, None).
+
+    `item` is a Path on a run whose workspaces are intact, or a record dict from
+    smodels_best_analysis.json on a packed run. For a record the winner is
+    faithful but `all_entries` is TRUNCATED to the top RANK_KEEP, so it is
+    returned as None instead: ntuple_style_winner walks every result, and
+    feeding it a truncated list would quietly change the agreement counters
+    rather than declare them unavailable.
+    """
+    if isinstance(item, dict):
+        if item.get("analysis") is None:
+            return None, None
+        return ({"AnalysisID": item["analysis"],
+                 "r_expected": item["r_expected"],
+                 "TxNames": list(item.get("txnames") or [])}, None)
+    path = item
     g = {}
     try:
         exec(path.read_text(), g)
@@ -108,11 +126,12 @@ def main():
             if not its:
                 continue
             for it in spread_sample(its, ITERS_PER_RUN):
-                pys.extend(sorted(it.glob("worker_*/scan/SModelS/*.slha.py")))
-                pys.extend(sorted(it.glob("retry_*/worker_*/scan/SModelS/*.slha.py")))
+                # Loose files where they exist, the packed run's records where
+                # they do not; iter_smodels_items covers worker_* and retry_*.
+                pys.extend(iter_smodels_items(it))
         pys = spread_sample(pys, FILE_BUDGET)
         by_ana, by_tx = collections.Counter(), collections.Counter()
-        agree = disagree = n_inband = n_read = 0
+        agree = disagree = n_inband = n_read = nt_unavailable = 0
         for p in pys:
             best, er = read_point(p)
             n_read += 1
@@ -124,11 +143,17 @@ def main():
             by_ana[best["AnalysisID"]] += 1
             for tx in best.get("TxNames") or ["?"]:
                 by_tx[tx] += 1
-            nt = ntuple_style_winner(er)
-            if nt == best["AnalysisID"]:
-                agree += 1
+            if er is None:
+                # Packed run: the full result list is gone, so this comparison
+                # is not available. Counted separately rather than folded into
+                # "disagrees", which would read as a measurement.
+                nt_unavailable += 1
             else:
-                disagree += 1
+                nt = ntuple_style_winner(er)
+                if nt == best["AnalysisID"]:
+                    agree += 1
+                else:
+                    disagree += 1
         result[arm] = {
             "files_read": n_read, "n_inband": n_inband,
             "distinct_analyses": len(by_ana),
@@ -138,6 +163,7 @@ def main():
             "by_txname": dict(by_tx.most_common(12)),
             "ntuple_estimator_agrees": agree,
             "ntuple_estimator_disagrees": disagree,
+            "ntuple_estimator_unavailable": nt_unavailable,
         }
         print(f"[best-ana] {arm:18s} read {n_read:6d} py, in-band {n_inband:5d}, "
               f"distinct {len(by_ana):3d}, effective {effective_number(by_ana):5.2f}, "

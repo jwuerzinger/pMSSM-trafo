@@ -41,10 +41,14 @@ from __future__ import annotations
 import csv
 import json
 import math
+import sys
 from pathlib import Path
 
 import click
 import numpy as np
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from pmssm.iteration_housekeeping import iter_smodels_items  # noqa: E402
 
 MANIFEST = "/ptmp/jwuerzin/analysis/joint/manifest_expr.csv"
 ARMS = ("deep_gp_expr", "exact_gp_expr", "transformer_expr", "dnn_expr")
@@ -52,8 +56,19 @@ ARMS = ("deep_gp_expr", "exact_gp_expr", "transformer_expr", "dnn_expr")
 TIE_CUTS = (0.1, 0.3)
 
 
-def _read_results(path: Path):
-    """Ranked (r_expected, AnalysisID) for one per-point SModelS output."""
+def _read_results(item):
+    """Ranked (r_expected, AnalysisID) for one point.
+
+    `item` is a Path on a run whose workspaces are intact, or a record dict from
+    smodels_best_analysis.json on a packed run. The record's ranking is
+    truncated to the top RANK_KEEP, which covers the top result and the gap to
+    the next distinct AnalysisID, the two quantities this study measures.
+    """
+    if isinstance(item, dict):
+        rs = [(r, a) for r, a, _tp, _eul in (item.get("ranked") or [])
+              if r is not None and r > 0]
+        return sorted(rs, key=lambda t: -t[0]) or None
+    path = item
     g: dict = {}
     try:
         exec(path.read_text(), g)                       # noqa: S102 - trusted output
@@ -95,8 +110,9 @@ def _sample_paths(run_dirs, iters_per_run, budget):
             continue
         idx = np.linspace(0, len(iters) - 1, min(iters_per_run, len(iters))).astype(int)
         for i in sorted(set(idx.tolist())):
-            for w in sorted((iters[i]).glob("worker_*/scan/SModelS")):
-                picked.extend(sorted(w.glob("*.slha.py")))
+            # One call covers both layouts: the loose files where they exist,
+            # the packed run's JSON records where they do not.
+            picked.extend(iter_smodels_items(iters[i]))
     if len(picked) > budget:
         sel = np.linspace(0, len(picked) - 1, budget).astype(int)
         picked = [picked[i] for i in sel]
