@@ -313,9 +313,17 @@ def load_config_with_sweep(config_file, sweep_index=None):
               help="If --resume-from given, run this many more iterations.")
 @click.option('--gpu-ids', default='2,3', type=str,
               help="Comma-separated GPU IDs for AL and baseline models (default: 2,3).")
+@click.option('--pack-debris/--keep-debris', 'pack_debris', default=True,
+              help='At the end of each iteration, summarise the SModelS winners '
+                   'and the LSP composition into the log plus a small JSON, keep '
+                   'the ntuples, and pack iteration_NNN/{worker_*,retry_*} into '
+                   'one debris.tar. On by default: each iteration otherwise '
+                   'leaves ~6,200 files and /ptmp has a hard filesystem inode '
+                   'ceiling that does not grow. --keep-debris restores the old '
+                   'behaviour of leaving every workspace in place.')
 @click.option('--seed', default=42, type=int,
               help="Master random seed propagated to torch / numpy / candidate pool (default: 42).")
-def main(head, testing, n_iterations, n_candidates, n_select, mc_samples, epochs, dropout, n_datasets, n_samples, val_fraction, output_dir, generate_data, min_gen_fraction, max_gen_attempts, gen_workers, selection_strategy, entropy_blur, entropy_beta, entropy_pool_size, candidate_generation, candidate_source, proximity_sampling, tolerance_sampling, target, target_value, no_mcmc_eval, config_file, sweep_index, early_stopping, patience, warm_starting, n_ensemble, acq_uncertainty, laplace_prior_precision, allow_config_drift, eval_data_path, compute_full_metrics, y_transform, mcmc_data_dir, mcmc_max_samples, static_eval_size, data_dir, use_mcmc_loader, train_baseline, resume_from, n_additional_iterations, gpu_ids, seed):
+def main(head, testing, n_iterations, n_candidates, n_select, mc_samples, epochs, dropout, n_datasets, n_samples, val_fraction, output_dir, generate_data, min_gen_fraction, max_gen_attempts, gen_workers, selection_strategy, entropy_blur, entropy_beta, entropy_pool_size, candidate_generation, candidate_source, proximity_sampling, tolerance_sampling, target, target_value, no_mcmc_eval, config_file, sweep_index, early_stopping, patience, warm_starting, n_ensemble, acq_uncertainty, laplace_prior_precision, allow_config_drift, eval_data_path, compute_full_metrics, y_transform, mcmc_data_dir, mcmc_max_samples, static_eval_size, data_dir, use_mcmc_loader, train_baseline, resume_from, n_additional_iterations, gpu_ids, seed, pack_debris):
     """
     Active learning pipeline for pMSSM relic density prediction.
 
@@ -1803,6 +1811,20 @@ def main(head, testing, n_iterations, n_candidates, n_select, mc_samples, epochs
             "mcmc_eval_idx": mcmc_eval_idx,
             "rng": capture_rng(),
         })
+
+        # ---- End-of-iteration housekeeping ---------------------------------
+        # Runs AFTER save_state, so the iteration's training data is already
+        # durable before the simulator workspaces are touched. It summarises the
+        # SModelS winners and the LSP composition into the log and a small JSON,
+        # keeps the ntuples, and packs iteration_NNN/{worker_*,retry_*} into one
+        # debris.tar. Each iteration otherwise leaves ~6,200 files behind, and
+        # /ptmp has a hard filesystem inode ceiling that does not grow. Never
+        # raises: on failure the workspaces simply stay.
+        from pmssm.iteration_housekeeping import finalise_iteration
+        finalise_iteration(iter_dir, logger,
+                           target_branch=TARGET_CONFIG[target]["branch"],
+                           true_value=TARGET_CONFIG[target]["true_value"],
+                           enabled=pack_debris)
         logger.info(f"[resume] state.pt saved (iteration {iteration})")
 
     # Plot iteration metrics
