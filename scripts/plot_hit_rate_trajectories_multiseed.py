@@ -784,7 +784,8 @@ def _parse_run_kwargs_from_log(run_dir: Path) -> dict:
                 continue
             k, v = m.group(1), m.group(2)
             if k in _GP_KWARG_KEYS or k in {"y_transform", "model_type", "target",
-                                            "num_inducing_max", "gp_num_samples"}:
+                                            "num_inducing_max", "gp_num_samples",
+                                            "head"}:
                 out[k] = _coerce_log_value(v)
         return out
     except Exception:
@@ -963,10 +964,11 @@ def _load_iter_model(model_type: str, role: str, iter_dir: Path,
         model.load_state_dict(torch.load(ckpt_path, map_location=device))
         return model.to(device)
 
-    if model_type in ("exact_gp", "deep_gp", "sparse_gp"):
+    if model_type in ("exact_gp", "deep_gp", "sparse_gp", "laplace_gpc"):
         if not ckpt_path.exists():
             return None
         from pmssm.training import create_gp_model  # noqa: PLC0415
+        from pmssm.heads import get_head  # noqa: PLC0415
         from pmssm.data import normalize_x, transform_y, build_norm_tensors, PARAM_ORDER  # noqa: PLC0415
         target = run_kwargs.get("target", "DMRD") or "DMRD"
         data_min, data_max = build_norm_tensors()
@@ -985,9 +987,21 @@ def _load_iter_model(model_type: str, role: str, iter_dir: Path,
             gp_kwargs.setdefault("num_hidden_dims", 10)
             gp_kwargs.setdefault("num_middle_dims", 0)
         num_samples = int(run_kwargs.get("gp_num_samples", 8) or 8)
+        # The head decides the observation model. Rebuilding a Bernoulli deep GP
+        # as a Gaussian one produces a state dict with no
+        # likelihood.noise_covar.raw_noise to fill, so the load fails outright;
+        # rebuilding it right is what lets a classification arm's accuracy be
+        # recomputed at all. The head also owns the training target, which
+        # matters for laplace_gpc, whose posterior mode is a function of y.
+        head_name = str(run_kwargs.get("head", "regression") or "regression")
+        if head_name != "regression":
+            head_obj = get_head(head_name, threshold=0.0)
+            y_tr = head_obj.make_targets(y_tr)
+            y_va = head_obj.make_targets(y_va)
         model = create_gp_model(model_type, x_tr, y_tr, x_va, y_va,
                                 n_dim=len(PARAM_ORDER), num_samples=num_samples,
-                                target=target, device=device, **gp_kwargs)
+                                target=target, device=device, head=head_name,
+                                **gp_kwargs)
         ckpt = torch.load(ckpt_path, map_location=device)
         model.load_state_dict(ckpt["model_state_dict"])
         if hasattr(model, "likelihood") and "likelihood_state_dict" in ckpt:

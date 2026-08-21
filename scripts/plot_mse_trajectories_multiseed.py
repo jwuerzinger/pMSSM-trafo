@@ -31,6 +31,7 @@ Usage (new-generation preview):
 from __future__ import annotations
 
 import csv
+import json
 import sys
 from pathlib import Path
 
@@ -43,6 +44,7 @@ for _p in (str(_REPO_ROOT), str(_REPO_ROOT / "scripts")):
         sys.path.insert(0, _p)
 
 from mcmc_diagnostics import DEFAULT_AL_PICKS, MODEL_DISPLAY, picks_with_tag  # noqa: E402
+from pmssm.heads import head_for_run  # noqa: E402
 
 DATASET_KEYS = {
     "static_random": "al_on_static_random_losses",
@@ -68,6 +70,19 @@ DATASET_TITLES = {
     "own_val": "own validation set (each model on its own split)",
     "val_cross": "AL validation set (both models)",
 }
+
+
+
+def _run_config(run_dir) -> dict:
+    """The run's recorded config, or {} when it has none."""
+    p = Path(run_dir) / "summary.json"
+    if not p.exists():
+        return {}
+    try:
+        with open(p) as fh:
+            return json.load(fh).get("config", {}) or {}
+    except Exception:
+        return {}
 
 
 def _to_floats(v) -> list[float]:
@@ -143,6 +158,16 @@ def main(manifest, output_dir, sweep_id, include_status, models, min_seeds, logy
                 state = torch.load(state_path, weights_only=False, map_location="cpu")
             except Exception as exc:
                 click.echo(f"[warn] skip {d}: {exc}", err=True)
+                continue
+            # Loss curves in transformed space are only defined for a head whose
+            # output estimates t. A classification-head run stores BCE in the
+            # same arrays, which would plot as a plausible-looking wrong number,
+            # so it is skipped by name rather than silently mixed in. Runs made
+            # before heads existed carry no key and default to 'regression'.
+            head = head_for_run(_run_config(d))
+            if head != "regression":
+                click.echo(f"[mse] skip {d}: head {head!r} has no MSE in "
+                           f"transformed space (see pmssm.heads)", err=True)
                 continue
             for ds in DATASET_KEYS:
                 al = np.asarray(_to_floats(state.get(DATASET_KEYS[ds])), dtype=float)

@@ -666,6 +666,11 @@ def main(manifest, baseline_data_dir, mcmc_data_dir, cache_dir, output_dir,
     results: dict = {}
     for model, (strat, warm) in picks.items():
         base_type = model
+        # picks_with_tag() returns tagged names (e.g. "deep_gp_expr" for the
+        # ExpR sweep); the checkpoint loader only knows untagged architectures,
+        # so strip the sweep tag before it is used as a model_type.
+        if model_tag and base_type.endswith(f"_{model_tag}"):
+            base_type = base_type[: -len(model_tag) - 1]
         for _sfx in ("_oracle", "_laplace"):
             if base_type.endswith(_sfx):
                 base_type = base_type[: -len(_sfx)]
