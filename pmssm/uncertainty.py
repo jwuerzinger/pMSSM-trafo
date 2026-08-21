@@ -136,6 +136,70 @@ def compute_uncertainty_ensemble(models, X_candidates, stats, device, logger,
 
 # ===== GP Posterior Uncertainty (GP Models) =====
 
+def compute_uncertainty_gp_head(model, X_candidates, data_min, data_max,
+                                model_type, head, jitter=1e-3, num_samples=8,
+                                logger=None):
+    """Head summary from a GP's *latent* posterior.
+
+    Deliberately not routed through ``model.likelihood(...)``. A Bernoulli
+    likelihood returns a Bernoulli whose mean is already p and whose variance is
+    p(1-p), which has thrown away the latent spread the epistemic term needs:
+    BALD computed from it would be identically the aleatoric entropy. The head
+    wants the latent f, so the likelihood is applied afterwards, analytically,
+    by the head's own link.
+
+    For a deep GP the latent carries a leading sample-path dimension and the
+    predictive is a mixture of Gaussians, not a Gaussian. That dimension is
+    passed through to the head rather than averaged here, because it is exactly
+    the between-path disagreement that separates I(y; theta) from E H[p].
+
+    Returns the head's summary dict, with ``pred_mean``/``pred_var`` added for
+    the callers that log and plot them.
+    """
+    from .data import normalize_x
+
+    device = next(model.parameters()).device
+    X_norm = normalize_x(X_candidates, data_min, data_max).to(device)
+    model.eval()
+    if model_type in ("exact_gp", "deep_gp", "sparse_gp"):
+        model.likelihood.eval()   # laplace_gpc has no likelihood module
+
+    is_deep = model_type == "deep_gp"
+    batch_size = 10000 if is_deep else 5000
+    means, variances = [], []
+    for i in range(0, len(X_norm), batch_size):
+        x_batch = X_norm[i:i + batch_size]
+        with torch.no_grad(), \
+             gpytorch.settings.fast_pred_var(not is_deep), \
+             gpytorch.settings.cholesky_jitter(float_value=jitter, double_value=jitter), \
+             gpytorch.settings.num_likelihood_samples(num_samples):
+            latent = model(x_batch)
+            m = latent.mean.detach()
+            v = latent.variance.detach()
+        # (S, N) for a deep GP, (N,) otherwise
+        means.append(m.reshape(-1, m.shape[-1]) if is_deep else m.reshape(-1))
+        variances.append(v.reshape(-1, v.shape[-1]) if is_deep else v.reshape(-1))
+
+    cat_dim = -1 if is_deep else 0
+    mean = torch.cat(means, dim=cat_dim).cpu()
+    var = torch.cat(variances, dim=cat_dim).cpu()
+
+    summary = head.summarise_gaussian(mean, var)
+    summary["pred_mean"] = summary["mean"]
+    summary["pred_var"] = summary["var"]
+
+    if logger:
+        logger.info(
+            f"GP head '{head.name}' summary: latent |mean| median "
+            f"{summary['mean'].abs().median():.4f}, latent var median "
+            f"{summary['var'].median():.6f}, p in [{summary['p_mean'].min():.4f}, "
+            f"{summary['p_mean'].max():.4f}], H median "
+            f"{summary['entropy'].median():.4f}, I median "
+            f"{summary['mutual_information'].median():.6f}")
+    return summary
+
+
+
 def compute_uncertainty_gp(model, X_candidates, data_min, data_max,
                           model_type, jitter=1e-3, num_samples=8, logger=None):
     """
@@ -185,6 +249,22 @@ def compute_uncertainty_gp(model, X_candidates, data_min, data_max,
                 preds = model.likelihood(model(x_batch))
                 means.append(preds.mean.detach().mean(dim=0).squeeze())
                 variances.append(preds.variance.detach().mean(dim=0).squeeze())
+        pred_mean = torch.cat(means).cpu()
+        pred_var = torch.cat(variances).cpu()
+    elif model_type == "laplace_gpc":
+        # No likelihood module: the probit likelihood is fixed and
+        # parameter-free, and the quantity the plots and logs want is the latent
+        # posterior N(f_bar, V[f]) of R&W Algorithm 3.2, which is what forward()
+        # returns. Handled here rather than at each call site because the driver
+        # computes this variance unconditionally for logging and diagnostics,
+        # several times per iteration, whatever the selection strategy is.
+        batch_size = 5000
+        means, variances = [], []
+        for i in range(0, len(X_norm), batch_size):
+            with torch.no_grad():
+                latent = model(X_norm[i:i + batch_size])
+                means.append(latent.mean.detach().reshape(-1))
+                variances.append(latent.variance.detach().reshape(-1))
         pred_mean = torch.cat(means).cpu()
         pred_var = torch.cat(variances).cpu()
     else:
@@ -396,3 +476,38 @@ def compute_uncertainty_laplace(model, X_candidates, X_fit, y_fit_t, stats,
             f"covariance rank <= {min(int(n_samples) - 1, d)} "
             f"(sample mean_var={samp:.6f} vs analytic {pred_var.mean():.6f})")
     return pred_mean, pred_var, predictions
+
+
+def compute_uncertainty_head(model, X_candidates, stats, n_samples, device, logger,
+                             head, return_predictions=False):
+    """Head-aware MC-dropout acquisition inputs.
+
+    Runs the identical forward passes as :func:`compute_uncertainty_mc_dropout`
+    (it delegates, so there is one sampling implementation and no drift) and then
+    lets the head reduce the raw (T, N) samples to whatever acquisition consumes.
+
+    For the regression head the returned summary carries ``mean``/``var`` and is
+    numerically identical to the tuple the production path uses. For a
+    classification head it carries the mean logit, the mean probability, the
+    predictive entropy and the mutual information; see :mod:`pmssm.heads`.
+
+    Args:
+        head: An :class:`pmssm.heads.AcquisitionHead` instance.
+
+    Returns:
+        summary dict, and the raw (T, N, 1) predictions when
+        ``return_predictions`` is set (entropy_batch needs them).
+    """
+    pred_mean, pred_var, predictions = compute_uncertainty_mc_dropout(
+        model, X_candidates, stats, n_samples, device, logger,
+        return_predictions=True)
+    summary = head.summarise(predictions.squeeze(-1))
+    # Keep the production tensors alongside the head's own view so callers that
+    # already expect (N, 1) shapes need no change.
+    summary["pred_mean"] = pred_mean
+    summary["pred_var"] = pred_var
+    if logger:
+        logger.info(f"Head {head.name!r} summary keys: {sorted(summary)}")
+    if return_predictions:
+        return summary, predictions
+    return summary

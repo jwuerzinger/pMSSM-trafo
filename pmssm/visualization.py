@@ -54,7 +54,18 @@ def gp_predict(model, X_norm, model_type, jitter=1e-3, num_samples=8):
         with torch.no_grad():
             return model(X_norm.to(device)).squeeze().cpu()
     elif model_type == "deep_gp":
-        model.likelihood.eval()
+        # With a Bernoulli likelihood, likelihood(model(x)).mean is a
+        # PROBABILITY in [0, 1], not an estimate of t. Every downstream
+        # diagnostic here reads the returned value as t and thresholds it
+        # against the target in physical space, so a probability inverse
+        # transforms to exp(p) in [1, e] and the verdict comes out positive for
+        # every point: the accuracy then equals the positive class fraction
+        # (0.2907 as observed) rather than an accuracy. The latent is what the
+        # diagnostics want, because its sign at zero IS the verdict -- the
+        # parity property the heads are built around, see pmssm/heads.py.
+        _bernoulli = getattr(model, "likelihood_kind", "gaussian") == "bernoulli"
+        if not _bernoulli:
+            model.likelihood.eval()
         batch_size = 1024
         all_means = []
         with torch.no_grad(), \
@@ -63,9 +74,19 @@ def gp_predict(model, X_norm, model_type, jitter=1e-3, num_samples=8):
              gpytorch.settings.num_likelihood_samples(num_samples):
             for start in range(0, len(X_norm), batch_size):
                 x_batch = X_norm[start:start + batch_size].to(device)
-                preds = model.likelihood(model(x_batch))
+                preds = model(x_batch) if _bernoulli else model.likelihood(model(x_batch))
                 all_means.append(preds.mean.detach().mean(dim=0).view(-1).cpu())
             return torch.cat(all_means, dim=0)
+    elif model_type == "laplace_gpc":
+        # No likelihood module: the latent mean IS the score whose sign gives the
+        # verdict, which is what every threshold-at-zero diagnostic wants.
+        batch_size = 1024
+        out = []
+        with torch.no_grad():
+            for start in range(0, len(X_norm), batch_size):
+                out.append(model(X_norm[start:start + batch_size].to(device))
+                           .mean.detach().view(-1).cpu())
+        return torch.cat(out, dim=0)
     else:
         # exact_gp, sparse_gp
         model.likelihood.eval()

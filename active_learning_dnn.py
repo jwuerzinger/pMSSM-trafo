@@ -20,6 +20,8 @@ import random
 import re
 
 import click
+
+from pmssm.heads import HEADS, get_head
 import numpy as np
 import pandas as pd
 import yaml
@@ -52,11 +54,14 @@ from pmssm import (
     select_top_uncertain,
     select_top_uncertain_filtered,
     select_top_uncertain_tol_only,
+    select_tol_only_random,
+    select_top_score,
     select_entropy_batch_mc,
     # Uncertainty
     compute_uncertainty_ensemble,
     compute_uncertainty_laplace,
     compute_uncertainty_mc_dropout,
+    compute_uncertainty_head,
     # Training
     train_with_validation,
     train_model_worker,
@@ -192,7 +197,16 @@ def load_config_with_sweep(config_file, sweep_index=None):
 @click.option('--min-gen-fraction', default=0.6, type=float, help="Minimum fraction of n-select that must be generated successfully before stopping retries (default: 0.6).")
 @click.option('--max-gen-attempts', default=10, type=int, help="Maximum number of generation attempts per iteration (default: 10).")
 @click.option('--gen-workers', default=1, type=int, help="Number of parallel genModels.py workers per generation attempt (default: 1).")
-@click.option('--selection-strategy', default='entropy_batch', type=click.Choice(['top_k', 'top_k_tol_only', 'entropy_batch']), help="Selection strategy: top_k, top_k_tol_only (short-circuit, no proximity weighting), or entropy_batch (default).")
+@click.option('--head', default='regression',
+              type=click.Choice(sorted(HEADS)),
+              help="Acquisition head (see pmssm.heads). 'regression' (default) "
+                   "is the production path: MSE on the transformed target, "
+                   "acquisition by predictive variance. 'classification' trains "
+                   "binary cross-entropy on the verdict 1[t>0] and must be "
+                   "paired with --selection-strategy bald or cls_entropy, since "
+                   "its output is a logit and the mean-based tolerance cut and "
+                   "proximity weighting have no meaning in logit units.")
+@click.option('--selection-strategy', default='entropy_batch', type=click.Choice(['top_k', 'top_k_tol_only', 'tol_only_random', 'entropy_batch', 'bald', 'cls_entropy']), help="Selection strategy: top_k, top_k_tol_only (short-circuit, no proximity weighting), or entropy_batch (default).")
 @click.option('--entropy-blur', default=0.15, type=float, help="Entropy smoothing parameter (entropy_batch only).")
 @click.option('--entropy-beta', default=50.0, type=float, help="Gibbs sampling temperature (entropy_batch only).")
 @click.option('--entropy-pool-size', default=5000, type=int, help="Focused pool size for entropy_batch pre-filtering.")
@@ -279,7 +293,7 @@ def load_config_with_sweep(config_file, sweep_index=None):
               help="DNN hidden layer count (default: 4).")
 @click.option('--dim-feedforward', default=256, type=int,
               help="DNN hidden layer width (default: 256).")
-def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, dropout, n_datasets, n_samples, val_fraction, output_dir, generate_data, min_gen_fraction, max_gen_attempts, gen_workers, selection_strategy, entropy_blur, entropy_beta, entropy_pool_size, candidate_generation, proximity_sampling, tolerance_sampling, target, target_value, no_mcmc_eval, config_file, sweep_index, early_stopping, patience, warm_starting, eval_data_path, compute_full_metrics, y_transform, mcmc_data_dir, mcmc_max_samples, static_eval_size, data_dir, use_mcmc_loader, train_baseline, resume_from, n_additional_iterations, gpu_ids, seed, n_ensemble, acq_uncertainty, laplace_prior_precision, d_model, num_layers, dim_feedforward):
+def main(head, testing, n_iterations, n_candidates, n_select, mc_samples, epochs, dropout, n_datasets, n_samples, val_fraction, output_dir, generate_data, min_gen_fraction, max_gen_attempts, gen_workers, selection_strategy, entropy_blur, entropy_beta, entropy_pool_size, candidate_generation, proximity_sampling, tolerance_sampling, target, target_value, no_mcmc_eval, config_file, sweep_index, early_stopping, patience, warm_starting, eval_data_path, compute_full_metrics, y_transform, mcmc_data_dir, mcmc_max_samples, static_eval_size, data_dir, use_mcmc_loader, train_baseline, resume_from, n_additional_iterations, gpu_ids, seed, n_ensemble, acq_uncertainty, laplace_prior_precision, d_model, num_layers, dim_feedforward):
     """
     Active learning pipeline for pMSSM relic density prediction (DNN variant).
 
@@ -444,6 +458,24 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
     logger.info(f"  n_samples: {n_samples if n_samples else 'all'}")
     logger.info(f"  val_fraction: {val_fraction}")
     logger.info(f"  selection_strategy: {selection_strategy}")
+    # --- head / strategy compatibility -------------------------------------
+    head_obj = get_head(head, threshold=0.0)
+    _CLS_STRATEGIES = ('bald', 'cls_entropy')
+    if head_obj.name != 'regression' and selection_strategy not in _CLS_STRATEGIES:
+        raise click.UsageError(
+            f"--head {head!r} produces a logit, so the mean-based strategies "
+            f"(tolerance cut, proximity weighting, entropy_batch) have no "
+            f"meaning in its units. Use --selection-strategy "
+            f"{' or '.join(_CLS_STRATEGIES)}.")
+    if head_obj.name == 'regression' and selection_strategy in _CLS_STRATEGIES:
+        raise click.UsageError(
+            f"--selection-strategy {selection_strategy!r} is a classification "
+            f"score; pass --head classification with it.")
+    if head_obj.name != 'regression' and y_transform != 'log':
+        raise click.UsageError(
+            f"--head {head!r} defines its target on t = log(Y/true_value); "
+            f"use --y-transform log.")
+
     if selection_strategy == 'entropy_batch':
         logger.info(f"  entropy_blur: {entropy_blur}")
         logger.info(f"  entropy_beta: {entropy_beta}")
@@ -879,7 +911,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
             train_model_worker(device, X_combined, Y_combined, idx_train_al, idx_val_al, epochs, dropout,
                              al_queue, "AL", iter_dir, iter_plots_dir, al_checkpoint_path,
                              al_warm_start, early_stopping, patience, y_transform, target,
-                             F_combined, arch='dnn',
+                             F_combined, arch='dnn', head=head,
                              dnn_d_model=d_model, dnn_num_layers=num_layers,
                              dnn_dim_feedforward=dim_feedforward)
             al_results = al_queue.get()
@@ -901,7 +933,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
                                    idx_val_al, epochs, dropout, _q, f"AL_m{_k}",
                                    iter_dir, iter_plots_dir, _ck, None,
                                    early_stopping, patience, y_transform, target,
-                                   F_combined, arch='dnn',
+                                   F_combined, arch='dnn', head=head,
                                    dnn_d_model=d_model, dnn_num_layers=num_layers,
                                    dnn_dim_feedforward=dim_feedforward)
                 _q.get()
@@ -919,7 +951,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
                 args=(AL_GPU_ID, X_combined, Y_combined, idx_train_al, idx_val_al, epochs, dropout, al_queue, "AL",
                       iter_dir, iter_plots_dir, al_checkpoint_path, al_warm_start,
                       early_stopping, patience, y_transform, target, F_combined),
-                kwargs={'arch': 'dnn',
+                kwargs={'arch': 'dnn', 'head': head,
                         'dnn_d_model': d_model,
                         'dnn_num_layers': num_layers,
                         'dnn_dim_feedforward': dim_feedforward},
@@ -930,7 +962,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
                       dropout, baseline_queue, "Baseline", iter_dir, iter_plots_dir,
                       baseline_checkpoint_path, baseline_warm_start, early_stopping, patience,
                       y_transform, target, F_baseline_combined),
-                kwargs={'arch': 'dnn',
+                kwargs={'arch': 'dnn', 'head': head,
                         'dnn_d_model': d_model,
                         'dnn_num_layers': num_layers,
                         'dnn_dim_feedforward': dim_feedforward},
@@ -953,7 +985,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
             train_model_worker(device, X_combined, Y_combined, idx_train_al, idx_val_al, epochs, dropout,
                              al_queue, "AL", iter_dir, iter_plots_dir, al_checkpoint_path,
                              al_warm_start, early_stopping, patience, y_transform, target,
-                             F_combined, arch='dnn',
+                             F_combined, arch='dnn', head=head,
                              dnn_d_model=d_model, dnn_num_layers=num_layers,
                              dnn_dim_feedforward=dim_feedforward)
             al_results = al_queue.get()
@@ -964,7 +996,7 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
                              epochs, dropout, baseline_queue, "Baseline", iter_dir,
                              iter_plots_dir, baseline_checkpoint_path, baseline_warm_start,
                              early_stopping, patience, y_transform, target,
-                             F_baseline_combined, arch='dnn',
+                             F_baseline_combined, arch='dnn', head=head,
                              dnn_d_model=d_model, dnn_num_layers=num_layers,
                              dnn_dim_feedforward=dim_feedforward)
             baseline_results = baseline_queue.get()
@@ -1337,6 +1369,34 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
                 proximity_sampling=proximity_sampling,
                 device=device, logger=logger
             )
+        elif selection_strategy in ('bald', 'cls_entropy'):
+            # Classification-head acquisition. The head turns the MC-dropout
+            # logit samples into either the total predictive entropy H[p_bar]
+            # (the literature's "committee mean nearest 0.5") or the mutual
+            # information H[p_bar] - E H[p], i.e. disagreement alone. No
+            # tolerance cut: a boundary-anchored score does not need the
+            # mean-based pre-filter, and a logit has no target units for it.
+            _summary, _preds = compute_uncertainty_head(
+                model, candidates, stats, mc_samples, device, logger,
+                head_obj, return_predictions=True)
+            pred_mean, pred_var = _summary['pred_mean'], _summary['pred_var']
+            _which = 'bald' if selection_strategy == 'bald' else 'entropy'
+            top_indices = select_top_score(
+                candidates, head_obj.acquisition_score(_summary, _which),
+                n_select, logger=logger)
+            del _preds
+        elif selection_strategy == 'tol_only_random':
+            # Mean-guided arm: the tolerance cut, then a uniform draw among the
+            # survivors, with the uncertainty never consulted. Isolates what the
+            # prefilter contributes on its own (see pmssm.selection).
+            pred_mean, pred_var = _acq_uncertainty(candidates)
+            top_indices = select_tol_only_random(
+                candidates, pred_mean, n_select,
+                threshold=threshold_transformed,
+                tolerance_sampling=tolerance_sampling,
+                seed=seed * 100_000 + iteration,
+                logger=logger,
+            )
         elif selection_strategy == 'top_k_tol_only':
             pred_mean, pred_var = _acq_uncertainty(candidates)
             top_indices = select_top_uncertain_tol_only(
@@ -1423,6 +1483,28 @@ def main(testing, n_iterations, n_candidates, n_select, mc_samples, epochs, drop
                             threshold=threshold_transformed, tolerance_sampling=tolerance_sampling,
                             proximity_sampling=proximity_sampling,
                             device=device, logger=logger
+                        )
+                    elif selection_strategy in ('bald', 'cls_entropy'):
+                        _summary = compute_uncertainty_head(
+                            model, attempt_candidates, stats, mc_samples, device,
+                            logger, head_obj)
+                        attempt_mean = _summary['pred_mean']
+                        attempt_pred_var = _summary['pred_var']
+                        _which = 'bald' if selection_strategy == 'bald' else 'entropy'
+                        attempt_indices = select_top_score(
+                            attempt_candidates,
+                            head_obj.acquisition_score(_summary, _which),
+                            n_select, logger=logger)
+                    elif selection_strategy == 'tol_only_random':
+                        attempt_mean, attempt_pred_var = compute_uncertainty_mc_dropout(
+                            model, attempt_candidates, stats, mc_samples, device, logger
+                        )
+                        attempt_indices = select_tol_only_random(
+                            attempt_candidates, attempt_mean, n_select,
+                            threshold=threshold_transformed,
+                            tolerance_sampling=tolerance_sampling,
+                            seed=attempt_seed,
+                            logger=logger,
                         )
                     elif selection_strategy == 'top_k_tol_only':
                         attempt_mean, attempt_pred_var = compute_uncertainty_mc_dropout(

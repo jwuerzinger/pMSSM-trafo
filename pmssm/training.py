@@ -18,6 +18,7 @@ import gpytorch
 
 from .config import TARGET_CONFIG
 from .datasets import PMSSMDataset
+from .heads import RegressionHead, get_head
 from .data import compute_stats, normalize_x, transform_y, inverse_transform_y
 from .evaluation import get_model_name, compute_gp_r2, extract_lengthscales
 from .logging_utils import setup_worker_logging
@@ -117,13 +118,16 @@ def train_with_validation(
         if scheduler is not None:
             scheduler.step()
 
-        # Log progress
+        # Log progress. The label follows the criterion, so a non-MSE head
+        # (e.g. BCE for the classification head) is not mislabelled in the log.
         lr = optimizer.param_groups[0]['lr']
+        loss_name = {"MSELoss": "MSE", "BCEWithLogitsLoss": "BCE"}.get(
+            type(criterion).__name__, type(criterion).__name__)
         msg = (
             f"{get_model_name(model):<20} | "
             f"Epoch {epoch:04d} | "
-            f"Train MSE = {train_loss:.6f} | "
-            f"Val MSE = {val_loss:.6f} | "
+            f"Train {loss_name} = {train_loss:.6f} | "
+            f"Val {loss_name} = {val_loss:.6f} | "
             f"LR = {lr:.6e}"
         )
         if logger:
@@ -159,7 +163,7 @@ def train_model_worker(gpu_id, X, Y, idx_train, idx_val, epochs, dropout,
                       plots_dir=None, checkpoint_path=None,
                       warm_start_path=None, early_stopping=True, patience=200,
                       y_transform='zscore', target='DMRD', lsp_fracs=None,
-                      arch='transformer',
+                      arch='transformer', head='regression',
                       dnn_d_model=64, dnn_num_layers=4, dnn_dim_feedforward=256,
                       tf_d_model=128, tf_nhead=4, tf_num_layers=3,
                       tf_dim_feedforward=512):
@@ -183,6 +187,15 @@ def train_model_worker(gpu_id, X, Y, idx_train, idx_val, epochs, dropout,
         y_transform: Y transformation type: 'zscore' (default) or 'log'
         target: Target function name (e.g., 'DMRD') for log transformation
         arch: Architecture, 'transformer' (default) or 'dnn' (PMSSMFeedForward).
+        head: Acquisition head name (see pmssm.heads). 'regression' (default)
+            is the production path: MSE on the transformed target, and the
+            R2/physical-space metrics below are meaningful. A head whose output
+            is not an estimate of t (e.g. 'classification', whose output is a
+            logit) trains on that head's targets and loss instead, and the
+            value metrics are reported as None rather than as numbers that
+            would look plausible and be wrong. The network shape and the
+            decision point (output > 0) are the same for every head, so the
+            per-iteration diagnostics that threshold the output keep working.
     """
     device = f"cuda:{gpu_id}" if isinstance(gpu_id, int) else gpu_id
 
@@ -242,6 +255,21 @@ def train_model_worker(gpu_id, X, Y, idx_train, idx_val, epochs, dropout,
         if len(data_overlap) > 0:
             logger.warning(f"Found {len(data_overlap)} identical data samples in both train and val sets (different indices)!")
 
+    # A non-regression head keeps the same normalized inputs and the same
+    # transformed target as its starting point, then maps that target to its own
+    # (e.g. the verdict indicator 1[t > 0]). Datasets are built once above, so
+    # the mapping is applied in place and the regression path is untouched.
+    head_obj = get_head(head, threshold=0.0)
+    if head_obj.name != 'regression':
+        if y_transform != 'log':
+            raise ValueError(f"head {head_obj.name!r} needs y_transform='log' "
+                             f"(the head's target is defined on t), got {y_transform!r}")
+        train_dataset.y = head_obj.make_targets(train_dataset.y)
+        val_dataset.y = head_obj.make_targets(val_dataset.y)
+        logger.info(f"Head {head_obj.name!r}: training on head targets "
+                    f"(positive fraction train {float(train_dataset.y.mean()):.4f}, "
+                    f"val {float(val_dataset.y.mean()):.4f})")
+
     train_loader = DataLoader(train_dataset, batch_size=256, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=256, shuffle=False)
 
@@ -277,7 +305,7 @@ def train_model_worker(gpu_id, X, Y, idx_train, idx_val, epochs, dropout,
 
     optimizer = optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-4)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-6)
-    criterion = nn.MSELoss()
+    criterion = head_obj.criterion()
 
     train_losses, val_losses = train_with_validation(
         model,
@@ -300,7 +328,9 @@ def train_model_worker(gpu_id, X, Y, idx_train, idx_val, epochs, dropout,
     best_train_loss = train_losses[best_val_epoch]
 
     # Compute R² scores on both validation and training sets
-    # (model already has best-val-loss weights restored by train_with_validation)
+    # (model already has best-val-loss weights restored by train_with_validation).
+    # These read the output as an estimate of t, so they are only defined for a
+    # head that predicts t; see pmssm.heads on diagnostics parity.
     model.eval()
     model.to(device)
     _, _, mean_Y, std_Y = stats
@@ -321,27 +351,53 @@ def train_model_worker(gpu_id, X, Y, idx_train, idx_val, epochs, dropout,
                     inverse_transform_y(Y_pred_transformed, target=target))
         return Y_batch * std_Y + mean_Y, Y_pred_transformed * std_Y + mean_Y
 
-    # Validation R²
     Y_pred_transformed, Y_batch = _batched_predict(val_dataset)
-    Y_true, Y_pred = _to_physical(Y_batch, Y_pred_transformed)
-    ss_res = ((Y_true - Y_pred) ** 2).sum()
-    ss_tot = ((Y_true - Y_true.mean()) ** 2).sum()
-    r2 = (1 - (ss_res / ss_tot)).item()
-
-    # Training R²
     Y_train_pred_transformed, Y_train_batch = _batched_predict(train_dataset)
-    Y_train_true, Y_train_pred = _to_physical(Y_train_batch, Y_train_pred_transformed)
-    ss_res_train = ((Y_train_true - Y_train_pred) ** 2).sum()
-    ss_tot_train = ((Y_train_true - Y_train_true.mean()) ** 2).sum()
-    train_r2 = (1 - (ss_res_train / ss_tot_train)).item()
+    head_accuracy = None
+
+    if head_obj.value_metrics:
+        # Validation R²
+        Y_true, Y_pred = _to_physical(Y_batch, Y_pred_transformed)
+        ss_res = ((Y_true - Y_pred) ** 2).sum()
+        ss_tot = ((Y_true - Y_true.mean()) ** 2).sum()
+        r2 = (1 - (ss_res / ss_tot)).item()
+
+        # Training R²
+        Y_train_true, Y_train_pred = _to_physical(Y_train_batch, Y_train_pred_transformed)
+        ss_res_train = ((Y_train_true - Y_train_pred) ** 2).sum()
+        ss_tot_train = ((Y_train_true - Y_train_true.mean()) ** 2).sum()
+        train_r2 = (1 - (ss_res_train / ss_tot_train)).item()
+    else:
+        # The output is not an estimate of t, so R² and the physical-space
+        # inversion do not exist for it. Report the head's own summary instead:
+        # the verdict accuracy, which is the same quantity the per-iteration
+        # accuracy diagnostics obtain by thresholding the output at zero.
+        # NaN rather than None: the AL driver already uses NaN for "metric not
+        # computed" (see nan_baseline_results), and NaN flows through the logs,
+        # the state arrays, the summary JSON and the trajectory plots unchanged,
+        # which is what keeps the existing diagnostics working for a head whose
+        # output is not an estimate of t.
+        r2 = train_r2 = float('nan')
+        Y_true = Y_pred = Y_train_true = Y_train_pred = None
+        head_accuracy = {
+            "train": float(((Y_train_pred_transformed > 0).float()
+                            == Y_train_batch).float().mean()),
+            "val": float(((Y_pred_transformed > 0).float() == Y_batch).float().mean()),
+        }
 
     # Log final metrics
     logger.info(f"Training complete!")
     logger.info(f"Best val epoch: {best_val_epoch}")
     logger.info(f"Best train loss: {best_train_loss:.6f}")
     logger.info(f"Best validation loss: {best_val_loss:.6f}")
-    logger.info(f"R² score: {r2:.4f}")
-    logger.info(f"Train R² score: {train_r2:.4f}")
+    if head_obj.value_metrics:
+        logger.info(f"R² score: {r2:.4f}")
+        logger.info(f"Train R² score: {train_r2:.4f}")
+    else:
+        logger.info(f"Head {head_obj.name!r} verdict accuracy: "
+                    f"train {head_accuracy['train']:.4f}, "
+                    f"val {head_accuracy['val']:.4f} "
+                    f"(R² and physical-space metrics undefined for this head)")
 
     # Generate diagnostic plots if plots_dir is provided
     if plots_dir is not None:
@@ -353,44 +409,49 @@ def train_model_worker(gpu_id, X, Y, idx_train, idx_val, epochs, dropout,
         plot_losses(train_losses, val_losses, get_model_name(model), plot_dir=str(plots_dir))
 
         # Reuse predictions already computed for R² (Y_train_true, Y_train_pred,
-        # Y_true, Y_pred are all in physical space)
+        # Y_true, Y_pred are all in physical space). The loss curve above is
+        # head-agnostic; everything below is true-vs-predicted in physical
+        # space, which exists only for a head that predicts t.
+        if head_obj.value_metrics:
+            # Compare random predictions (text log)
+            compare_random_predictions(
+                Y_train_true, Y_train_pred, mode='train',
+                model_name=get_model_name(model),
+                n_points=min(10, len(train_dataset)), logger=logger
+            )
+            compare_random_predictions(
+                Y_true, Y_pred, mode='validation',
+                model_name=get_model_name(model),
+                n_points=min(3, len(val_dataset)), logger=logger
+            )
 
-        # Compare random predictions (text log)
-        compare_random_predictions(
-            Y_train_true, Y_train_pred, mode='train',
-            model_name=get_model_name(model),
-            n_points=min(10, len(train_dataset)), logger=logger
-        )
-        compare_random_predictions(
-            Y_true, Y_pred, mode='validation',
-            model_name=get_model_name(model),
-            n_points=min(3, len(val_dataset)), logger=logger
-        )
+            # Scatter plots — use mixing-matrix LSP fractions if the worker was
+            # given them, otherwise fall back to a single-color scatter.
+            _F_train = lsp_fracs[idx_train] if lsp_fracs is not None else None
+            _F_val = lsp_fracs[idx_val] if lsp_fracs is not None else None
+            scatter_true_vs_pred(
+                Y_train_true, Y_train_pred, mode='train',
+                model_name=get_model_name(model), plot_dir=str(plots_dir),
+                lsp_fracs=_F_train,
+            )
+            scatter_true_vs_pred(
+                Y_true, Y_pred, mode='validation',
+                model_name=get_model_name(model), plot_dir=str(plots_dir),
+                lsp_fracs=_F_val,
+            )
 
-        # Scatter plots — use mixing-matrix LSP fractions if the worker was
-        # given them, otherwise fall back to a single-color scatter.
-        _F_train = lsp_fracs[idx_train] if lsp_fracs is not None else None
-        _F_val = lsp_fracs[idx_val] if lsp_fracs is not None else None
-        scatter_true_vs_pred(
-            Y_train_true, Y_train_pred, mode='train',
-            model_name=get_model_name(model), plot_dir=str(plots_dir),
-            lsp_fracs=_F_train,
-        )
-        scatter_true_vs_pred(
-            Y_true, Y_pred, mode='validation',
-            model_name=get_model_name(model), plot_dir=str(plots_dir),
-            lsp_fracs=_F_val,
-        )
-
-        # Histogram plots
-        hist_true_vs_pred(
-            Y_train_true, Y_train_pred, mode='train',
-            model_name=get_model_name(model), plot_dir=str(plots_dir)
-        )
-        hist_true_vs_pred(
-            Y_true, Y_pred, mode='validation',
-            model_name=get_model_name(model), plot_dir=str(plots_dir)
-        )
+            # Histogram plots
+            hist_true_vs_pred(
+                Y_train_true, Y_train_pred, mode='train',
+                model_name=get_model_name(model), plot_dir=str(plots_dir)
+            )
+            hist_true_vs_pred(
+                Y_true, Y_pred, mode='validation',
+                model_name=get_model_name(model), plot_dir=str(plots_dir)
+            )
+        else:
+            logger.info(f"Head {head_obj.name!r}: loss curve written; "
+                        f"true-vs-pred plots skipped (no physical-space value)")
 
         logger.info(f"Diagnostic plots saved to {plots_dir}")
 
@@ -408,14 +469,35 @@ def train_model_worker(gpu_id, X, Y, idx_train, idx_val, epochs, dropout,
         "train_r2_score": train_r2,
         "train_losses": train_losses,
         "val_losses": val_losses,
+        # Head provenance, so an analysis reading these results knows whether
+        # r2_score is a number or None by design (see pmssm.heads). Absent in
+        # runs made before heads existed, which were all 'regression'.
+        "head": head_obj.name,
+        "head_accuracy": head_accuracy,
     })
 
 
 # ===== GP Model Training =====
 
+def _predicts_probability(model, model_type):
+    """True when the model's own predictive mean is already a probability.
+
+    A Bernoulli likelihood warps the latent through Phi, so ``gp_predict``
+    returns p in [0, 1] and the decision point is 0.5; every other combination
+    here returns a latent whose decision point is 0.
+    """
+    return getattr(model, "likelihood_kind", "gaussian") == "bernoulli"
+
+
 def model_has_likelihood(model_type):
-    """Return True if the model type uses a GP likelihood."""
-    return model_type in ("exact_gp", "deep_gp", "sparse_gp")
+    """Return True if the model type has a separate GP likelihood MODULE.
+
+    ``laplace_gpc`` is included: it carries a parameter-free
+    ``BernoulliLikelihood``, which is the probit likelihood of R&W section 3.4,
+    so the generic device-move and checkpoint paths apply to it unchanged. Its
+    likelihood state dict is simply empty.
+    """
+    return model_type in ("exact_gp", "deep_gp", "sparse_gp", "laplace_gpc")
 
 
 def model_is_variational(model_type):
@@ -428,7 +510,7 @@ def create_gp_model(model_type, x_train, y_train, x_val, y_val, n_dim,
                     m_nu=1.5, num_mixtures=4, use_dkl=False, feature_dim=2,
                     num_hidden_dims=10, num_middle_dims=0,
                     num_inducing_max=512, num_samples=8, seed=42, device=None,
-                    target="DMRD", inducing_strategy="kmeans"):
+                    target="DMRD", inducing_strategy="kmeans", head="regression"):
     """
     Create and return a GP model (ExactGP, DeepGP, SparseGP, or MLP).
 
@@ -458,6 +540,12 @@ def create_gp_model(model_type, x_train, y_train, x_val, y_val, n_dim,
         device: Target device (if None, auto-detects CUDA)
         target: Target function name (for threshold)
         inducing_strategy: Inducing point initialization ("kmeans" or "vanilla")
+        head: Acquisition head name.  ``classification`` gives the deep GP a
+            Bernoulli likelihood, which is a true GP classifier and costs
+            nothing because the model is already variational.  The exact GP
+            cannot take one without losing conjugacy, so it uses
+            ``lsq_classification`` instead: the same Gaussian likelihood on the
+            +-1 verdict, read through a probit link.
 
     Returns:
         Initialized GP or MLP model
@@ -470,6 +558,7 @@ def create_gp_model(model_type, x_train, y_train, x_val, y_val, n_dim,
         from gp_pipeline.models.exact_gp import ExactGP
         from gp_pipeline.models.deep_gp import DeepGP
         from gp_pipeline.models.sparse_gp import SparseGP
+        from gp_pipeline.models.laplace_gpc import LaplaceGPC
         from gp_pipeline.models.mlp import MLP
     except ImportError as e:
         raise ImportError(f"Failed to import al_pmssmwithgp GP models: {e}")
@@ -486,6 +575,20 @@ def create_gp_model(model_type, x_train, y_train, x_val, y_val, n_dim,
     x_val = x_val.to(device)
     y_val = y_val.view(-1).to(device)
 
+    if model_type == "laplace_gpc" and head == "regression":
+        raise ValueError(
+            "laplace_gpc IS a classifier (probit likelihood); it has no "
+            "regression mode. Use model_type='exact_gp' for regression.")
+
+    if head == "classification" and model_type in ("exact_gp",):
+        raise ValueError(
+            "the 'classification' head needs a Bernoulli likelihood, which is "
+            "non-conjugate and so cannot be attached to an exact GP without "
+            "replacing exact inference by a variational or Laplace "
+            "approximation. Use head='lsq_classification', which regresses the "
+            "+-1 verdict under the Gaussian likelihood and so changes only the "
+            "training target, or model_type='deep_gp'/'sparse_gp'.")
+
     if model_type == "exact_gp":
         model = ExactGP(
             x_train, y_train, x_val, y_val, n_dim,
@@ -501,6 +604,7 @@ def create_gp_model(model_type, x_train, y_train, x_val, y_val, n_dim,
             num_hidden_dims=num_hidden_dims, num_middle_dims=num_middle_dims,
             num_inducing_max=num_inducing_max, kernel=kernel, m_nu=m_nu,
             num_samples=num_samples, seed=seed,
+            likelihood="bernoulli" if head == "classification" else "gaussian",
         )
     elif model_type == "sparse_gp":
         model = SparseGP(
@@ -508,6 +612,16 @@ def create_gp_model(model_type, x_train, y_train, x_val, y_val, n_dim,
             lengthscale=lengthscale, noise=noise,
             num_inducing_max=num_inducing_max, kernel=kernel, m_nu=m_nu,
             thr=threshold, seed=seed, inducing_strategy=inducing_strategy,
+        )
+    elif model_type == "laplace_gpc":
+        # The canonical single-layer GP classifier: R&W Algorithm 3.1/3.2. It
+        # carries no separate likelihood module, because the probit likelihood
+        # is fixed and parameter-free; the noise argument has no meaning here
+        # and is dropped rather than silently accepted.
+        model = LaplaceGPC(
+            x_train, y_train, x_val, y_val, n_dim,
+            lengthscale=lengthscale, use_ard=use_ard,
+            kernel=kernel, m_nu=m_nu, seed=seed, device=device,
         )
     elif model_type == "mlp":
         model = MLP(
@@ -553,6 +667,10 @@ def train_gp_model(model, model_type, lr=1e-3, iters=2000,
             lr=lr, iters=iters, batch_size=batch_size, jitter=jitter,
             patience=patience
         )
+    elif model_type == "laplace_gpc":
+        model, train_losses, val_losses = model.do_train_loop(
+            lr=lr, iters=iters, jitter=jitter, patience=patience
+        )
     elif model_type == "mlp":
         model, train_losses, val_losses = model.do_train_loop(
             lr=lr, iters=iters, patience=patience
@@ -567,7 +685,8 @@ def train_gp_worker(gpu_id, X, Y, X_val, Y_val, data_min, data_max,
                     log_dir=None, plots_dir=None,
                     checkpoint_path=None, num_samples=8,
                     warm_start_path=None, target="DMRD",
-                    patience=None, lsp_fracs=None, lsp_fracs_val=None):
+                    patience=None, lsp_fracs=None, lsp_fracs_val=None,
+                    head="regression"):
     """
     Worker function for GP training (multiprocessing).
 
@@ -592,6 +711,10 @@ def train_gp_worker(gpu_id, X, Y, X_val, Y_val, data_min, data_max,
         warm_start_path: Path to a checkpoint to warm-start from
         target: Target function name (e.g., "DMRD")
         patience: Early stopping patience (None disables)
+        head: Acquisition head name; see :func:`create_gp_model`.  A head that
+            does not predict the value of t reports NaN for MSE and R^2 rather
+            than a number that would look plausible and be wrong, and reports a
+            verdict accuracy instead.
     """
     # Resolve device string and set default CUDA device for this worker
     device = f"cuda:{gpu_id}" if isinstance(gpu_id, int) else gpu_id
@@ -629,6 +752,16 @@ def train_gp_worker(gpu_id, X, Y, X_val, Y_val, data_min, data_max,
     y_train_t = transform_y(Y, target=target).view(-1)
     y_val_t = transform_y(Y_val, target=target).view(-1)
 
+    # The head owns the training target. For regression this is the identity, so
+    # the production path is bit-for-bit unchanged.
+    head_obj = get_head(head, threshold=0.0)
+    if not isinstance(head_obj, RegressionHead):
+        y_train_t = head_obj.make_targets(y_train_t)
+        y_val_t = head_obj.make_targets(y_val_t)
+        logger.info(f"Head '{head}': training on the verdict, targets in "
+                    f"{sorted(set(y_train_t.unique().tolist()))}, "
+                    f"positive fraction {float((y_train_t > 0).float().mean()):.4f}")
+
     logger.info(f"Training set size: {len(x_train_norm)}, Validation set size: {len(x_val_norm)}")
     logger.info(f"Model type: {model_type}")
 
@@ -636,7 +769,7 @@ def train_gp_worker(gpu_id, X, Y, X_val, Y_val, data_min, data_max,
     model = create_gp_model(
         model_type, x_train_norm, y_train_t, x_val_norm, y_val_t,
         n_dim=n_dim, num_samples=num_samples, device=device,
-        target=target, **gp_kwargs
+        target=target, head=head, **gp_kwargs
     )
 
     # Warm-start: load previous iteration's state dict if provided.
@@ -684,16 +817,36 @@ def train_gp_worker(gpu_id, X, Y, X_val, Y_val, data_min, data_max,
                               jitter=jitter, num_samples=num_samples)
     best_val_loss = ((y_val_t - y_pred_val.cpu()) ** 2).mean().item()
     best_train_loss = ((y_train_t - y_pred_train.cpu()) ** 2).mean().item()
-    r2 = compute_gp_r2(model, x_val_norm, y_val_t, model_type, jitter=jitter,
-                       num_samples=num_samples, target=target)
-    train_r2 = compute_gp_r2(model, x_train_norm, y_train_t, model_type, jitter=jitter,
-                             num_samples=num_samples, target=target)
+
+    head_accuracy = None
+    if head_obj.value_metrics:
+        r2 = compute_gp_r2(model, x_val_norm, y_val_t, model_type, jitter=jitter,
+                           num_samples=num_samples, target=target)
+        train_r2 = compute_gp_r2(model, x_train_norm, y_train_t, model_type, jitter=jitter,
+                                 num_samples=num_samples, target=target)
+    else:
+        # R^2 of a verdict is meaningless; report the decision quality instead.
+        r2 = train_r2 = float("nan")
+        # gp_predict returns the LATENT for every head (see the Bernoulli note
+        # there), so the decision point is 0 in all cases: a logit, a probit
+        # latent and a +-1 least-squares fit are each positive exactly when the
+        # verdict is positive.
+        cut = 0.0
+        head_accuracy = {
+            "val": float(((y_pred_val.cpu() > cut) == (y_val_t.cpu() > 0)).float().mean()),
+            "train": float(((y_pred_train.cpu() > cut) == (y_train_t.cpu() > 0)).float().mean()),
+        }
 
     logger.info(f"Best val epoch (by MLL): {best_val_iter}")
     logger.info(f"Best train loss (MSE): {best_train_loss:.6f}")
     logger.info(f"Best val loss (MSE): {best_val_loss:.6f}")
-    logger.info(f"R² score: {r2:.4f}")
-    logger.info(f"Train R² score: {train_r2:.4f}")
+    if head_accuracy is None:
+        logger.info(f"R² score: {r2:.4f}")
+        logger.info(f"Train R² score: {train_r2:.4f}")
+    else:
+        logger.info(f"Head '{head}' verdict accuracy: "
+                    f"train={head_accuracy['train']:.4f} val={head_accuracy['val']:.4f} "
+                    f"(R² is NaN by construction: the output is not a value of t)")
 
     # Extract lengthscales
     lengthscales = extract_lengthscales(model, model_type)
@@ -709,30 +862,38 @@ def train_gp_worker(gpu_id, X, Y, X_val, Y_val, data_min, data_max,
         plot_losses(train_losses, val_losses, model_type, str(plots_dir))
 
         # Convert to physical space for scatter/histogram plots
+        _skip_value_plots = not head_obj.value_metrics
+        if _skip_value_plots:
+            logger.info(f"Head '{head}': skipping physical-space plots "
+                        "(inverting a verdict through the target transform is "
+                        "not defined). Loss curve written.")
         y_true_val_phys = inverse_transform_y(y_val_t.cpu(), target=target)
         y_pred_val_phys = inverse_transform_y(y_pred_val, target=target)
         y_true_train_phys = inverse_transform_y(y_train_t.cpu(), target=target)
         y_pred_train_phys = inverse_transform_y(y_pred_train, target=target)
 
         # Scatter: true vs predicted (train & validation)
-        scatter_true_vs_pred(
+        if _skip_value_plots:
+            pass
+        else:
+          scatter_true_vs_pred(
             y_true_train_phys, y_pred_train_phys, "train", model_type, str(plots_dir),
             lsp_fracs=lsp_fracs)
-        scatter_true_vs_pred(
+          scatter_true_vs_pred(
             y_true_val_phys, y_pred_val_phys, "validation", model_type, str(plots_dir),
             lsp_fracs=lsp_fracs_val)
 
-        # 2D histogram: true vs predicted (train & validation)
-        hist_true_vs_pred(
+          # 2D histogram: true vs predicted (train & validation)
+          hist_true_vs_pred(
             y_true_train_phys, y_pred_train_phys, "train", model_type, str(plots_dir))
-        hist_true_vs_pred(
+          hist_true_vs_pred(
             y_true_val_phys, y_pred_val_phys, "validation", model_type, str(plots_dir))
 
-        # Random predictions comparison (text log)
-        compare_random_predictions(
+          # Random predictions comparison (text log)
+          compare_random_predictions(
             y_true_train_phys, y_pred_train_phys, "train", model_type,
             n_points=min(10, len(y_true_train_phys)), logger=logger)
-        compare_random_predictions(
+          compare_random_predictions(
             y_true_val_phys, y_pred_val_phys, "validation", model_type,
             n_points=min(3, len(y_true_val_phys)), logger=logger)
 
@@ -756,6 +917,8 @@ def train_gp_worker(gpu_id, X, Y, X_val, Y_val, data_min, data_max,
         "train_losses": train_losses,
         "val_losses": val_losses,
         "lengthscales": lengthscales,
+        "head": head,
+        "head_accuracy": head_accuracy,
     })
 
 

@@ -41,8 +41,14 @@ from pmssm import (
     select_top_uncertain,
     select_top_uncertain_filtered,
     select_top_uncertain_tol_only,
+    select_tol_only_random,
+    select_top_score,
+    # Acquisition heads
+    HEADS,
+    get_head,
     # Uncertainty
     compute_uncertainty_gp,
+    compute_uncertainty_gp_head,
     # Training
     create_gp_model,
     train_gp_worker,
@@ -359,8 +365,11 @@ def load_config_with_sweep(config_file, sweep_index=None):
 @click.option('--target', default='DMRD', type=click.Choice(sorted(TARGET_CONFIG)),
               help="Target function to predict.")
 @click.option('--model-type', default='exact_gp',
-              type=click.Choice(['exact_gp', 'deep_gp', 'sparse_gp', 'mlp']),
-              help="Model type.")
+              type=click.Choice(['exact_gp', 'deep_gp', 'sparse_gp', 'mlp',
+                                 'laplace_gpc']),
+              help="Model type. 'laplace_gpc' is the binary Laplace GP "
+                   "classifier of Rasmussen & Williams section 3.4 and is a "
+                   "classifier only: pair it with --head classification.")
 @click.option('--kernel', default='RBF', type=str, help="Kernel type (RBF, Matern, RQK, SpectralMixture, RBF+Matern).")
 @click.option('--lengthscale', default=1.0, type=float, help="Initial kernel lengthscale.")
 @click.option('--noise', default=1e-2, type=float, help="Initial noise level.")
@@ -383,7 +392,15 @@ def load_config_with_sweep(config_file, sweep_index=None):
 @click.option('--m-nu', default=1.5, type=float, help="Matern nu parameter.")
 @click.option('--num-mixtures', default=4, type=int, help="Number of mixtures for SpectralMixture kernel.")
 # Selection strategy options
-@click.option('--selection-strategy', default='entropy_batch', type=click.Choice(['top_k', 'top_k_tol_only', 'entropy_batch']),
+@click.option('--head', default='regression', type=click.Choice(sorted(HEADS)),
+              help="Acquisition head. 'regression' is production (MSE on t). "
+                   "'classification' attaches a Bernoulli likelihood and so is "
+                   "available for the variational models (deep_gp, sparse_gp) "
+                   "only; 'lsq_classification' regresses the +-1 verdict under "
+                   "the Gaussian likelihood, which keeps the exact GP exact. "
+                   "Both verdict heads pair with --selection-strategy bald or "
+                   "cls_entropy.")
+@click.option('--selection-strategy', default='entropy_batch', type=click.Choice(['top_k', 'top_k_tol_only', 'tol_only_random', 'entropy_batch', 'bald', 'cls_entropy']),
               help="Selection strategy: top_k or entropy_batch (default).")
 @click.option('--entropy-blur', default=0.15, type=float, help="Entropy smoothing parameter (entropy_batch only).")
 @click.option('--entropy-beta', default=50.0, type=float, help="Gibbs sampling temperature (entropy_batch only).")
@@ -434,7 +451,7 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, v
          use_ard, use_dkl, feature_dim,
          num_hidden_dims, num_middle_dims, num_inducing_max, inducing_strategy,
          gp_num_samples, batch_size, warm_starting, m_nu, num_mixtures,
-         selection_strategy, entropy_blur, entropy_beta,
+         head, selection_strategy, entropy_blur, entropy_beta,
          tolerance_sampling, proximity_sampling, entropy_pool_size,
          candidate_source,
          compute_full_metrics, eval_data_path, mcmc_data_dir, mcmc_max_samples, static_eval_size,
@@ -457,6 +474,7 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, v
             'learning_rate': 'learning_rate', 'epochs': 'epochs',
             'n_iterations': 'n_iterations', 'n_candidates': 'n_candidates',
             'n_select': 'n_select', 'selection_strategy': 'selection_strategy',
+            'head': 'head',
             'entropy_blur': 'entropy_blur', 'entropy_beta': 'entropy_beta',
             'tolerance_sampling': 'tolerance_sampling', 'proximity_sampling': 'proximity_sampling',
             'candidate_source': 'candidate_source',
@@ -478,6 +496,7 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, v
         n_candidates = int(_locals.get('n_candidates', n_candidates))
         n_select = int(_locals.get('n_select', n_select))
         selection_strategy = _locals.get('selection_strategy', selection_strategy)
+        head = _locals.get('head', head)
         entropy_blur = float(_locals.get('entropy_blur', entropy_blur))
         entropy_beta = float(_locals.get('entropy_beta', entropy_beta))
         tolerance_sampling = float(_locals.get('tolerance_sampling', tolerance_sampling))
@@ -503,7 +522,8 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, v
     output_dir = Path(output_dir)
     # Collision-free dir suffix (same contract as active_learning.py).
     warm_tag = "warm" if warm_starting else "cold"
-    auto_suffix = f"_{selection_strategy}_{warm_tag}_seed{seed}_{timestamp}"
+    _head_tag = "" if head == "regression" else f"_{head}"
+    auto_suffix = f"{_head_tag}_{selection_strategy}_{warm_tag}_seed{seed}_{timestamp}"
     if not re.search(r"_\d{8}_\d{6}$", output_dir.name):
         output_dir = output_dir.with_name(output_dir.name + auto_suffix)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -545,6 +565,7 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, v
     logger.info(f"  n_candidates: {n_candidates}")
     logger.info(f"  n_select: {n_select}")
     logger.info(f"  val_fraction: {val_fraction}")
+    logger.info(f"  head: {head}")
     logger.info(f"  selection_strategy: {selection_strategy}")
     logger.info(f"  epochs: {epochs}")
     logger.info(f"  early_stopping: {early_stopping} (patience={patience})")
@@ -570,6 +591,46 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, v
         logger.info(f"  batch_size: {batch_size}")
     if model_type == "sparse_gp":
         logger.info(f"  inducing_strategy: {inducing_strategy}")
+    # ---- head / strategy / model compatibility -------------------------------
+    _CLS_STRATEGIES = ('bald', 'cls_entropy')
+    _VERDICT_HEADS = ('classification', 'lsq_classification')
+    if head in _VERDICT_HEADS and selection_strategy not in _CLS_STRATEGIES:
+        raise click.UsageError(
+            f"--head {head} produces a verdict, not a value of t, so it cannot "
+            f"drive --selection-strategy {selection_strategy}. Use "
+            "--selection-strategy bald or cls_entropy.")
+    if head not in _VERDICT_HEADS and selection_strategy in _CLS_STRATEGIES:
+        raise click.UsageError(
+            f"--selection-strategy {selection_strategy} scores a predicted "
+            "class probability, which --head regression does not produce. Pass "
+            "--head classification (deep_gp/sparse_gp) or --head "
+            "lsq_classification (any GP).")
+    if model_type == 'laplace_gpc' and head != 'classification':
+        raise click.UsageError(
+            "laplace_gpc is the Laplace-approximated probit GP classifier and "
+            "has no regression or least-squares mode. Pass "
+            "--head classification.")
+    if head == 'classification' and model_type == 'exact_gp':
+        raise click.UsageError(
+            "--head classification attaches a Bernoulli likelihood, which is "
+            "non-conjugate: an exact GP cannot carry one without replacing "
+            "exact inference by an approximation, which would change the "
+            "inference scheme and the head at the same time. Use --head "
+            "lsq_classification, which changes only the training target.")
+    if head in _VERDICT_HEADS and model_type == 'mlp':
+        raise click.UsageError("the verdict heads need a posterior; mlp has none.")
+
+    # The decision point in transformed space is 0 for every head defined here:
+    # a probit latent and a +-1 least-squares fit are both positive exactly when
+    # the verdict is positive, which is what keeps the existing
+    # threshold-at-zero diagnostics working unchanged.
+    head_obj = get_head(head, threshold=0.0,
+                        **({'link': 'probit'} if head == 'classification' else {}))
+    if head != 'regression':
+        logger.info(f"Head '{head}': probit link (GPyTorch's BernoulliLikelihood "
+                    "is probit, and the least-squares head matches it); value "
+                    "metrics (MSE/R2) reported as NaN by construction.")
+
     if selection_strategy == "entropy_batch":
         logger.info(f"  entropy_blur: {entropy_blur}")
         logger.info(f"  entropy_beta: {entropy_beta}")
@@ -999,7 +1060,7 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, v
                       learning_rate, epochs, batch_size, jitter,
                       al_queue, "AL", iter_dir, iter_plots_dir, al_checkpoint_path,
                       gp_num_samples, al_warm_start, target, effective_patience,
-                      F, F_val),
+                      F, F_val, head),
             )
             baseline_process = mp.Process(
                 target=train_gp_worker,
@@ -1009,7 +1070,7 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, v
                       baseline_queue, "Baseline", iter_dir, iter_plots_dir,
                       baseline_checkpoint_path,
                       gp_num_samples, baseline_warm_start, target, effective_patience,
-                      F_baseline_train, F_baseline_val),
+                      F_baseline_train, F_baseline_val, head),
             )
 
             logger.info(f"Launching parallel training: AL on cuda:{AL_GPU_ID}, "
@@ -1052,7 +1113,7 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, v
                 al_queue, "AL", iter_dir, iter_plots_dir, al_checkpoint_path,
                 num_samples=gp_num_samples, warm_start_path=al_warm_start,
                 target=target, patience=effective_patience,
-                lsp_fracs=F, lsp_fracs_val=F_val,
+                lsp_fracs=F, lsp_fracs_val=F_val, head=head,
             )
             al_results = al_queue.get()
 
@@ -1066,7 +1127,7 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, v
                 baseline_checkpoint_path,
                 num_samples=gp_num_samples, warm_start_path=baseline_warm_start,
                 target=target, patience=effective_patience,
-                lsp_fracs=F_baseline_train, lsp_fracs_val=F_baseline_val,
+                lsp_fracs=F_baseline_train, lsp_fracs_val=F_baseline_val, head=head,
             )
             baseline_results = baseline_queue.get()
 
@@ -1108,14 +1169,21 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, v
         y_train_t = transform_y(Y_train_al, target=target).view(-1)
         y_val_t = transform_y(Y_val_al, target=target).view(-1)
 
+        # The head decides the observation model, so it must be passed here too:
+        # a Bernoulli-trained checkpoint has no likelihood.noise_covar.raw_noise
+        # and will not load into a Gaussian-likelihood model.
+        if head != 'regression':
+            y_train_t = head_obj.make_targets(y_train_t)
+            y_val_t = head_obj.make_targets(y_val_t)
+
         al_model = create_gp_model(
             model_type, x_train_norm, y_train_t, x_val_norm, y_val_t,
             n_dim=len(PARAM_ORDER), num_samples=gp_num_samples,
-            target=target, device=device, **gp_kwargs
+            target=target, device=device, head=head, **gp_kwargs
         )
         checkpoint = torch.load(al_checkpoint_path, map_location=device)
         al_model.load_state_dict(checkpoint['model_state_dict'])
-        if model_has_likelihood(model_type):
+        if model_has_likelihood(model_type) and 'likelihood_state_dict' in checkpoint:
             al_model.likelihood.load_state_dict(checkpoint['likelihood_state_dict'])
         al_model = al_model.to(device)
         if model_has_likelihood(model_type):
@@ -1158,7 +1226,7 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, v
             model_type, x_train_base_norm, y_train_base_t,
             x_val_base_norm, y_val_base_t,
             n_dim=len(PARAM_ORDER), num_samples=gp_num_samples,
-            target=target, device=device, **gp_kwargs
+            target=target, device=device, head=head, **gp_kwargs
         )
         base_ckpt = torch.load(baseline_checkpoint_path, map_location=device)
         baseline_model.load_state_dict(base_ckpt['model_state_dict'])
@@ -1378,7 +1446,36 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, v
                 logger=logger,
             )
 
-            if selection_strategy == "top_k_tol_only":
+            if selection_strategy in ("bald", "cls_entropy"):
+                # Classification-head acquisition on the GP's own posterior.
+                # cls_entropy is the total predictive entropy H[p_bar], the
+                # literature's "committee mean nearest 0.5"; bald is the mutual
+                # information H[p_bar] - E H[p], i.e. disagreement alone. No
+                # tolerance cut: the score is already anchored at the boundary,
+                # and a latent has no target units for the cut to use.
+                _summary = compute_uncertainty_gp_head(
+                    al_model, candidates, data_min, data_max,
+                    model_type=model_type, head=head_obj, jitter=jitter,
+                    num_samples=gp_num_samples, logger=logger,
+                )
+                _pred_mean, pred_var = _summary['pred_mean'], _summary['pred_var']
+                _which = 'bald' if selection_strategy == 'bald' else 'entropy'
+                top_indices = torch.as_tensor(select_top_score(
+                    candidates, head_obj.acquisition_score(_summary, _which),
+                    n_select, logger=logger,
+                ), dtype=torch.long)
+            elif selection_strategy == "tol_only_random":
+                # Mean-guided arm: tolerance cut, then a uniform draw. The GP's
+                # posterior variance is computed above for the plots but is
+                # deliberately not consulted for the selection.
+                top_indices = torch.as_tensor(select_tol_only_random(
+                    candidates, _pred_mean, n_select,
+                    threshold=threshold,
+                    tolerance_sampling=tolerance_sampling,
+                    seed=seed * 100_000 + iteration,
+                    logger=logger,
+                ), dtype=torch.long)
+            elif selection_strategy == "top_k_tol_only":
                 top_indices = select_top_uncertain_tol_only(
                     candidates, _pred_mean, pred_var.unsqueeze(1), n_select,
                     threshold=threshold,
@@ -1505,7 +1602,29 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, v
                         model_type=model_type, jitter=jitter, num_samples=gp_num_samples,
                         logger=logger,
                     )
-                    if selection_strategy == "top_k_tol_only":
+                    if selection_strategy in ("bald", "cls_entropy"):
+                        _asum = compute_uncertainty_gp_head(
+                            al_model, attempt_candidates, data_min, data_max,
+                            model_type=model_type, head=head_obj, jitter=jitter,
+                            num_samples=gp_num_samples, logger=logger,
+                        )
+                        attempt_mean = _asum['pred_mean']
+                        attempt_pred_var = _asum['pred_var']
+                        _which = 'bald' if selection_strategy == 'bald' else 'entropy'
+                        attempt_indices = torch.as_tensor(select_top_score(
+                            attempt_candidates,
+                            head_obj.acquisition_score(_asum, _which),
+                            n_select, logger=logger,
+                        ), dtype=torch.long)
+                    elif selection_strategy == "tol_only_random":
+                        attempt_indices = torch.as_tensor(select_tol_only_random(
+                            attempt_candidates, attempt_mean, n_select,
+                            threshold=threshold,
+                            tolerance_sampling=tolerance_sampling,
+                            seed=attempt_seed,
+                            logger=logger,
+                        ), dtype=torch.long)
+                    elif selection_strategy == "top_k_tol_only":
                         attempt_indices = select_top_uncertain_tol_only(
                             attempt_candidates, attempt_mean, attempt_pred_var.unsqueeze(1), n_select,
                             threshold=threshold,
@@ -1736,6 +1855,7 @@ def main(testing, n_iterations, n_candidates, n_select, n_datasets, n_samples, v
             "n_candidates": n_candidates,
             "n_select": n_select,
             "selection_strategy": selection_strategy,
+            "head": head,
             "epochs": epochs,
             "learning_rate": learning_rate,
             "kernel": kernel,

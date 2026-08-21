@@ -174,6 +174,116 @@ def select_top_uncertain_tol_only(X_candidates, pred_mean, pred_var, n_select,
 
 # ===== Entropy-Based Selection with Proximity Weighting =====
 
+def select_top_score(X_candidates, score, n_select, pred_mean=None,
+                     threshold=0.0, tolerance_sampling=0.0, logger=None):
+    """Top-k by an arbitrary acquisition score, with the optional tolerance cut.
+
+    The head-agnostic counterpart of :func:`select_top_uncertain_filtered`: the
+    ranking quantity is whatever the head produced (predictive entropy, mutual
+    information, variance), so a new head needs no new selector.
+
+    The tolerance cut is available but off by default, because a
+    boundary-anchored score such as the predictive entropy of a verdict
+    classifier already concentrates on the decision surface and does not need
+    the mean-based pre-filter that a variance ranking does. Passing
+    ``tolerance_sampling`` reinstates it, which is how a matched-anchor
+    comparison against the regression path is run.
+
+    Args:
+        X_candidates: Candidate pool tensor (N, D)
+        score: Acquisition score (N,) or (N, 1); higher is more worth labelling
+        n_select: Number to select
+        pred_mean: Mean in transformed space, required only for the cut
+        threshold: Decision threshold in transformed space
+        tolerance_sampling: +/- width around threshold for the hard cut (0 = off)
+        logger: Logger instance
+
+    Returns:
+        Numpy array of indices into ``X_candidates`` (len <= ``n_select``).
+    """
+    N = X_candidates.shape[0]
+    score_flat = score.squeeze().to(torch.float64)
+
+    if tolerance_sampling > 0.0:
+        if pred_mean is None:
+            raise ValueError("tolerance_sampling requires pred_mean")
+        mean_flat = pred_mean.squeeze()
+        mask = ((mean_flat > threshold - tolerance_sampling) &
+                (mean_flat < threshold + tolerance_sampling))
+        surviving = torch.where(mask)[0]
+        if logger:
+            logger.info(f"Tolerance filter (+/-{tolerance_sampling:.2f}): "
+                        f"{len(surviving)}/{N} candidates survive")
+        if len(surviving) == 0:
+            if logger:
+                logger.warning("No candidates survived tolerance filter, "
+                               "falling back to all candidates")
+            surviving = torch.arange(N)
+    else:
+        surviving = torch.arange(N)
+
+    take = min(n_select, len(surviving))
+    top = torch.topk(score_flat[surviving], take).indices
+    chosen = surviving[top]
+    if logger:
+        logger.info(f"Selected {take} candidates by score "
+                    f"(range {float(score_flat[chosen].min()):.4g} to "
+                    f"{float(score_flat[chosen].max()):.4g})")
+    return chosen.numpy()
+
+
+def select_tol_only_random(X_candidates, pred_mean, n_select, threshold=0.0,
+                           tolerance_sampling=0.0, seed=0, logger=None):
+    """Tolerance cut, then a uniform draw among the survivors: no uncertainty.
+
+    The mean-guided arm the strategy grid was missing. Every other strategy
+    applies this same cut and then *ranks* the survivors by some function of the
+    predictive uncertainty, so this one isolates what the cut contributes on its
+    own, which is the question "how much of the yield is the prefilter?".
+
+    It needs only the predicted mean, so it is available to every surrogate,
+    including those whose uncertainty is expensive (TabPFN) or absent.
+
+    Args:
+        X_candidates: Candidate pool tensor (N, D)
+        pred_mean: Predicted mean in transformed space (N, 1) or (N,)
+        n_select: Number to select
+        threshold: Decision threshold in transformed space
+        tolerance_sampling: +/- width around threshold for the hard cut (0 = off,
+            which degenerates to uniform random selection over the whole pool)
+        seed: Draw seed; vary it per iteration so replicas are not correlated
+        logger: Logger instance
+
+    Returns:
+        Numpy array of indices into ``X_candidates`` (len <= ``n_select``).
+    """
+    N = X_candidates.shape[0]
+    mean_flat = pred_mean.squeeze()
+
+    if tolerance_sampling > 0.0:
+        mask = ((mean_flat > threshold - tolerance_sampling) &
+                (mean_flat < threshold + tolerance_sampling))
+        surviving = torch.where(mask)[0]
+        if logger:
+            logger.info(f"Tolerance filter (+/-{tolerance_sampling:.2f}): "
+                        f"{len(surviving)}/{N} candidates survive")
+        if len(surviving) == 0:
+            if logger:
+                logger.warning("No candidates survived tolerance filter, "
+                               "falling back to all candidates")
+            surviving = torch.arange(N)
+    else:
+        surviving = torch.arange(N)
+
+    take = min(n_select, len(surviving))
+    g = torch.Generator().manual_seed(int(seed))
+    chosen = surviving[torch.randperm(len(surviving), generator=g)[:take]]
+    if logger:
+        logger.info(f"Selected {take} survivors uniformly at random "
+                    f"(seed {int(seed)}); no uncertainty was consulted")
+    return chosen.numpy()
+
+
 def select_entropy_batch_mc(X_candidates, predictions, pred_mean, pred_var,
                             n_select, blur=0.15, beta=50.0, n_pool=5000,
                             threshold=0.0, tolerance_sampling=0.0,
@@ -330,6 +440,10 @@ def select_points(strategy='top_k', **kwargs):
             - 'top_k': Tolerance + proximity-weighted variance + top-k
             - 'top_k_tol_only': Tolerance cut + raw top-variance (short-circuit, no proximity)
             - 'entropy_batch': Full DPP-style entropy pipeline with MC covariance
+            - 'head_score': Top-k by a head-supplied score (see pmssm.heads),
+              with the tolerance cut optional
+            - 'tol_only_random': Tolerance cut, then a uniform draw among the
+              survivors; the mean-guided arm with no uncertainty at all
         **kwargs: Strategy-specific arguments
 
     Returns:
@@ -353,6 +467,29 @@ def select_points(strategy='top_k', **kwargs):
             kwargs['X_candidates'],
             kwargs['uncertainties'],
             kwargs['n_select']
+        )
+    elif strategy == 'tol_only_random':
+        return select_tol_only_random(
+            kwargs['X_candidates'],
+            kwargs['pred_mean'],
+            kwargs['n_select'],
+            threshold=kwargs.get('threshold', 0.0),
+            tolerance_sampling=kwargs.get('tolerance_sampling', 0.0),
+            seed=kwargs.get('seed', 0),
+            logger=kwargs.get('logger', None),
+        )
+    elif strategy == 'head_score':
+        # Head-supplied ranking (e.g. a classifier's predictive entropy or its
+        # mutual information). The head decides what `score` means; the selector
+        # only ranks. Existing strategies are untouched.
+        return select_top_score(
+            kwargs['X_candidates'],
+            kwargs['score'],
+            kwargs['n_select'],
+            pred_mean=kwargs.get('pred_mean'),
+            threshold=kwargs.get('threshold', 0.0),
+            tolerance_sampling=kwargs.get('tolerance_sampling', 0.0),
+            logger=kwargs.get('logger', None),
         )
     elif strategy == 'top_k_tol_only':
         return select_top_uncertain_tol_only(

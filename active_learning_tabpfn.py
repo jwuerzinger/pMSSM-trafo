@@ -42,6 +42,7 @@ from pmssm import (
     select_top_uncertain,
     select_top_uncertain_filtered,
     select_top_uncertain_tol_only,
+    select_tol_only_random,
     select_entropy_batch_mc,
     # Visualization
     plot_data_histograms,
@@ -308,7 +309,7 @@ def load_config_with_sweep(config_file, sweep_index=None):
 @click.option('--min-gen-fraction', default=0.6, type=float, help="Minimum fraction of n-select that must be generated successfully before stopping retries (default: 0.6).")
 @click.option('--max-gen-attempts', default=10, type=int, help="Maximum number of generation attempts per iteration (default: 10).")
 @click.option('--gen-workers', default=1, type=int, help="Number of parallel genModels.py workers per generation attempt (default: 1).")
-@click.option('--selection-strategy', default='top_k', type=click.Choice(['top_k', 'top_k_tol_only', 'entropy_batch']), help="Selection strategy: top_k (default), top_k_tol_only (short-circuit, no proximity), or entropy_batch (prohibitively expensive for TabPFN).")
+@click.option('--selection-strategy', default='top_k', type=click.Choice(['top_k', 'top_k_tol_only', 'tol_only_random', 'entropy_batch']), help="Selection strategy: top_k (default), top_k_tol_only (short-circuit, no proximity), or entropy_batch (prohibitively expensive for TabPFN).")
 @click.option('--entropy-blur', default=0.15, type=float, help="Entropy smoothing parameter (entropy_batch only).")
 @click.option('--entropy-beta', default=50.0, type=float, help="Gibbs sampling temperature (entropy_batch only).")
 @click.option('--entropy-pool-size', default=5000, type=int, help="Focused pool size for entropy_batch pre-filtering.")
@@ -1055,6 +1056,19 @@ def main(testing, n_iterations, n_candidates, n_select, n_ensemble_samples, n_da
                 proximity_sampling=proximity_sampling,
                 device=device, logger=logger
             )
+        elif selection_strategy == 'tol_only_random':
+            # Mean-guided arm: tolerance cut then a uniform draw. Cheap for
+            # TabPFN, since only the in-context mean is needed and the ensemble
+            # variance is never consulted (see pmssm.selection).
+            pred_mean = torch.from_numpy(al_res['candidates']['mean']).float().unsqueeze(1)
+            pred_var = torch.from_numpy(al_res['candidates']['var']).float().unsqueeze(1)
+            top_indices = select_tol_only_random(
+                candidates, pred_mean, n_select,
+                threshold=threshold_transformed,
+                tolerance_sampling=tolerance_sampling,
+                seed=seed * 100_000 + iteration,
+                logger=logger,
+            )
         elif selection_strategy == 'top_k_tol_only':
             pred_mean = torch.from_numpy(al_res['candidates']['mean']).float().unsqueeze(1)
             pred_var = torch.from_numpy(al_res['candidates']['var']).float().unsqueeze(1)
@@ -1160,7 +1174,15 @@ def main(testing, n_iterations, n_candidates, n_select, n_ensemble_samples, n_da
                         attempt_y_pred, attempt_var = tabpfn_predict_with_variance(al_model_retry, attempt_candidates)
                         attempt_mean = torch.from_numpy(attempt_y_pred).float().unsqueeze(1)
                         attempt_pred_var = torch.from_numpy(attempt_var).float().unsqueeze(1)
-                        if selection_strategy == 'top_k_tol_only':
+                        if selection_strategy == 'tol_only_random':
+                            attempt_indices = select_tol_only_random(
+                                attempt_candidates, attempt_mean, n_select,
+                                threshold=threshold_transformed,
+                                tolerance_sampling=tolerance_sampling,
+                                seed=attempt_seed,
+                                logger=logger,
+                            )
+                        elif selection_strategy == 'top_k_tol_only':
                             attempt_indices = select_top_uncertain_tol_only(
                                 attempt_candidates, attempt_mean, attempt_pred_var, n_select,
                                 threshold=threshold_transformed,

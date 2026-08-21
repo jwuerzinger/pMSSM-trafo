@@ -38,6 +38,7 @@ __version__ = "0.1.0"
 from . import config
 from . import data
 from . import datasets
+from . import heads
 from . import models
 from . import selection
 from . import uncertainty
@@ -84,20 +85,32 @@ from .models import (
     get_model_name,
 )
 
+from .heads import (
+    HEADS,
+    LeastSquaresVerdictHead,
+    get_head,
+    head_for_run,
+    head_names,
+)
+
 from .selection import (
     generate_candidate_pool,
     select_top_uncertain,
     select_top_uncertain_filtered,
     select_top_uncertain_tol_only,
+    select_top_score,
+    select_tol_only_random,
     select_entropy_batch_mc,
     select_points,
 )
 
 from .uncertainty import (
     compute_uncertainty_mc_dropout,
+    compute_uncertainty_head,
     compute_uncertainty_ensemble,
     compute_uncertainty_laplace,
     compute_uncertainty_gp,
+    compute_uncertainty_gp_head,
 )
 
 from .training import (
@@ -158,6 +171,7 @@ __all__ = [
     'config',
     'data',
     'datasets',
+    'heads',
     'models',
     'selection',
     'uncertainty',
@@ -197,19 +211,30 @@ __all__ = [
     'is_transformer',
     'get_model_name',
 
+    # Acquisition heads
+    'LeastSquaresVerdictHead',
+    'HEADS',
+    'get_head',
+    'head_for_run',
+    'head_names',
+
     # Selection functions
     'generate_candidate_pool',
     'select_top_uncertain',
     'select_top_uncertain_filtered',
     'select_top_uncertain_tol_only',
+    'select_top_score',
+    'select_tol_only_random',
     'select_entropy_batch_mc',
     'select_points',
 
     # Uncertainty estimation
     'compute_uncertainty_mc_dropout',
+    'compute_uncertainty_head',
     'compute_uncertainty_ensemble',
     'compute_uncertainty_laplace',
     'compute_uncertainty_gp',
+    'compute_uncertainty_gp_head',
 
     # Training
     'train_with_validation',
