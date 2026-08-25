@@ -230,6 +230,22 @@ def main(cells, resume_to, seeds, per_wake, queue_cap,
             work += cells_from_manifests(t, seed_list, resume_to,
                                          min_iters_continuation)
 
+    # The CSV and the manifest scan can name the same cell: a continuation cell
+    # listed explicitly is also found by the >min_iters scan. Two entries would
+    # mean two sbatch calls in one wake, since the busy check reads squeue once
+    # at the start and cannot see a job this pass just created. Deduplicate by
+    # job name, keeping the CSV entry, whose sweep id is stated rather than
+    # inferred.
+    seen_names: dict[str, dict] = {}
+    for c in work:
+        n = job_name(c["target"], c["model"], c["strategy"])
+        if n not in seen_names or c.get("origin") == "campaign":
+            seen_names[n] = c
+    if len(seen_names) != len(work):
+        click.echo(f"[chase] {len(work) - len(seen_names)} duplicate cell(s) "
+                   "collapsed (listed and discovered)")
+    work = list(seen_names.values())
+
     submitted = skipped_busy = skipped_cap = 0
     for c in work:
         name = job_name(c["target"], c["model"], c["strategy"])
