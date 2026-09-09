@@ -151,6 +151,22 @@ regen_target () {
     shift 5
     local TARGET_ARGS=("$@")
 
+    # Conditional flags must travel in ARRAYS, never through an unquoted
+    # command substitution. `$( ... && echo "--mcmc-data-dir ''" )` word-splits
+    # into a literal two-character argument '' rather than an empty string, so
+    # every step below spent nine days trying to read the MCMC pool from a
+    # directory named '' and failing: plot_al_input_target_diagnostics,
+    # plot_pairwise_input_summary, compute_yield_comparison and evaluate_uq all
+    # died on ExpR, silently, because this script tolerates per-step failure.
+    local T_ONLY=() MC_ONLY=() T_MC=() T_MC_VETO=()
+    if [[ "${T}" == "ExpR" ]]; then
+        T_ONLY=(--target ExpR)
+        MC_ONLY=(--mcmc-data-dir "")
+        T_MC=(--target ExpR --mcmc-data-dir "")
+        T_MC_VETO=(--target ExpR --mcmc-data-dir ""
+                   --no-baseline-require-neutralino-lsp)
+    fi
+
     step "2/6 [${T}] hit rate, hits/desired and verdict accuracy"
     # FIRST: writes random_baseline_prevalence.json that later steps divide by.
     "${PY}" scripts/plot_hit_rate_trajectories_multiseed.py \
@@ -172,7 +188,7 @@ regen_target () {
     "${PY}" scripts/plot_compute_vs_dataset.py \
         --manifest "${M}" --output-dir "${O}" --model-tag "${TAG}" \
         --baseline-data-dir "${POOL}" \
-        $( [[ ${T} == ExpR ]] && echo "--target ExpR --mcmc-data-dir ''" ) \
+        "${T_MC[@]}" \
         2>&1 | tail -3
     "${PY}" scripts/coverage_saturation.py \
         --manifest "${M}" --output-dir "${O}" --cache-dir "${O}" \
@@ -192,22 +208,22 @@ regen_target () {
     "${PY}" scripts/plot_al_input_target_diagnostics.py \
         --manifest "${M}" --output-dir "${O}" --cache-dir "${O}" \
         --model-tag "${TAG}" --baseline-data-dir "${POOL}" \
-        $( [[ ${T} == ExpR ]] && echo "--target ExpR --mcmc-data-dir ''" ) \
+        "${T_MC[@]}" \
         2>&1 | tail -3
     "${PY}" scripts/plot_pairwise_input_summary.py \
         --manifest "${M}" --output-dir "${O}" \
-        $( [[ ${T} == ExpR ]] && echo "--mcmc-data-dir ''" ) 2>&1 | tail -2
+        "${MC_ONLY[@]}" 2>&1 | tail -2
 
     if [[ "${SKIP_SLOW}" != "1" ]]; then
         "${PY}" scripts/compute_yield_comparison.py \
             --manifest "${M}" --output-dir "${O}" --baseline-data-dir "${POOL}" \
             --model-tag "${TAG}" --tolerance 0.10 \
-            $( [[ ${T} == ExpR ]] && echo "--target ExpR --mcmc-data-dir '' --no-baseline-require-neutralino-lsp" ) \
+            "${T_MC_VETO[@]}" \
             2>&1 | tail -6
         "${PY}" scripts/evaluate_uq.py \
             --manifest "${M}" --output-dir "${O}" --cache-dir "${O}" \
             --baseline-data-dir "${POOL}" --model-tag "${TAG}" \
-            $( [[ ${T} == ExpR ]] && echo "--target ExpR --mcmc-data-dir ''" ) \
+            "${T_MC[@]}" \
             2>&1 | tail -6
     fi
 }
