@@ -853,7 +853,17 @@ def main(testing, n_iterations, n_candidates, n_select, n_ensemble_samples, n_da
         # the selection strategy needs them. entropy_batch generates its own
         # ensemble predictions from scratch, so skipping here saves one
         # inference pass on the candidate pool.
-        al_needs_cand = selection_strategy in ('top_k', 'top_k_tol_only')
+        #
+        # tol_only_random belongs here too, and its absence was a crash loop:
+        # its branch below reads al_res['candidates']['mean'], so leaving it out
+        # set that to None and raised TypeError AFTER training but BEFORE
+        # save_state. No state.pt was ever written, so every resume restarted
+        # from scratch, did one iteration and died again. The cell sat at
+        # iteration 1 for two weeks. The flag passed validation because the
+        # strategy IS in --selection-strategy's choices; only the plumbing
+        # was missing.
+        al_needs_cand = selection_strategy in ('top_k', 'top_k_tol_only',
+                                               'tol_only_random')
         al_candidates = candidates if al_needs_cand else None
 
         # Fit + evaluate AL and Baseline TabPFN models. In parallel on 2 GPUs
