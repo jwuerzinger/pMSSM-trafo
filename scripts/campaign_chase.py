@@ -48,6 +48,7 @@ from pathlib import Path
 import click
 
 REPO = Path(__file__).resolve().parent.parent
+OUTPUT_ROOT = "/ptmp/jwuerzin/output"
 EXPR_POOL = "/ptmp/jwuerzin/data/260804"
 DMRD_POOL = "/ptmp/jwuerzin/data/18387358"
 MANIFESTS = {"ExpR": "/ptmp/jwuerzin/analysis/expr_runs/sweep_manifest.csv",
@@ -193,6 +194,13 @@ def cells_from_manifests(target: str, seeds: list[str], resume_to: int,
         d = r.get("expected_run_dir") or ""
         if not d:
             continue
+        # Only the live output tree may be resumed. Four manifest rows point at
+        # /ptmp/jwuerzin/output_benchmark40, the frozen 40-iteration seed-1
+        # snapshots of the DMRD entropy_batch cells that the paper's benchmark
+        # figures read. Resuming those to 200 would rewrite the benchmark
+        # itself, and it is not recoverable.
+        if not d.startswith(OUTPUT_ROOT + "/"):
+            continue
         key = (model, r["strategy"], r["warm_start"], r["sweep_id"])
         base = re.sub(r"_seed\d+_.*$", "", d)
         e = by_cell.setdefault(key, {"base": base, "seeds": {}})
@@ -241,7 +249,14 @@ def main(cells, resume_to, seeds, per_wake, queue_cap,
                f"{per_wake} this wake (hard ceiling {queue_cap})")
 
     work: list[dict] = []
+    # Every cell the CSV names, whether or not it still needs work. A cell the
+    # CSV states is complete is dropped from `work` below, and the manifest scan
+    # would then rediscover it through whichever row it can still find, which
+    # need not be the run directory the campaign actually advanced.
+    csv_names: set[str] = set()
     if cells and os.path.exists(cells):
+        for r in csv.DictReader(open(cells)):
+            csv_names.add(job_name(r["target"], r["model"], r["strategy"]))
         for r in csv.DictReader(open(cells)):
             dm = dir_model(r["model"], r["target"])
             base = (f"/ptmp/jwuerzin/output/active_learning_{dm}"
@@ -272,8 +287,11 @@ def main(cells, resume_to, seeds, per_wake, queue_cap,
                    "leaving every continuation cell to them this round")
     else:
         for t in MANIFESTS:
-            work += cells_from_manifests(t, seed_list, resume_to,
-                                         min_iters_continuation)
+            for c in cells_from_manifests(t, seed_list, resume_to,
+                                          min_iters_continuation):
+                if job_name(c["target"], c["model"], c["strategy"]) in csv_names:
+                    continue
+                work.append(c)
 
     # The CSV and the manifest scan can name the same cell: a continuation cell
     # listed explicitly is also found by the >min_iters scan. Two entries would
