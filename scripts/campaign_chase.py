@@ -73,15 +73,52 @@ def _iters(run_dir: str) -> int:
     return len(glob.glob(os.path.join(run_dir, "iteration_[0-9][0-9][0-9]")))
 
 
+def split_model(manifest_model: str) -> tuple[str, str]:
+    """Split a cell's model string into (driver key, head variant).
+
+    Three spellings of the same cell reach this function and all must reduce to
+    the same pair, or the two discovery paths disagree and the cell is both
+    submitted twice and never seen to finish:
+
+      `transformer_expr`   -> ("transformer", "")     manifest, ExpR
+      `exact_gp_lsq`       -> ("exact_gp", "lsq")     campaign CSV, DMRD
+      `exact_gp_expr_lsq`  -> ("exact_gp", "lsq")     manifest, ExpR
+
+    The target tag sits after the DRIVER key, not after the model key, because
+    `submit_campaign_200.sh` passes the variant through `OUTPUT_TAG`, which
+    appends `_lsq` to a tag that already carries `expr`. Stripping `_expr$` only,
+    as this did before, left `exact_gp_lsq_expr` and so a path that never
+    existed.
+    """
+    m = manifest_model.replace("_expr", "")
+    if m.endswith("_lsq"):
+        return m[: -len("_lsq")], "lsq"
+    return m, ""
+
+
 def bare_model(manifest_model: str) -> str:
-    """`transformer_expr` -> `transformer`; the bundle dispatch wants the driver key."""
-    return re.sub(r"_expr$", "", manifest_model)
+    """The driver key `submit_al_bundled.sh` dispatches on.
+
+    Its case statement matches six literal keys and exits 1 on anything else, so
+    a variant spelling here is not a soft failure: the resume job dies on start
+    having done nothing, and the cell stalls silently at whatever iteration its
+    first submission reached.
+    """
+    return split_model(manifest_model)[0]
+
+
+def dir_model(model: str, target: str) -> str:
+    """The run-directory model segment: driver, then target tag, then variant."""
+    drv, var = split_model(model)
+    tag = "_expr" if target == "ExpR" else ""
+    return f"{drv}{tag}" + (f"_{var}" if var else "")
 
 
 def family(model: str) -> str:
-    if model in GP:
+    drv = split_model(model)[0]
+    if drv in GP:
         return "gp"
-    if model == "tabpfn":
+    if drv == "tabpfn":
         return "tabpfn"
     return "neural"
 
@@ -107,7 +144,13 @@ def derive_extra(target: str, model: str, strategy: str) -> str:
         common = (f"--target {target} --target-value {tv}{mcmc} "
                   f"--y-transform log --data-dir {pool}")
     if strategy in ("bald", "cls_entropy"):
-        if model == "exact_gp":
+        drv, var = split_model(model)
+        if var == "lsq":
+            # The least-squares head keeps exact conjugate inference, so it takes
+            # neither the laplace_gpc model type nor the Laplace optimiser
+            # overrides that the Bernoulli exact-GP cells need.
+            common += " --head lsq_classification"
+        elif drv == "exact_gp":
             common += (" --model-type laplace_gpc --head classification"
                        " --epochs 3000 --patience 200 --learning-rate 1e-2")
         else:
@@ -131,7 +174,9 @@ def job_name(target: str, model: str, strategy: str) -> str:
     short = {"tol_only_random": "tol", "cls_entropy": "clsent", "bald": "bald",
              "entropy_batch": "ent", "top_k": "topk", "top_k_tol_only": "tktol"}
     t = "e" if target == "ExpR" else "d"
-    return f"c200_{t}_{bare_model(model)}_{short.get(strategy, strategy)}"
+    drv, var = split_model(model)
+    stem = f"{drv}" + (f"_{var}" if var else "")
+    return f"c200_{t}_{stem}_{short.get(strategy, strategy)}"
 
 
 def cells_from_manifests(target: str, seeds: list[str], resume_to: int,
@@ -198,13 +243,13 @@ def main(cells, resume_to, seeds, per_wake, queue_cap,
     work: list[dict] = []
     if cells and os.path.exists(cells):
         for r in csv.DictReader(open(cells)):
-            tag = "_expr" if r["target"] == "ExpR" else ""
-            base = (f"/ptmp/jwuerzin/output/active_learning_{r['model']}{tag}"
+            dm = dir_model(r["model"], r["target"])
+            base = (f"/ptmp/jwuerzin/output/active_learning_{dm}"
                     f"_{r['strategy']}_{r['warm']}")
             got = {s: _iters(f"{base}_seed{s}_{r['campaign_id']}") for s in seed_list}
             if min(got.values()) >= resume_to:
                 continue
-            work.append({"target": r["target"], "model": r["model"] + tag,
+            work.append({"target": r["target"], "model": dm,
                          "strategy": r["strategy"], "warm": r["warm"],
                          "sweep_id": r["campaign_id"], "base": base,
                          "iters": got, "origin": "campaign"})
@@ -257,7 +302,7 @@ def main(cells, resume_to, seeds, per_wake, queue_cap,
         if submitted >= per_wake or n_jobs >= queue_cap:
             skipped_cap += 1
             continue
-        extra = derive_extra(c["target"], bare_model(c["model"]), c["strategy"])
+        extra = derive_extra(c["target"], c["model"], c["strategy"])
         env = dict(os.environ)
         env.update({
             "AL_MODEL": bare_model(c["model"]),
