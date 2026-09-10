@@ -122,6 +122,13 @@ done
 # strategies. The paper's figures are therefore built from a manifest with the
 # campaign rows removed, and the new arms appear only in the arm figures of
 # step 4, which are about them.
+#
+# The *_laplace rows are held back for the same reason. They swap the acquisition
+# uncertainty for a last-layer linearised Laplace posterior, so they are a
+# different experiment from the MC-dropout benchmark the figures describe, and
+# they exist on the relic-density target only. Left in, they add three extra
+# curves to every DMRD panel and to none of the ExpR ones, which is unreadable
+# as a comparison and unsupported by the captions.
 step "1b/6 split the manifests: benchmark rows only for the paper's figures"
 "${PY}" - <<'PYSPLIT'
 import csv
@@ -133,13 +140,20 @@ for src, dst in (("/ptmp/jwuerzin/analysis/all_runs/sweep_manifest.csv",
     if not Path(src).exists():
         continue
     rows = list(csv.DictReader(open(src)))
-    keep = [r for r in rows if not str(r.get("sweep_id", "")).startswith("c200_")]
+    keep, campaign, variant = [], 0, 0
+    for r in rows:
+        if str(r.get("sweep_id", "")).startswith("c200_"):
+            campaign += 1
+        elif str(r.get("model", "")).endswith("_laplace"):
+            variant += 1
+        else:
+            keep.append(r)
     with open(dst, "w", newline="") as fh:
         w = csv.DictWriter(fh, fieldnames=rows[0].keys())
         w.writeheader()
         w.writerows(keep)
     print(f"  {Path(dst).name}: {len(keep)} of {len(rows)} rows "
-          f"({len(rows) - len(keep)} campaign rows held back)")
+          f"({campaign} campaign, {variant} laplace-variant rows held back)")
 PYSPLIT
 
 # ---- 2+3. per-target figure families ----------------------------------------
