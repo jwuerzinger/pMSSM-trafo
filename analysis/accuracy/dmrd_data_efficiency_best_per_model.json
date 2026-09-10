@@ -1,0 +1,166 @@
+{
+  "static_random": {
+    "deep_gp": {
+      "target_iter": 152,
+      "target_acc": 0.9713850021362305,
+      "al_match_iter": 18,
+      "gain": 8.444444444444445
+    },
+    "dnn": {
+      "target_iter": 200,
+      "target_acc": 0.9721500277519226,
+      "al_match_iter": 23,
+      "gain": 8.695652173913043
+    },
+    "dnn_match_trafo": {
+      "target_iter": 200,
+      "target_acc": 0.9716399908065796,
+      "al_match_iter": 24,
+      "gain": 8.333333333333334
+    },
+    "exact_gp": {
+      "target_iter": 40,
+      "target_acc": 0.954548,
+      "al_match_iter": 8,
+      "gain": 5.0
+    },
+    "tabpfn": {
+      "target_iter": 40,
+      "target_acc": 0.9746060132980346,
+      "al_match_iter": null,
+      "gain": null,
+      "al_best_mean": 0.9720899939537049
+    },
+    "transformer": {
+      "target_iter": 148,
+      "target_acc": 0.9838299751281738,
+      "al_match_iter": 40,
+      "gain": 3.7
+    }
+  },
+  "mcmc": {
+    "deep_gp": {
+      "target_iter": 152,
+      "target_acc": 0.5983429849147797,
+      "al_match_iter": 25,
+      "gain": 6.08
+    },
+    "dnn": {
+      "target_iter": 200,
+      "target_acc": 0.5552639961242676,
+      "al_match_iter": 15,
+      "gain": 13.333333333333334
+    },
+    "dnn_match_trafo": {
+      "target_iter": 200,
+      "target_acc": 0.5709940195083618,
+      "al_match_iter": 37,
+      "gain": 5.405405405405405
+    },
+    "exact_gp": {
+      "target_iter": 40,
+      "target_acc": 0.5733792,
+      "al_match_iter": 9,
+      "gain": 4.444444444444445
+    },
+    "tabpfn": {
+      "target_iter": 40,
+      "target_acc": 0.6362112045288086,
+      "al_match_iter": null,
+      "gain": null,
+      "al_best_mean": 0.5863648056983948
+    },
+    "transformer": {
+      "target_iter": 148,
+      "target_acc": 0.6390339732170105,
+      "al_match_iter": 85,
+      "gain": 1.7411764705882353
+    }
+  },
+  "train": {
+    "deep_gp": {
+      "target_iter": 152,
+      "target_acc": 0.971723735332489,
+      "al_match_iter": null,
+      "gain": null,
+      "al_best_mean": 0.9510000052452089
+    },
+    "dnn": {
+      "target_iter": 200,
+      "target_acc": 0.9785434007644653,
+      "al_match_iter": 1,
+      "gain": 200.0
+    },
+    "dnn_match_trafo": {
+      "target_iter": 200,
+      "target_acc": 0.979024350643158,
+      "al_match_iter": null,
+      "gain": null,
+      "al_best_mean": 0.968999994277954
+    },
+    "exact_gp": {
+      "target_iter": 40,
+      "target_acc": 0.9652617966945144,
+      "al_match_iter": 1,
+      "gain": 40.0
+    },
+    "tabpfn": {
+      "target_iter": 40,
+      "target_acc": 0.9876200675964355,
+      "al_match_iter": null,
+      "gain": null,
+      "al_best_mean": 0.9827499866485596
+    },
+    "transformer": {
+      "target_iter": 148,
+      "target_acc": 0.9908179640769958,
+      "al_match_iter": null,
+      "gain": null,
+      "al_best_mean": 0.9703749966621398
+    }
+  },
+  "val": {
+    "deep_gp": {
+      "target_iter": 152,
+      "target_acc": 0.9691769480705261,
+      "al_match_iter": null,
+      "gain": null,
+      "al_best_mean": 0.9329999990463257
+    },
+    "dnn": {
+      "target_iter": 200,
+      "target_acc": 0.9727534055709839,
+      "al_match_iter": null,
+      "gain": null,
+      "al_best_mean": 0.9290000014305114
+    },
+    "dnn_match_trafo": {
+      "target_iter": 200,
+      "target_acc": 0.971056342124939,
+      "al_match_iter": null,
+      "gain": null,
+      "al_best_mean": 0.9265000047683716
+    },
+    "exact_gp": {
+      "target_iter": 40,
+      "target_acc": 0.9513461898076766,
+      "al_match_iter": null,
+      "gain": null,
+      "al_best_mean": 0.9209833173083579
+    },
+    "tabpfn": {
+      "target_iter": 40,
+      "target_acc": 0.973355770111084,
+      "al_match_iter": null,
+      "gain": null,
+      "al_best_mean": 0.949999988079071
+    },
+    "transformer": {
+      "target_iter": 148,
+      "target_acc": 0.9830896854400635,
+      "al_match_iter": null,
+      "gain": null,
+      "al_best_mean": 0.9519999990463257
+    }
+  }
+}
