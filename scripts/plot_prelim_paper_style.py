@@ -130,6 +130,14 @@ def iter_arm_rows(arm_manifest, arm_sweep_id=""):
     import csv as _csv
     if not arm_manifest or not Path(arm_manifest).exists():
         return
+    # One row per RUN DIRECTORY. A sweep manifest accumulates a row per submit,
+    # so a cell submitted twice appears twice with the same sweep id and the
+    # same directory. Counting it twice leaves the mean unchanged but doubles n,
+    # so the SEM comes out a factor sqrt(2) too small and the band is ~30% too
+    # narrow. Observed on 2026-09-09: 170 rows over 90 directories in both
+    # manifests, after the launcher was re-run to add one group before it was
+    # made idempotent.
+    seen: set[str] = set()
     for r in _csv.DictReader(open(arm_manifest)):
         if r.get("strategy") not in NEW_ARMS:
             continue
@@ -137,8 +145,12 @@ def iter_arm_rows(arm_manifest, arm_sweep_id=""):
             continue
         mdl = _PROD_MODEL.get(r.get("model", ""))
         d = Path(r.get("expected_run_dir") or "")
-        if mdl and d.name and (d / "state.pt").exists():
-            yield mdl, r["strategy"], d
+        if not (mdl and d.name and (d / "state.pt").exists()):
+            continue
+        if str(d) in seen:
+            continue
+        seen.add(str(d))
+        yield mdl, r["strategy"], d
 
 
 def _stack(per_seed: list[tuple[list[int], list[float]]]):
@@ -169,15 +181,47 @@ def _stack_xy(per_seed, size_maps, use_size: bool):
                for (i, v), sm in zip(per_seed, size_maps) if len(i)]
     if not entries:
         return np.array([]), np.zeros((0, 0))
+
+    if use_size:
+        # |L| must NOT be averaged across seeds at a fixed iteration index.
+        # Seeds of one arm can differ enormously in how fast |L| grows (deep_gp
+        # BALD on the relic density: 2,763 to 33,374 at index 100, a factor 12),
+        # and as the shorter seeds run out the mean over the survivors moves
+        # BACKWARDS. The curve then doubles back on itself and renders as two
+        # separate lines, which is what it did for both GPs.
+        #
+        # Interpolate each seed onto a shared |L| grid instead. x is then the
+        # grid, monotone by construction, and each seed contributes only over
+        # the range it actually reached, so the band widens where fewer seeds
+        # remain in the same way the iteration axis already does.
+        curves = []
+        for i, v, sm in entries:
+            L = np.array([sm.get(int(t), np.nan) for t in i], dtype=float)
+            m = np.isfinite(L) & np.isfinite(v)
+            if m.sum() < 2:
+                continue
+            Ls, vs = L[m], v[m]
+            o = np.argsort(Ls)
+            curves.append((Ls[o], vs[o]))
+        if not curves:
+            return np.array([]), np.zeros((0, 0))
+        lo = max(c[0][0] for c in curves)     # every seed contributes here
+        hi = max(c[0][-1] for c in curves)    # run out to the furthest seed
+        if not (hi > lo):
+            return np.array([]), np.zeros((0, 0))
+        grid = np.linspace(lo, hi, 200)
+        Y = np.full((len(curves), grid.size), np.nan)
+        for k, (Ls, vs) in enumerate(curves):
+            inside = (grid >= Ls[0]) & (grid <= Ls[-1])
+            Y[k, inside] = np.interp(grid[inside], Ls, vs)
+        return grid, Y
+
     n = max(len(i) for i, _, _ in entries)
     Y = np.full((len(entries), n), np.nan)
     X = np.full((len(entries), n), np.nan)
     for k, (i, v, sm) in enumerate(entries):
         Y[k, :len(v)] = v[:n]
-        if use_size:
-            X[k, :len(i)] = [sm.get(int(t), np.nan) for t in i[:n]]
-        else:
-            X[k, :len(i)] = i[:n]
+        X[k, :len(i)] = i[:n]
     with np.errstate(invalid="ignore"):
         x = np.nanmean(X, axis=0)
     return x, Y
@@ -264,6 +308,13 @@ def _accuracy_series(run_dir: Path, dataset: str, role: str = "al"):
               type=click.Choice(["iteration", "dataset_size", "both"]),
               help="'dataset_size' plots against |L| = n_train + n_val, which "
                    "removes the differing per-iteration validity between arms.")
+@click.option("--target-label", default=r"r_{\mathrm{exp}}", show_default=True,
+              help="Maths symbol for the target on the accuracy axis. It was "
+                   "hardcoded to the exclusion boundary's r_exp while the "
+                   "THRESHOLD was interpolated, so the relic-density figure "
+                   "read 'r_exp > 0.12': the wrong observable against the right "
+                   "number, which is the failure mode that put relic-density "
+                   "data into five ExpR figures once already.")
 @click.option("--arm-manifest", default="", show_default=True,
               help="Full sweep manifest to read the new arms from, so they get "
                    "seed means and bands instead of one line per run. The probe "
@@ -272,7 +323,7 @@ def _accuracy_series(run_dir: Path, dataset: str, role: str = "al"):
               help="Restrict --arm-manifest to one sweep id.")
 @click.option("--output-dir", required=True)
 def main(headtest_glob, manifest, true_value, tolerance, dataset, uncertainty,
-         exclude_accuracy, exclude_runs, x_axis, arm_manifest,
+         exclude_accuracy, exclude_runs, x_axis, target_label, arm_manifest,
          arm_sweep_id, output_dir):
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -353,7 +404,7 @@ def main(headtest_glob, manifest, true_value, tolerance, dataset, uncertainty,
         ("hits_per_desired", "prelim_hits_per_desired",
          f"Hits / Desired (|Y/{true_value:g} - 1| ≤ {tolerance:g})"),
         ("accuracy", f"prelim_accuracy_{dataset}",
-         f"Accuracy ($r_{{\\mathrm{{exp}}}}$ ≷ {true_value:g})"),
+         f"Accuracy (${target_label}$ ≷ {true_value:g})"),
     ]
     drop_acc = set()
     for spec in (x.strip() for x in exclude_accuracy.split(",") if x.strip()):
