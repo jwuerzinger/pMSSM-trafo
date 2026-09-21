@@ -177,6 +177,13 @@ def main(headtest_glob, manifest, exclude_runs, pool_dir, target, true_value,
 
     drop = [x.strip() for x in exclude_runs.split(",") if x.strip()]
     cells: dict[tuple[str, str], list[Path]] = {}
+    # Campaign rows first, to learn which cells they cover: a headtest_* probe of
+    # a covered cell is that cell's superseded single-seed precursor, not an
+    # extra seed of it. See the same guard in plot_prelim_paper_style.main.
+    arm_rows = [(mdl, arm, d)
+                for mdl, arm, d in iter_arm_rows(arm_manifest, arm_sweep_id)
+                if not any(p in d.name for p in drop)]
+    covered = {(mdl, arm) for mdl, arm, _ in arm_rows}
     for d in sorted(globmod.glob(headtest_glob)):
         d = Path(d)
         m = re.match(r"headtest_([a-z]+)_([a-z]+)_seed", d.name)
@@ -187,6 +194,9 @@ def main(headtest_glob, manifest, exclude_runs, pool_dir, target, true_value,
             continue
         key = (_HEADTEST_MODEL.get(m.group(1), m.group(1)),
                _HEADTEST_ARM.get(m.group(2), m.group(2)))
+        if key in covered:
+            click.echo(f"  [exclude] {d.name} (superseded by campaign seeds)")
+            continue
         cells.setdefault(key, []).append(d)
     if manifest and Path(manifest).exists():
         for r in csv.DictReader(open(manifest)):
@@ -194,9 +204,7 @@ def main(headtest_glob, manifest, exclude_runs, pool_dir, target, true_value,
             d = Path(r["expected_run_dir"])
             if mdl and (d / "state.pt").exists():
                 cells.setdefault((mdl, r["strategy"]), []).append(d)
-    for mdl, arm, d in iter_arm_rows(arm_manifest, arm_sweep_id):
-        if any(p in d.name for p in drop):
-            continue
+    for mdl, arm, d in arm_rows:
         cells.setdefault((mdl, arm), []).append(d)
 
     curves: dict[tuple[str, str], tuple] = {}

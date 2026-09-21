@@ -368,6 +368,21 @@ def main(headtest_glob, manifest, true_value, tolerance, dataset, uncertainty,
             entry["accuracy_baseline"].append((bit, bv))
 
     drop_pats = [x.strip() for x in exclude_runs.split(",") if x.strip()]
+
+    # The campaign's own rows are resolved FIRST, only to learn which (model,
+    # arm) cells it covers. A headtest_* directory is the single-seed probe that
+    # the campaign cell of the same configuration supersedes, so once production
+    # seeds exist the probe is not a sixth seed of that arm, it is an earlier and
+    # much shorter run of it. Counting it made the DMRD panels report seeds=6
+    # against ExpR's seeds=5, pulling the mean and widening the SEM band over the
+    # probe's short |L| range only, with a step where it ends. Probes are still
+    # used for any cell the campaign does not cover, which is what keeps the
+    # glob-only invocation reproducing the original single-seed figures.
+    arm_rows = [(model, arm, d)
+                for model, arm, d in iter_arm_rows(arm_manifest, arm_sweep_id)
+                if not any(pat in d.name for pat in drop_pats)]
+    covered = {(model, arm) for model, arm, _ in arm_rows}
+
     for d in sorted(globmod.glob(headtest_glob)):
         d = Path(d)
         m = re.match(r"headtest_([a-z]+)_([a-z]+)_seed(\d+)_", d.name)
@@ -376,8 +391,12 @@ def main(headtest_glob, manifest, true_value, tolerance, dataset, uncertainty,
         if any(pat in d.name for pat in drop_pats):
             click.echo(f"  [drop] {d.name} (matched --exclude-runs)")
             continue
-        _add(_HEADTEST_MODEL.get(m.group(1), m.group(1)),
-             _HEADTEST_ARM.get(m.group(2), m.group(2)), d, False)
+        h_model = _HEADTEST_MODEL.get(m.group(1), m.group(1))
+        h_arm = _HEADTEST_ARM.get(m.group(2), m.group(2))
+        if (h_model, h_arm) in covered:
+            click.echo(f"  [drop] {d.name} (superseded by campaign seeds)")
+            continue
+        _add(h_model, h_arm, d, False)
 
     if manifest and Path(manifest).exists():
         for r in csv.DictReader(open(manifest)):
@@ -389,9 +408,7 @@ def main(headtest_glob, manifest, true_value, tolerance, dataset, uncertainty,
     # is_ref=False on purpose: the "reference: N seeds" annotation is about the
     # benchmark arm each panel is measured against, and these are the arms being
     # measured. They aggregate over seeds exactly like the reference does.
-    for model, arm, d in iter_arm_rows(arm_manifest, arm_sweep_id):
-        if any(pat in d.name for pat in drop_pats):
-            continue
+    for model, arm, d in arm_rows:
         _add(model, arm, d, False)
 
     for (mdl, arm), e in sorted(cells.items()):
