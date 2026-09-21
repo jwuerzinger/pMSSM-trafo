@@ -138,6 +138,11 @@ def _sparsification(abs_err: np.ndarray, sigma: np.ndarray):
     """RMSE-of-retained curves after removing the top-f fraction by sigma
     (model) and by |error| (oracle), both normalised to the full-set RMSE."""
     n = len(abs_err)
+    if n == 0:
+        # Belt to the caller's braces: nothing to sparsify, and a nan curve is a
+        # readable "not measured" in the JSON where an exception is a dead step.
+        nan_curve = [float("nan")] * len(SPARS_FRACS)
+        return {"model": nan_curve, "oracle": list(nan_curve)}, float("nan")
     sq = abs_err ** 2
     rmse_full = float(np.sqrt(sq.mean()))
     curves = {}
@@ -682,8 +687,15 @@ def main(manifest, baseline_data_dir, mcmc_data_dir, cache_dir, output_dir,
             click.echo(f"[uq] {model}-{strat}-{warm}: no manifest rows — skipped")
             continue
         n_ev = tabpfn_eval_size if base_type == "tabpfn" else eval_size
-        eval_sets = {"static_random": (X_static[:n_ev], Y_static[:n_ev]),
-                     "mcmc": (X_mcmc[:n_ev], Y_mcmc[:n_ev])}
+        # An eval set with no rows is skipped rather than scored. ExpR has no
+        # posterior, so the regen passes --mcmc-data-dir "" and X_mcmc is empty;
+        # scoring it reached _sparsification with a zero-length array and raised
+        # IndexError, which killed the whole UQ family for that target. Checked
+        # here rather than only guarded downstream, so the metrics record does
+        # not carry a dataset the target does not have.
+        eval_sets = {"static_random": (X_static[:n_ev], Y_static[:n_ev])}
+        if len(X_mcmc):
+            eval_sets["mcmc"] = (X_mcmc[:n_ev], Y_mcmc[:n_ev])
         click.echo(f"[uq] {model}/{strat}/{warm}: {len(sel)} seed run(s)")
         per_seed: dict = {}
         for r in sel:
