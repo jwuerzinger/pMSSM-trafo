@@ -67,6 +67,8 @@ ARCHIVE=/viper/u2/jwuerzin/pmssm-archive/plots
 # One shared parsed-pool cache across every step. Without it each step re-parses
 # ~1500 ROOT files from GPFS before drawing anything, ~30 min per pass.
 PC=/ptmp/jwuerzin/analysis/pool_cache
+# The relic-density posterior, for the emcee-support coverage variant.
+MCMC_POOL=/ptmp/jwuerzin/data/neutralino_v4
 J=/ptmp/jwuerzin/analysis/joint
 STAMP=$(date +%Y%m%d)
 
@@ -208,6 +210,16 @@ regen_target () {
         --manifest "${M}" --output-dir "${O}" --cache-dir "${O}" \
         --baseline-data-dir "${POOL}" --support-source pool --model-tag "${TAG}" \
         $( [[ ${T} == ExpR ]] && echo "--target ExpR" ) 2>&1 | tail -3
+    # The emcee-support variant writes coverage_saturation.png with no suffix,
+    # which is the name the paper carries alongside the _pool one. Only the
+    # pool source was being run, so that figure had been frozen since August.
+    # DMRD only: the emcee support needs a posterior, which ExpR has not got.
+    if [[ "${T}" == "DMRD" ]]; then
+        "${PY}" scripts/coverage_saturation.py \
+            --manifest "${M}" --output-dir "${O}" --cache-dir "${O}" \
+            --baseline-data-dir "${POOL}" --support-source mcmc \
+            --mcmc-data-dir "${MCMC_POOL}" --model-tag "${TAG}" 2>&1 | tail -3
+    fi
     for side in in out; do
         "${PY}" scripts/plot_support_efficiency.py \
             --manifest "${M}" --output-dir "${O}" --cache-dir "${O}" \
@@ -275,6 +287,16 @@ for spec in "ExpR:/ptmp/jwuerzin/analysis/expr_runs/sweep_manifest.csv:${J}/mani
         --pool-dir "${POOL}" --target "${T}" --true-value "${TV}" \
         --n-bins 12 --min-cell 20 --expect-cells 0 \
         --pool-cache-dir "${PC}" --output-dir "${OUT}" 2>&1 | tail -8
+    # Covered support against cumulative GPU-hours. This was written after the
+    # regen and never wired in, so prelim_arms_compute_support.png in both
+    # figure directories had never been refreshed since it was first made by
+    # hand on 2026-09-10, while every other arm figure moved with each cycle.
+    # It takes no headtest glob: it reads the campaign rows only.
+    "${PY}" scripts/plot_prelim_compute_support.py \
+        --manifest "${JOINT}" --arm-manifest "${SWEEP}" "${ARM_ID_ARGS[@]}" \
+        --pool-dir "${POOL}" --target "${T}" --true-value "${TV}" \
+        --n-bins 12 --min-cell 20 --expect-cells 0 \
+        --pool-cache-dir "${PC}" --output-dir "${OUT}" 2>&1 | tail -6
 done
 
 # ---- 5. into the paper -------------------------------------------------------
@@ -310,24 +332,41 @@ RENAME = {
     "prelim_hits_per_desired_vs_size.png": "prelim_arms_hits_per_desired_size.png",
     "prelim_accuracy_static_random_vs_size.png": "prelim_arms_accuracy_size.png",
     "prelim_support_inband.png": "prelim_arms_support.png",
+    "prelim_compute_support_inband.png": "prelim_arms_compute_support.png",
 }
 for dest_dir, src_dir in SRC.items():
     dest = paper / dest_dir
     have = {p.name for p in dest.glob("*.png")}
-    copied = skipped = unknown = 0
+    # Resolve each paper figure to ONE source: the newest render carrying that
+    # name anywhere in the search roots.
+    #
+    # The roots overlap. all_runs/ and all_runs/al_diag/ share 66 basenames,
+    # including omega_overlay, input_overlay_inband and every corner_*, because
+    # plot_al_input_target_diagnostics once wrote into the subdirectory and now
+    # writes into the parent. Copying root by root meant al_diag/ was visited
+    # last and its August renders overwrote the fresh ones that had just been
+    # written, so those figures silently stayed at their 2026-08-10 content
+    # through every cycle while the step still reported them as updated.
+    # Choosing by mtime is indifferent to which directory a script writes to.
+    best: dict[str, Path] = {}
+    unknown = 0
     for src_root in (src_dir, FINAL[dest_dir], src_dir / "al_diag"):
         if not src_root.is_dir():
             continue
         for p in sorted(src_root.glob("*.png")):
             target = RENAME.get(p.name, p.name)
-            if target in have:
-                shutil.copy2(p, dest / target)
-                copied += 1
-            elif p.name in RENAME:
-                unknown += 1     # a composite the paper does not carry yet
-            else:
-                skipped += 1
-    print(f"  {dest_dir}: {copied} updated, {skipped} renders the paper does not "
+            if target not in have:
+                if p.name in RENAME:
+                    unknown += 1   # a composite the paper does not carry yet
+                continue
+            prev = best.get(target)
+            if prev is None or p.stat().st_mtime > prev.stat().st_mtime:
+                best[target] = p
+    for target, p in sorted(best.items()):
+        shutil.copy2(p, dest / target)
+    skipped = sum(1 for r in (src_dir, FINAL[dest_dir], src_dir / "al_diag")
+                  if r.is_dir() for _ in r.glob("*.png")) - len(best) - unknown
+    print(f"  {dest_dir}: {len(best)} updated, {skipped} renders the paper does not "
           f"use, {unknown} composite(s) not yet referenced")
 PYCOPY
 else
