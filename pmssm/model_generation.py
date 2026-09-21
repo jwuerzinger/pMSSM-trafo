@@ -126,6 +126,36 @@ def _run_modelgen(df, output_dir, logger, label="", target="DMRD"):
     scan_dir = output_dir / "scan"
     scan_dir.mkdir(parents=True, exist_ok=True)
 
+    # Clear any Snakemake lock left in THIS worker's workspace.
+    #
+    # genModels.py runs snakemake with output_dir as its working directory, so
+    # the lock lives in output_dir/.snakemake/locks and belongs to this worker
+    # alone: no other process shares the directory. A lock present before we
+    # start is therefore always stale, left by a previous attempt that was
+    # killed (the 24 h wall clock, or AL_MODELGEN_TIMEOUT killing the process
+    # group). Snakemake refuses to run and says as much:
+    #
+    #   Error: Directory cannot be locked. ... the remaining lock was likely
+    #   caused by a kill signal or a power loss. It can be removed with the
+    #   --unlock argument.
+    #
+    # Left in place this is a permanent deadlock rather than a slow run: a
+    # resumed run re-enters the same iteration_NNN/worker_NN directory, because
+    # that iteration never completed, and fails on the same lock every time.
+    # Two ExpR TabPFN cells sat at iteration 1 for weeks this way, with 80 stale
+    # lock files between them.
+    lock_dir = output_dir / ".snakemake" / "locks"
+    if lock_dir.is_dir():
+        stale = sorted(lock_dir.iterdir())
+        if stale:
+            for f in stale:
+                try:
+                    f.unlink() if f.is_file() else shutil.rmtree(f)
+                except OSError as err:
+                    logger.warning(f"{prefix}could not clear stale lock {f}: {err}")
+            logger.info(f"{prefix}cleared {len(stale)} stale snakemake lock(s) "
+                        f"in {lock_dir.parent.parent.name}")
+
     project_root = Path(__file__).parent.parent.resolve()
     run3modelgen_dir = project_root / "Run3ModelGen"
     setup_script = run3modelgen_dir / "build" / "setup.sh"
