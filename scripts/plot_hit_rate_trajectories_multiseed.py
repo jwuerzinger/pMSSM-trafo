@@ -913,6 +913,11 @@ def _build_eval_sets(run_dir: Path, state: dict, seed: int,
     }
 
 
+# Only Linear layers carry weights in PMSSMFeedForward.fc_layers, so counting
+# these keys gives num_layers whether or not dropout modules sit between them.
+_FF_LAYER_W_RE = re.compile(r"fc_layers\.\d+\.weight")
+
+
 def _load_iter_model(model_type: str, role: str, iter_dir: Path,
                      X_train_i: torch.Tensor, Y_train_i: torch.Tensor,
                      X_val_i: torch.Tensor, Y_val_i: torch.Tensor,
@@ -944,24 +949,31 @@ def _load_iter_model(model_type: str, role: str, iter_dir: Path,
         model.load_state_dict(torch.load(ckpt_path, map_location=device))
         return model.to(device)
 
-    if model_type == "dnn":
+    if model_type in ("dnn", "dnn_match_trafo"):
         if not ckpt_path.exists():
             return None
         from pmssm.models import PMSSMFeedForward  # noqa: PLC0415
-        # Architecture must match active_learning_dnn.py defaults.
-        model = PMSSMFeedForward(n_params=19, d_model=64, num_layers=4,
-                                 dim_feedforward=256, dropout=dropout)
-        model.load_state_dict(torch.load(ckpt_path, map_location=device))
-        return model.to(device)
-
-    if model_type == "dnn_match_trafo":
-        if not ckpt_path.exists():
-            return None
-        from pmssm.models import PMSSMFeedForward  # noqa: PLC0415
-        # Hyperparams chosen to roughly match transformer's parameter budget.
-        model = PMSSMFeedForward(n_params=19, d_model=64, num_layers=3,
-                                 dim_feedforward=400, dropout=dropout)
-        model.load_state_dict(torch.load(ckpt_path, map_location=device))
+        # The architecture is read off the checkpoint rather than hardcoded per
+        # model_type. The two DNN arms differ only in width and depth (dnn is
+        # num_layers=4/dim_feedforward=256, dnn_match_trafo is 3/400 to match the
+        # transformer's parameter budget), and the label in the manifest is not a
+        # reliable statement of which one a given run actually trained: a
+        # dnn_match_trafo cell submitted before submit_strategy_sweep.sh carried
+        # --num-layers 3 --dim-feedforward 400 trained a plain 256-wide network
+        # under the matched name. Hardcoding 400 for it raised
+        #   size mismatch for fc_layers.0.bias: copying a param with shape
+        #   torch.Size([256]) ... the shape in current model is torch.Size([400])
+        # and took down the whole UQ family for the target. The weights cannot
+        # misdescribe themselves, so they are the authority here.
+        sd = torch.load(ckpt_path, map_location=device)
+        d_model = int(sd["input_embed.weight"].shape[0])
+        n_layers = sum(1 for k in sd if _FF_LAYER_W_RE.fullmatch(k))
+        dim_ff = int(sd["fc_layers.0.weight"].shape[0])
+        n_params = int(sd["fc_layers.0.weight"].shape[1] // d_model)
+        model = PMSSMFeedForward(n_params=n_params, d_model=d_model,
+                                 num_layers=n_layers, dim_feedforward=dim_ff,
+                                 dropout=dropout)
+        model.load_state_dict(sd)
         return model.to(device)
 
     if model_type in ("exact_gp", "deep_gp", "sparse_gp", "laplace_gpc"):
