@@ -195,7 +195,26 @@ regen_target () {
     step "3/6 [${T}] per-seed, R2, MSE, compute, coverage, support, inputs"
     "${PY}" scripts/plot_hit_rate_seeds_per_model.py \
         --manifest "${M}" --output-dir "${O}" --baseline-data-dir "${POOL}" \
-        --tolerances 0.10,0.20,0.50 $( [[ ${T} == ExpR ]] && echo "--target ExpR" ) \
+        --tolerances 0.10,0.20,0.50 "${T_ONLY[@]}" \
+        2>&1 | tail -3
+    # The default pass renders only the current per-model picks, but the
+    # supplementary names specific cells by file: the top_k warm and
+    # entropy_batch warm per-seed panels. Those are not the picks any more, so
+    # their figures had been frozen at 2026-08-14 while the rest refreshed each
+    # cycle. One extra pass per referenced (strategy, warm) pair renders them.
+    for _sw in "top_k:warm" "entropy_batch:warm"; do
+        "${PY}" scripts/plot_hit_rate_seeds_per_model.py \
+            --manifest "${M}" --output-dir "${O}" --baseline-data-dir "${POOL}" \
+            --tolerances 0.10,0.20,0.50 "${T_ONLY[@]}" \
+            --strategy "${_sw%%:*}" --warm-start "${_sw##*:}" 2>&1 | tail -2
+    done
+    # Chain and AL-replica convergence diagnostics. Compares the AL cells, so it
+    # moves with the campaign, but it was never in this script and both
+    # mcmc_diagnostics_comparison.png and al_diagnostics_comparison.png had sat
+    # at their August renders. ExpR has no chains, hence --skip-mcmc there.
+    "${PY}" scripts/mcmc_diagnostics.py \
+        --al-manifest "${M}" --output-dir "${O}" \
+        $( [[ ${T} == ExpR ]] && echo "--skip-mcmc" || echo "--data-dir ${MCMC_POOL}" ) \
         2>&1 | tail -3
     "${PY}" scripts/plot_r2_trajectories_multiseed.py \
         --manifest "${M}" --output-dir "${O}" 2>&1 | tail -2
@@ -227,9 +246,18 @@ regen_target () {
             --band-side "${side}" --run-set-label joint \
             $( [[ ${T} == ExpR ]] && echo "--target ExpR" ) 2>&1 | tail -3
     done
+    # --baseline-data-dir defaults to the relic-density pool, so without it the
+    # ExpR invocation read 18387358 and died on
+    #   KeyInFileError: not found: 'SModelS_bestExpR_r_expected'
+    # leaving figures_expr/coverage_diversity_joint.png frozen since August
+    # while its DMRD twin refreshed every cycle. The pool is passed explicitly
+    # for both targets now, which is the only form that cannot inherit a
+    # relic-density default.
     "${PY}" scripts/plot_diversity_vs_budget.py \
         --manifest "${M}" --output-dir "${O}" --model-tag "${TAG}" \
-        --run-set-label joint $( [[ ${T} == ExpR ]] && echo "--target ExpR --no-mcmc" ) \
+        --baseline-data-dir "${POOL}" --pool-cache "${PC}" \
+        --run-set-label joint "${T_ONLY[@]}" \
+        $( [[ ${T} == ExpR ]] && echo "--no-mcmc" ) \
         2>&1 | tail -3
     "${PY}" scripts/plot_al_input_target_diagnostics.py \
         --manifest "${M}" --output-dir "${O}" --cache-dir "${O}" \
