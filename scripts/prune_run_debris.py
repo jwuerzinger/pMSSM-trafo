@@ -70,6 +70,20 @@ from pathlib import Path
 
 import click
 
+# The in-loop packer. Using it here rather than a second implementation means a
+# retrofitted run ends up indistinguishable from a campaign run: the ntuples
+# are moved out to iteration_NNN/ntuples/ before the tar is written, so
+# composition_fractions.py still finds them, and the SModelS winners are
+# summarised to smodels_best_analysis.json first, so best_analysis_arms.py,
+# best_analysis_from_smodels.py and mode_switch_diagnostic.py can read the
+# record through load_iteration_smodels() without expanding the tar. Nothing
+# that reads a run needs an untar afterwards.
+import logging
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from pmssm.iteration_housekeeping import (            # noqa: E402
+    pack_iteration_debris, summarise_smodels)
+
 
 def _debris(iter_dir: Path):
     return sorted([p for p in iter_dir.glob("worker_*") if p.is_dir()] +
@@ -91,8 +105,10 @@ def _measure(paths):
 
 
 @click.command()
-@click.option("--runs", default="/ptmp/jwuerzin/output/*", show_default=True,
-              help="Glob over run directories.")
+@click.option("--runs", multiple=True, default=["/ptmp/jwuerzin/output/*"],
+              show_default=True,
+              help="Glob over run directories; repeatable, so a batch can be "
+                   "given as explicit directories.")
 @click.option("--keep-last", default=3, show_default=True,
               help="Leave the debris of this many newest iterations alone. The "
                    "in-progress iteration is the highest-numbered one, and a "
@@ -137,7 +153,8 @@ def main(runs, keep_last, max_dirs, deadline_min, min_age_hours, mode,
     n_runs = 0
     stopped = ""
 
-    for run in sorted(glob.glob(runs)):
+    log = logging.getLogger("prune")
+    for run in sorted(set(r for g in runs for r in glob.glob(g))):
         run = Path(run)
         if not run.is_dir():
             continue
@@ -164,36 +181,24 @@ def main(runs, keep_last, max_dirs, deadline_min, min_age_hours, mode,
             run_d += len(paths)
             if apply:
                 if mode == "tar":
-                    # Pack, then verify by READING THE ARCHIVE BACK AND COUNTING,
-                    # and only then remove the trees. "the archive is not empty"
-                    # is not a verification: a tar truncated by a full filesystem
-                    # or an I/O error part-way through would satisfy it and the
-                    # only copy of the data would then be deleted. The count must
-                    # equal the count measured on disk a moment ago, or the source
-                    # stays and the half-written tar goes.
-                    tarball = it / "debris.tar"
-                    try:
-                        with tarfile.open(tarball, "w") as tf:
-                            for p in paths:
-                                tf.add(p, arcname=p.name)
-                        with tarfile.open(tarball, "r") as tf:
-                            packed = sum(1 for m in tf.getmembers() if m.isfile())
-                        if packed != f:
-                            raise OSError(f"packed {packed} files, expected {f}")
-                    except Exception as exc:                # noqa: BLE001
-                        click.echo(f"  [keep] {it}: NOT removed, pack failed "
-                                   f"({type(exc).__name__}: {exc})")
-                        tarball.unlink(missing_ok=True)
+                    # SModelS summary first: it reads the *.slha.py files that
+                    # are about to move into the tar. A DMRD run has none and
+                    # the call returns None, which is fine.
+                    summarise_smodels(it, log, true_value=1.0, tolerance=0.10)
+                    # Then the verified pack: counts the files on disk, writes
+                    # the tar, reads it back and compares the member count, and
+                    # only then removes the trees. On any mismatch the tar is
+                    # unlinked and the trees stay. Nothing is removed that has
+                    # not been read back out of its archive.
+                    info = pack_iteration_debris(it, log)
+                    if info is None:
+                        click.echo(f"  [keep] {it}: NOT removed (pack skipped "
+                                   f"or failed; see the housekeeping log line)")
                         continue
-                    # Removal is reported, not silenced: rmtree(ignore_errors)
-                    # would leave a half-removed tree looking like a success.
-                    for pth in paths:
-                        errs = []
-                        shutil.rmtree(pth, onerror=lambda *a: errs.append(a[1]))
-                        if errs or pth.exists():
-                            click.echo(f"  [warn] {pth} not fully removed "
-                                       f"({len(errs)} error(s)); its data is in "
-                                       f"{tarball.name}")
+                    # run_f was accumulated from the pre-rescue measure above,
+                    # which still counted the ntuples that were then moved out
+                    # loose. Report what actually went into the archive.
+                    run_f += info["files"] - f
                 else:
                     for p in paths:
                         shutil.rmtree(p, ignore_errors=True)
