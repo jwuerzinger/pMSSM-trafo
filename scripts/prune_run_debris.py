@@ -90,6 +90,31 @@ def _debris(iter_dir: Path):
                   [p for p in iter_dir.glob("retry_*") if p.is_dir()])
 
 
+def _recover_interrupted(it: Path, paths, apply: bool) -> bool:
+    """Handle debris.tar + leftover trees. True means "pack this iteration now"."""
+    tarball = it / "debris.tar"
+    on_disk = {str(Path(r, f).relative_to(it))
+               for p in paths for r, _d, fs in os.walk(p) for f in fs}
+    try:
+        with tarfile.open(tarball, "r") as tf:
+            inside = {m.name for m in tf.getmembers() if m.isfile()}
+        complete = bool(inside) and on_disk <= inside
+    except Exception:                                          # noqa: BLE001
+        complete = False
+    if complete:
+        click.echo(f"  [recover] {it}: tar complete, finishing the removal")
+        if apply:
+            for pth in paths:
+                shutil.rmtree(pth, ignore_errors=False)
+        return False
+    aside = it / f"debris.tar.interrupted_{int(time.time())}"
+    click.echo(f"  [recover] {it}: tar truncated, set aside as {aside.name}; "
+               f"re-packing ({len(on_disk):,} files still on disk)")
+    if apply:
+        tarball.rename(aside)
+    return apply
+
+
 def _measure(paths):
     """(bytes, files) without following symlinks; cheap enough at this scale."""
     nb = nf = 0
@@ -168,7 +193,16 @@ def main(runs, keep_last, max_dirs, deadline_min, min_age_hours, mode,
             if not paths:
                 continue
             if (it / "debris.tar").exists():
-                continue        # already packed on an earlier pass
+                # A tar beside leftover trees means an earlier pass was killed
+                # between writing it and removing them. Do not trust it either
+                # way without reading it: if it holds every file still on disk
+                # the earlier pass had already verified it and only the removal
+                # is missing; otherwise it was cut off mid-write, so it is set
+                # aside (renamed, never deleted) and the iteration is packed
+                # afresh. Skipping it, as this did before, left such an
+                # iteration unpacked for good.
+                if not _recover_interrupted(it, paths, apply):
+                    continue
             if min_age_hours:
                 try:
                     if now - it.stat().st_mtime < min_age_hours * 3600:
