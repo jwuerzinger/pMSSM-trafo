@@ -203,7 +203,10 @@ def main(runs, keep_last, max_dirs, deadline_min, min_age_hours, mode,
                 # iteration unpacked for good.
                 if not _recover_interrupted(it, paths, apply):
                     continue
-            if min_age_hours:
+                recovered = True    # the rename just touched the dir's mtime
+            else:
+                recovered = False
+            if min_age_hours and not recovered:
                 try:
                     if now - it.stat().st_mtime < min_age_hours * 3600:
                         continue
